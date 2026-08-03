@@ -27,6 +27,7 @@ import { confirmOutboundDelivery, publishMessageUpdated } from "./delivery-statu
 import { resolveOutgoingMediaSendMode } from "./outgoing-media";
 import {
   TelegramPeerUnresolvedError,
+  classifyTelegramPeerRpcError,
   isPeerEntityResolutionError,
   prefetchDialogEntities,
   type PeerResolutionHints,
@@ -610,6 +611,17 @@ async function markAccountFailure(
   command: Prisma.TelegramOutboundCommandGetPayload<{ include: { telegramAccount: { include: { developerApp: true } } } }>,
   error: unknown
 ): Promise<TelegramFailureClassification> {
+  const peerRpc = classifyTelegramPeerRpcError(error);
+  if (peerRpc) {
+    return {
+      nextAuthorizationState: "AUTHORIZED",
+      nextSyncState: "LIVE",
+      nextStatus: "CONNECTED",
+      safeErrorCode: peerRpc.code,
+      safeUserMessage: peerRpc.message,
+      retryable: peerRpc.retryable
+    };
+  }
   if (isPeerEntityResolutionError(error)) {
     const message = error instanceof Error ? error.message : String(error);
     if (/INPUT_USER_DEACTIVATED/i.test(message)) {
@@ -1144,9 +1156,9 @@ async function processSendMediaJob(
     await prisma.telegramOutboundCommand.update({
       where: { id: command.id },
       data: {
-        // Peer unresolved stays FAILED_RETRYABLE even after attempt budget — needs explicit Retry after repair.
+        // Peer repair errors stay FAILED_RETRYABLE even after attempt budget — needs explicit Retry after repair.
         status:
-          failure.safeErrorCode === "TELEGRAM_PEER_UNRESOLVED" || (failure.retryable && command.attempts < 4)
+          isPeerRepairRetryableError(failure.safeErrorCode) || (failure.retryable && command.attempts < 4)
             ? "FAILED_RETRYABLE"
             : "FAILED_PERMANENT",
         lastError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage),
@@ -1372,7 +1384,7 @@ async function processSendTextJob(
       where: { id: command.id },
       data: {
         status:
-          failure.safeErrorCode === "TELEGRAM_PEER_UNRESOLVED" || (failure.retryable && command.attempts < 4)
+          isPeerRepairRetryableError(failure.safeErrorCode) || (failure.retryable && command.attempts < 4)
             ? "FAILED_RETRYABLE"
             : "FAILED_PERMANENT",
         lastError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage),
@@ -1988,12 +2000,23 @@ function formatSafeCommandError(code: string, message: string): string {
   return `${code}: ${message}`.slice(0, 500);
 }
 
+function isPeerRepairRetryableError(code: string): boolean {
+  return (
+    code === "TELEGRAM_PEER_UNRESOLVED" ||
+    code === "TELEGRAM_PEER_CONSTRUCTION_FAILED" ||
+    code === "TELEGRAM_ACCESS_HASH_PARSE_FAILED" ||
+    code === "TELEGRAM_ACCESS_HASH_INVALID" ||
+    code === "TELEGRAM_PEER_ID_INVALID" ||
+    code === "TELEGRAM_PEER_REJECTED"
+  );
+}
+
 /** Safe worker errors that should leave the Atlas message FAILED_RETRYABLE (never stuck pending). */
 function isSafeWorkerErrorRetryable(code: string): boolean {
   return (
     code === "TELEGRAM_ACCOUNT_LEASE_BUSY" ||
     code === "TELEGRAM_LIVE_RUNTIME_UNAVAILABLE" ||
-    code === "TELEGRAM_PEER_UNRESOLVED"
+    isPeerRepairRetryableError(code)
   );
 }
 
@@ -2101,22 +2124,14 @@ async function persistResolvedPeer(
 }
 
 function throwAsSafePeerError(error: unknown): never {
+  const classified = classifyTelegramPeerRpcError(error);
+  if (classified) {
+    throw new SafeTelegramWorkerError(classified.code, classified.message);
+  }
   if (error instanceof TelegramPeerUnresolvedError) {
     throw new SafeTelegramWorkerError(error.code, error.message);
   }
-  const message = error instanceof Error ? error.message : String(error);
-  if (/INPUT_USER_DEACTIVATED/i.test(message)) {
-    throw new SafeTelegramWorkerError(
-      "TELEGRAM_PEER_DEACTIVATED",
-      "This Telegram user account is deactivated. Messages cannot be sent to this peer."
-    );
-  }
-  if (isPeerEntityResolutionError(error)) {
-    throw new SafeTelegramWorkerError(
-      "TELEGRAM_PEER_UNRESOLVED",
-      "This Telegram chat cannot be reached right now. Atlas has no access hash for this peer yet — open or message the chat from Telegram once, then sync again."
-    );
-  }
+  // Do not collapse unknown Telegram RPC / network errors into TELEGRAM_PEER_UNRESOLVED.
   throw error;
 }
 

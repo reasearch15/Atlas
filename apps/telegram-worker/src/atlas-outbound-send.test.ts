@@ -101,11 +101,14 @@ describe("Atlas outbound send path", () => {
       getDialogs: async () => {
         throw new Error("should not fetch dialogs when stored hash works");
       },
-      invoke: async () => []
+      invoke: async () => {
+        throw new Error("GetUsers enrichment must not be required for direct InputPeer");
+      }
     };
     const InputPeerUser = class {
       userId: unknown;
       accessHash: unknown;
+      className = "InputPeerUser";
       constructor(input: { userId: unknown; accessHash: unknown }) {
         this.userId = input.userId;
         this.accessHash = input.accessHash;
@@ -132,6 +135,48 @@ describe("Atlas outbound send path", () => {
     expect(resolved.accessHash).toBe("8949449174917549431");
     expect(resolved.peerType).toBe("USER");
     expect(resolved.telegramChatId).toBe("5476500286");
+    expect(resolved.inputPeer).toBeInstanceOf(InputPeerUser);
+  });
+
+  it("does not discard direct InputPeer when GetUsers enrichment throws", async () => {
+    const InputPeerUser = class {
+      userId: unknown;
+      accessHash: unknown;
+      className = "InputPeerUser";
+      constructor(input: { userId: unknown; accessHash: unknown }) {
+        this.userId = input.userId;
+        this.accessHash = input.accessHash;
+      }
+    };
+    const runtime = {
+      accountId: "acc",
+      client: {
+        getEntity: async () => {
+          throw new Error("Could not find the input entity");
+        },
+        getDialogs: async () => {
+          throw new Error("dialogs fallback must not run");
+        },
+        invoke: async () => {
+          throw new Error("ACCESS_HASH_INVALID");
+        }
+      },
+      Api: {
+        InputPeerUser,
+        InputUser: InputPeerUser,
+        users: { GetUsers: class {} },
+        channels: { GetChannels: class {} }
+      }
+    } as never;
+
+    const resolved = await resolveInputPeer(runtime, {
+      telegramChatId: "5476500286",
+      chatType: "PRIVATE",
+      peerType: "USER",
+      accessHash: "8949449174917549431"
+    });
+    expect(resolved.inputPeer).toBeInstanceOf(InputPeerUser);
+    expect(resolved.accessHash).toBe("8949449174917549431");
   });
 
   it("repairs incomplete chat identity from the next inbound peer fields without duplicating the conversation key", () => {

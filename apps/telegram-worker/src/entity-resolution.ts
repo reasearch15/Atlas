@@ -41,6 +41,134 @@ export class TelegramPeerUnresolvedError extends Error {
 }
 
 /**
+ * Raised when stored peer metadata cannot be parsed into a GramJS InputPeer.
+ * Distinct from entity-lookup failure and Telegram RPC peer rejection.
+ */
+export class TelegramPeerConstructionError extends Error {
+  public readonly code = "TELEGRAM_PEER_CONSTRUCTION_FAILED";
+
+  public constructor(message: string) {
+    super(message);
+    this.name = "TelegramPeerConstructionError";
+  }
+}
+
+/**
+ * Raised when access_hash / telegram_chat_id cannot be parsed as BigInt.
+ */
+export class TelegramAccessHashParseError extends Error {
+  public readonly code = "TELEGRAM_ACCESS_HASH_PARSE_FAILED";
+
+  public constructor(message: string) {
+    super(message);
+    this.name = "TelegramAccessHashParseError";
+  }
+}
+
+export interface PeerConstructionDiagnostics {
+  readonly peerType: string | null;
+  readonly telegramChatIdPresent: boolean;
+  readonly accessHashPresent: boolean;
+  readonly telegramChatIdParseOk: boolean;
+  readonly accessHashParseOk: boolean;
+  readonly constructedPeerClass: string | null;
+  readonly resolutionPath: string;
+}
+
+/**
+ * Safe peer-construction diagnostics — never includes access hash values.
+ */
+export function buildPeerConstructionDiagnostics(
+  hints: PeerResolutionHints,
+  constructedPeerClass: string | null = null,
+  resolutionPath = "stored_direct"
+): PeerConstructionDiagnostics {
+  const peerType = normalizePeerType(hints.peerType, hints.chatType, hints.telegramChatId);
+  const telegramChatIdPresent = Boolean(hints.telegramChatId?.trim());
+  const accessHashPresent = Boolean(hints.accessHash != null && String(hints.accessHash).trim());
+  let telegramChatIdParseOk = false;
+  let accessHashParseOk = false;
+  try {
+    if (telegramChatIdPresent && peerType) {
+      parseTelegramBigInt(barePeerId(hints.telegramChatId, peerType), "telegramChatId");
+      telegramChatIdParseOk = true;
+    }
+  } catch {
+    telegramChatIdParseOk = false;
+  }
+  try {
+    if (accessHashPresent) {
+      parseTelegramBigInt(hints.accessHash, "accessHash");
+      accessHashParseOk = true;
+    }
+  } catch {
+    accessHashParseOk = false;
+  }
+  return {
+    peerType,
+    telegramChatIdPresent,
+    accessHashPresent,
+    telegramChatIdParseOk,
+    accessHashParseOk,
+    constructedPeerClass,
+    resolutionPath
+  };
+}
+
+/**
+ * Read-only compare of stored peer metadata vs live dialog/entity fields.
+ * Never prints access hash values — only presence and equality flags.
+ */
+export function diagnoseStoredPeerAgainstLive(
+  stored: {
+    readonly peerType?: string | null;
+    readonly telegramChatId?: string | null;
+    readonly accessHash?: string | null;
+  },
+  live: {
+    readonly peerType?: string | null;
+    readonly telegramChatId?: string | null;
+    readonly accessHash?: string | null;
+  } | null
+): {
+  readonly storedPeerType: string | null;
+  readonly storedTelegramChatIdPresent: boolean;
+  readonly storedAccessHashPresent: boolean;
+  readonly liveAvailable: boolean;
+  readonly livePeerType: string | null;
+  readonly liveTelegramChatIdPresent: boolean;
+  readonly liveAccessHashPresent: boolean;
+  readonly peerTypeMatches: boolean | null;
+  readonly telegramChatIdMatches: boolean | null;
+  readonly accessHashMatches: boolean | null;
+  readonly possibleStaleAccessHash: boolean;
+} {
+  const storedHash = accessHashAsString(stored.accessHash);
+  const liveHash = live ? accessHashAsString(live.accessHash) : null;
+  const accessHashMatches =
+    storedHash && liveHash ? storedHash === liveHash : storedHash || liveHash ? false : null;
+  return {
+    storedPeerType: stored.peerType ? String(stored.peerType).toUpperCase() : null,
+    storedTelegramChatIdPresent: Boolean(stored.telegramChatId?.trim()),
+    storedAccessHashPresent: Boolean(storedHash),
+    liveAvailable: Boolean(live),
+    livePeerType: live?.peerType ? String(live.peerType).toUpperCase() : null,
+    liveTelegramChatIdPresent: Boolean(live?.telegramChatId?.trim()),
+    liveAccessHashPresent: Boolean(liveHash),
+    peerTypeMatches:
+      stored.peerType && live?.peerType
+        ? String(stored.peerType).toUpperCase() === String(live.peerType).toUpperCase()
+        : null,
+    telegramChatIdMatches:
+      stored.telegramChatId && live?.telegramChatId
+        ? String(stored.telegramChatId) === String(live.telegramChatId)
+        : null,
+    accessHashMatches,
+    possibleStaleAccessHash: accessHashMatches === false
+  };
+}
+
+/**
  * Central GramJS input-peer resolver.
  * Never constructs InputPeerUser/Channel without accessHash, and never passes bare numeric user ids.
  */
@@ -53,7 +181,10 @@ export async function resolveInputPeer(
 
 /**
  * Resolves a GramJS entity/input peer without relying on a raw user id alone.
- * Order: stored InputPeer → username → phone → dialogs/entities → GetUsers/GetChannels → fail cleanly.
+ * Order: stored InputPeer (immediate) → username → phone → dialogs/entities → GetUsers/GetChannels → fail cleanly.
+ *
+ * When stored USER/CHANNEL peer_type + access_hash construct a valid InputPeer, that peer is returned
+ * immediately. Enrichment failures must never discard a successfully constructed InputPeer.
  */
 export async function resolveTelegramPeer(
   runtime: TelegramRuntime,
@@ -63,15 +194,64 @@ export async function resolveTelegramPeer(
   const peerTypeHint = normalizePeerType(hints.peerType, hints.chatType, hints.telegramChatId);
 
   if (hints.accessHash && peerTypeHint && peerTypeHint !== "CHAT") {
-    try {
-      const inputPeer = await buildInputPeer(runtime, hints.telegramChatId, peerTypeHint, hints.accessHash);
-      const enriched =
-        (await tryGetEntity(runtime, inputPeer)) ??
-        (await fetchViaGetUsersOrChannels(runtime, hints)) ??
-        inputPeer;
-      return await toResolved(runtime, enriched, hints.telegramChatId, inputPeer, hints);
-    } catch (error) {
-      errors.push(`input_peer:${errorMessage(error)}`);
+    const preDiagnostics = buildPeerConstructionDiagnostics(hints, null, "stored_direct");
+    logPeerConstructionDiagnostics(preDiagnostics);
+
+    if (!preDiagnostics.telegramChatIdParseOk || !preDiagnostics.accessHashParseOk) {
+      errors.push(
+        `direct_construction_parse:telegramChatIdParseOk=${preDiagnostics.telegramChatIdParseOk},accessHashParseOk=${preDiagnostics.accessHashParseOk}`
+      );
+    } else {
+      try {
+        const inputPeer = await buildInputPeer(
+          runtime,
+          hints.telegramChatId,
+          peerTypeHint,
+          hints.accessHash
+        );
+        const constructedPeerClass = peerClassName(inputPeer);
+        logPeerConstructionDiagnostics(
+          buildPeerConstructionDiagnostics(hints, constructedPeerClass, "stored_direct")
+        );
+
+        // Direct construction succeeded — use immediately. Soft enrichment must not discard it.
+        let entity: unknown = inputPeer;
+        try {
+          const fromCache = await tryGetEntity(runtime, inputPeer);
+          if (fromCache) {
+            entity = fromCache;
+            const liveFields = extractPeerFields(fromCache, hints.telegramChatId);
+            logPlainSerializable({
+              event: "telegram_peer.stored_vs_live",
+              ...diagnoseStoredPeerAgainstLive(
+                {
+                  peerType: peerTypeHint,
+                  telegramChatId: hints.telegramChatId,
+                  accessHash: hints.accessHash
+                },
+                {
+                  peerType: liveFields.peerType,
+                  telegramChatId: liveFields.telegramChatId,
+                  accessHash: liveFields.accessHash
+                }
+              )
+            });
+          }
+        } catch (enrichError) {
+          errors.push(`direct_enrich_cache:${errorMessage(enrichError)}`);
+        }
+
+        return await toResolved(runtime, entity, hints.telegramChatId, inputPeer, hints);
+      } catch (error) {
+        if (
+          error instanceof TelegramPeerConstructionError ||
+          error instanceof TelegramAccessHashParseError
+        ) {
+          errors.push(`direct_construction:${errorMessage(error)}`);
+        } else {
+          errors.push(`direct_construction_unexpected:${errorMessage(error)}`);
+        }
+      }
     }
   }
 
@@ -199,17 +379,140 @@ export function normalizePeerType(
 }
 
 /**
- * True when an error is a per-peer GramJS failure (not account auth).
+ * True when an error is a per-peer GramJS entity-lookup failure (not account auth).
+ * Used to soft-fail getEntity probes — not to collapse sendMessage RPC errors.
  */
 export function isPeerEntityResolutionError(error: unknown): boolean {
   if (error instanceof TelegramPeerUnresolvedError) return true;
+  if (error instanceof TelegramPeerConstructionError) return true;
+  if (error instanceof TelegramAccessHashParseError) return true;
   const message = error instanceof Error ? error.message : String(error);
   return (
     /Could not find the input entity/i.test(message) ||
     /TELEGRAM_PEER_UNRESOLVED/i.test(message) ||
+    /TELEGRAM_PEER_CONSTRUCTION_FAILED/i.test(message) ||
+    /TELEGRAM_ACCESS_HASH_PARSE_FAILED/i.test(message) ||
     /INPUT_USER_DEACTIVATED/i.test(message) ||
     /USER_DEACTIVATED|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID/i.test(message)
   );
+}
+
+/**
+ * Classifies Telegram RPC peer rejection on send/read — preserves original error codes.
+ * Returns null when the error is not a known peer RPC rejection.
+ */
+export function classifyTelegramPeerRpcError(error: unknown): {
+  readonly code: string;
+  readonly message: string;
+  readonly retryable: boolean;
+  readonly telegramErrorCode: string | null;
+} | null {
+  if (error instanceof TelegramPeerUnresolvedError) {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: true,
+      telegramErrorCode: null
+    };
+  }
+  if (error instanceof TelegramPeerConstructionError || error instanceof TelegramAccessHashParseError) {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: true,
+      telegramErrorCode: null
+    };
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const telegramErrorCode = extractTelegramRpcErrorCode(message);
+  if (/ACCESS_HASH_INVALID|ACCESS_HASH_EXPIRED/i.test(message)) {
+    return {
+      code: "TELEGRAM_ACCESS_HASH_INVALID",
+      message:
+        "Telegram rejected the stored access hash for this peer. Open the chat in Telegram once, then sync again.",
+      retryable: true,
+      telegramErrorCode: telegramErrorCode ?? "ACCESS_HASH_INVALID"
+    };
+  }
+  if (/PEER_ID_INVALID/i.test(message)) {
+    return {
+      code: "TELEGRAM_PEER_ID_INVALID",
+      message: "Telegram rejected this peer id (PEER_ID_INVALID).",
+      retryable: true,
+      telegramErrorCode: "PEER_ID_INVALID"
+    };
+  }
+  if (/INPUT_USER_DEACTIVATED|USER_DEACTIVATED/i.test(message)) {
+    return {
+      code: "TELEGRAM_PEER_DEACTIVATED",
+      message: "This Telegram user account is deactivated. Messages cannot be sent to this peer.",
+      retryable: false,
+      telegramErrorCode: telegramErrorCode ?? "INPUT_USER_DEACTIVATED"
+    };
+  }
+  if (/CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE/i.test(message)) {
+    return {
+      code: "TELEGRAM_PEER_REJECTED",
+      message: `Telegram rejected this peer (${telegramErrorCode ?? "PEER_REJECTED"}).`,
+      retryable: true,
+      telegramErrorCode
+    };
+  }
+  return null;
+}
+
+export function extractTelegramRpcErrorCode(message: string): string | null {
+  const match = message.match(
+    /\b(ACCESS_HASH_INVALID|ACCESS_HASH_EXPIRED|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|INPUT_USER_DEACTIVATED|USER_DEACTIVATED|USERNAME_NOT_OCCUPIED|FLOOD_WAIT_\d+)\b/i
+  );
+  return match ? match[1]!.toUpperCase() : null;
+}
+
+/**
+ * Parses Telegram 64-bit ids/hashes to native BigInt.
+ * Accepts string (Prisma VarChar), bigint, safe integer, or Decimal-like toString values.
+ * Never uses Number() for large 64-bit values.
+ */
+export function parseTelegramBigInt(value: unknown, fieldName: string): bigint {
+  if (value == null || value === "") {
+    throw new TelegramAccessHashParseError(`Missing ${fieldName} for Telegram peer construction`);
+  }
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TelegramAccessHashParseError(`Invalid ${fieldName}: non-finite number`);
+    }
+    // Reject unsafe integers — Number loses precision above 2^53-1 (Telegram hashes exceed this).
+    if (!Number.isSafeInteger(value)) {
+      throw new TelegramAccessHashParseError(
+        `Invalid ${fieldName}: JavaScript Number is not safe for 64-bit Telegram ids/hashes`
+      );
+    }
+    return BigInt(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^-?\d+$/.test(trimmed)) {
+      throw new TelegramAccessHashParseError(`Invalid ${fieldName}: expected integer string`);
+    }
+    try {
+      return BigInt(trimmed);
+    } catch {
+      throw new TelegramAccessHashParseError(`Invalid ${fieldName}: BigInt parse failed`);
+    }
+  }
+  // Prisma Decimal / big-integer Integer / similar
+  if (typeof value === "object" && value !== null && "toString" in value) {
+    const text = String(value).trim();
+    if (/^-?\d+$/.test(text)) {
+      try {
+        return BigInt(text);
+      } catch {
+        throw new TelegramAccessHashParseError(`Invalid ${fieldName}: BigInt parse failed`);
+      }
+    }
+  }
+  throw new TelegramAccessHashParseError(`Invalid ${fieldName}: unsupported type ${typeof value}`);
 }
 
 async function buildInputPeer(
@@ -219,22 +522,50 @@ async function buildInputPeer(
   accessHash: string | null
 ): Promise<unknown> {
   const api = runtime.Api as {
-    InputPeerUser: new (input: { userId: unknown; accessHash: unknown }) => unknown;
-    InputPeerChat: new (input: { chatId: unknown }) => unknown;
-    InputPeerChannel: new (input: { channelId: unknown; accessHash: unknown }) => unknown;
+    InputPeerUser: new (input: { userId: bigint; accessHash: bigint }) => unknown;
+    InputPeerChat: new (input: { chatId: bigint }) => unknown;
+    InputPeerChannel: new (input: { channelId: bigint; accessHash: bigint }) => unknown;
   };
-  const { returnBigInt } = await import("telegram/Helpers");
   const numericId = barePeerId(telegramChatId, peerType);
 
   if (peerType === "USER") {
-    if (!accessHash) throw new Error("USER peer requires access_hash");
-    return new api.InputPeerUser({ userId: returnBigInt(numericId), accessHash: returnBigInt(accessHash) });
+    if (accessHash == null || !String(accessHash).trim()) {
+      throw new TelegramPeerConstructionError("USER peer requires access_hash");
+    }
+    // Exact GramJS-supported native BigInt representation — never Number / UUID / DB chat id.
+    return new api.InputPeerUser({
+      userId: parseTelegramBigInt(numericId, "telegramChatId"),
+      accessHash: parseTelegramBigInt(accessHash, "accessHash")
+    });
   }
   if (peerType === "CHAT") {
-    return new api.InputPeerChat({ chatId: returnBigInt(numericId) });
+    return new api.InputPeerChat({ chatId: parseTelegramBigInt(numericId, "telegramChatId") });
   }
-  if (!accessHash) throw new Error("CHANNEL peer requires access_hash");
-  return new api.InputPeerChannel({ channelId: returnBigInt(numericId), accessHash: returnBigInt(accessHash) });
+  if (accessHash == null || !String(accessHash).trim()) {
+    throw new TelegramPeerConstructionError("CHANNEL peer requires access_hash");
+  }
+  return new api.InputPeerChannel({
+    channelId: parseTelegramBigInt(numericId, "telegramChatId"),
+    accessHash: parseTelegramBigInt(accessHash, "accessHash")
+  });
+}
+
+function peerClassName(peer: unknown): string | null {
+  if (!peer || typeof peer !== "object") return null;
+  const value = peer as Record<string, unknown>;
+  const name = value.className ?? value._;
+  return typeof name === "string" && name.trim() ? name : peer.constructor?.name ?? null;
+}
+
+function logPeerConstructionDiagnostics(diagnostics: PeerConstructionDiagnostics): void {
+  logPlainSerializable({
+    event: "telegram_peer.construction_diagnostics",
+    ...diagnostics
+  });
+}
+
+function logPlainSerializable(value: Record<string, unknown>): void {
+  console.info(JSON.stringify(value));
 }
 
 async function tryGetEntity(runtime: TelegramRuntime, candidate: unknown): Promise<unknown | null> {
@@ -413,18 +744,19 @@ async function findInEntityCache(runtime: TelegramRuntime, telegramChatId: strin
 async function fetchViaGetUsersOrChannels(runtime: TelegramRuntime, hints: PeerResolutionHints): Promise<unknown | null> {
   const peerType = normalizePeerType(hints.peerType, hints.chatType, hints.telegramChatId);
   if (!peerType || !hints.accessHash) return null;
-  const { returnBigInt } = await import("telegram/Helpers");
   const api = runtime.Api as {
     users: { GetUsers: new (input: { id: unknown[] }) => unknown };
     channels: { GetChannels: new (input: { id: unknown[] }) => unknown };
-    InputUser: new (input: { userId: unknown; accessHash: unknown }) => unknown;
-    InputChannel: new (input: { channelId: unknown; accessHash: unknown }) => unknown;
+    InputUser: new (input: { userId: bigint; accessHash: bigint }) => unknown;
+    InputChannel: new (input: { channelId: bigint; accessHash: bigint }) => unknown;
   };
   const numericId = barePeerId(hints.telegramChatId, peerType);
+  const userId = parseTelegramBigInt(numericId, "telegramChatId");
+  const accessHash = parseTelegramBigInt(hints.accessHash, "accessHash");
   if (peerType === "USER") {
     const users = (await runtime.client.invoke(
       new api.users.GetUsers({
-        id: [new api.InputUser({ userId: returnBigInt(numericId), accessHash: returnBigInt(hints.accessHash) })]
+        id: [new api.InputUser({ userId, accessHash })]
       })
     )) as unknown[];
     return users?.[0] ?? null;
@@ -432,7 +764,7 @@ async function fetchViaGetUsersOrChannels(runtime: TelegramRuntime, hints: PeerR
   if (peerType === "CHANNEL") {
     const result = (await runtime.client.invoke(
       new api.channels.GetChannels({
-        id: [new api.InputChannel({ channelId: returnBigInt(numericId), accessHash: returnBigInt(hints.accessHash) })]
+        id: [new api.InputChannel({ channelId: userId, accessHash })]
       })
     )) as { chats?: unknown[] };
     return result.chats?.[0] ?? null;
