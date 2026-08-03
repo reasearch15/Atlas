@@ -498,4 +498,80 @@ describe("Staff login rate limiting", () => {
     expect(Object.keys(loginReply.cookies)).toEqual(expect.arrayContaining(["atlas_staff_refresh", "atlas_staff_device"]));
     expect(loginReply.cookies).not.toHaveProperty("atlas_coadmin_refresh");
   });
+
+  it("returns refresh 200 immediately after staff login using the login cookie", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const service = new CoadminAuthService(prisma(store), redis(), env, "STAFF");
+    const loginReply = reply();
+    const login = await service.login(request({ username: "north-staff", password: "PermanentPass123!" }), loginReply);
+    expect("accessToken" in login).toBe(true);
+    expect(loginReply.cookies.atlas_staff_refresh).toBeTruthy();
+    expect(loginReply.cookieOptions.atlas_staff_refresh).toMatchObject({
+      path: "/api/staff-auth",
+      httpOnly: true,
+      sameSite: "lax"
+    });
+
+    const refreshReply = reply();
+    const refreshed = await service.refresh(
+      request({}, { atlas_staff_refresh: loginReply.cookies.atlas_staff_refresh! }),
+      refreshReply
+    );
+    expect(refreshed.accessToken).toBeTruthy();
+    expect(refreshed.user.role).toBe("STAFF");
+    expect(store.sessions).toHaveLength(1);
+    expect(store.sessions[0]?.userId).toBe(store.user.id);
+  });
+
+  it("clears the same staff refresh cookie on logout", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const service = new CoadminAuthService(prisma(store), redis(), env, "STAFF");
+    const loginReply = reply();
+    const login = await service.login(request({ username: "north-staff", password: "PermanentPass123!" }), loginReply);
+    if ("requiresPasswordChange" in login) throw new Error("expected session");
+    const logoutReply = reply();
+    logoutReply.cookies.atlas_staff_refresh = loginReply.cookies.atlas_staff_refresh!;
+    await service.logout(
+      {
+        ...request({}, { atlas_staff_refresh: loginReply.cookies.atlas_staff_refresh! }),
+        user: {
+          id: store.user.id,
+          email: store.user.username,
+          name: store.user.name,
+          role: "STAFF",
+          workspaceId: store.user.workspaceId,
+          sessionId: store.sessions[0]!.id
+        }
+      } as never,
+      logoutReply
+    );
+    expect(logoutReply.cookies.atlas_staff_refresh).toBeUndefined();
+  });
+
+  it("does not let a coadmin refresh cookie authenticate staff refresh", async () => {
+    const staffStore = await storeFor("STAFF");
+    staffStore.user.mustChangePassword = false;
+    staffStore.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const staffService = new CoadminAuthService(prisma(staffStore), redis(), env, "STAFF");
+    const staffLogin = reply();
+    await staffService.login(request({ username: "north-staff", password: "PermanentPass123!" }), staffLogin);
+
+    const coadminStore = await storeFor("COADMIN");
+    coadminStore.user.mustChangePassword = false;
+    coadminStore.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const coadminService = new CoadminAuthService(prisma(coadminStore), redis(), env, "COADMIN");
+    const coadminLogin = reply();
+    await coadminService.login(request({ username: "north-coadmin", password: "PermanentPass123!" }), coadminLogin);
+
+    await expect(
+      staffService.refresh(request({}, { atlas_coadmin_refresh: coadminLogin.cookies.atlas_coadmin_refresh! }), reply())
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(
+      staffService.refresh(request({}, { atlas_staff_refresh: staffLogin.cookies.atlas_staff_refresh! }), reply())
+    ).resolves.toMatchObject({ user: { role: "STAFF" } });
+  });
 });

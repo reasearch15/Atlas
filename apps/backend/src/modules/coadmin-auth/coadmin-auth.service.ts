@@ -18,6 +18,11 @@ import {
   type TenantLoginRole
 } from "./login-rate-limit";
 import {
+  cookieWrittenEvent,
+  logTenantAuthDiagnostic,
+  type TenantRefreshFailureReason
+} from "./tenant-auth-diagnostics";
+import {
   tenantAuthCookieOptions,
   tenantAuthCookiePath,
   tenantAuthLegacyDomainClearOptions,
@@ -125,9 +130,28 @@ export class CoadminAuthService {
    * Duplicate near-simultaneous refreshes share one rotation and re-align the cookie.
    */
   public async refresh(request: FastifyRequest, reply: FastifyReply): Promise<AuthResponse> {
+    const cookiePath = tenantAuthCookiePath(this.role);
     const refreshToken = request.cookies[this.refreshCookieName];
-    if (!refreshToken) throw unauthorized();
-    const verified = await this.tokens.verifyRefreshToken(refreshToken);
+    logTenantAuthDiagnostic({
+      event: this.role === "STAFF" ? "staffCookiePresentOnRefresh" : "coadminCookiePresentOnRefresh",
+      role: this.role,
+      cookieName: this.refreshCookieName,
+      cookiePath,
+      cookiePresent: Boolean(refreshToken)
+    });
+    if (!refreshToken) {
+      this.logRefreshFailure("cookie_missing");
+      throw unauthorized();
+    }
+
+    let verified: { userId: string; sessionId: string };
+    try {
+      verified = await this.tokens.verifyRefreshToken(refreshToken);
+    } catch {
+      this.logRefreshFailure("token_invalid");
+      throw unauthorized();
+    }
+
     const lockKey = `tenant-refresh:lock:${verified.sessionId}`;
     const graceKey = `tenant-refresh:grace:${verified.sessionId}`;
 
@@ -142,20 +166,66 @@ export class CoadminAuthService {
         where: { id: verified.sessionId },
         include: { user: { include: { workspace: true } } }
       });
-      if (
-        !session ||
-        session.userId !== verified.userId ||
-        session.revokedAt ||
-        session.expiresAt <= new Date() ||
-        session.user.role !== this.role ||
-        !this.canAccessDashboard(session.user)
-      ) {
+      if (!session) {
+        this.logRefreshFailure("session_not_found", verified.sessionId, verified.userId);
+        throw unauthorized();
+      }
+      logTenantAuthDiagnostic({
+        event: this.role === "STAFF" ? "staffSessionFound" : "coadminSessionFound",
+        role: this.role,
+        cookieName: this.refreshCookieName,
+        cookiePath,
+        sessionId: session.id,
+        userId: session.userId,
+        sessionRole: session.user.role
+      });
+      logTenantAuthDiagnostic({
+        event: this.role === "STAFF" ? "staffSessionRole" : "coadminSessionRole",
+        role: this.role,
+        cookieName: this.refreshCookieName,
+        cookiePath,
+        sessionId: session.id,
+        userId: session.userId,
+        sessionRole: session.user.role
+      });
+      if (session.userId !== verified.userId) {
+        this.logRefreshFailure("session_user_mismatch", session.id, session.userId, session.user.role);
+        throw unauthorized();
+      }
+      if (session.revokedAt) {
+        this.logRefreshFailure("session_revoked", session.id, session.userId, session.user.role);
+        throw unauthorized();
+      }
+      if (session.expiresAt <= new Date()) {
+        logTenantAuthDiagnostic({
+          event: this.role === "STAFF" ? "staffSessionExpired" : "coadminSessionExpired",
+          role: this.role,
+          cookieName: this.refreshCookieName,
+          cookiePath,
+          sessionId: session.id,
+          userId: session.userId,
+          sessionRole: session.user.role
+        });
+        this.logRefreshFailure("session_expired", session.id, session.userId, session.user.role);
+        throw unauthorized();
+      }
+      if (session.user.role !== this.role) {
+        this.logRefreshFailure("role_mismatch", session.id, session.userId, session.user.role);
+        throw unauthorized();
+      }
+      if (!this.canAccessDashboard(session.user)) {
+        this.logRefreshFailure("dashboard_blocked", session.id, session.userId, session.user.role);
         throw unauthorized();
       }
 
       const tokenMatches = await bcrypt.compare(refreshToken, session.refreshHash);
       if (!tokenMatches) {
-        return this.completeRefreshFromGrace(session.id, session.user, refreshToken, graceKey, reply);
+        try {
+          return await this.completeRefreshFromGrace(session.id, session.user, refreshToken, graceKey, reply);
+        } catch {
+          this.logRefreshFailure("hash_mismatch", session.id, session.userId, session.user.role);
+          throw unauthorized();
+        }
       }
 
       const requestUser = this.toRequestUser(session.user, session.id);
@@ -293,14 +363,72 @@ export class CoadminAuthService {
   private async createSession(user: TenantUser, request: FastifyRequest, reply: FastifyReply, trustedDeviceId: string): Promise<AuthResponse> {
     const expiresAt = new Date(Date.now() + this.env.REFRESH_TOKEN_TTL_SECONDS * 1000);
     const session = await this.prisma.session.create({
-      data: { userId: user.id, workspaceId: user.workspaceId, userTrustedDeviceId: trustedDeviceId, refreshHash: "pending", deviceName: this.deviceDisplayName(request.headers["user-agent"]), ipAddress: request.ip, userAgent: request.headers["user-agent"] ?? "unknown", expiresAt }
+      data: {
+        userId: user.id,
+        workspaceId: user.workspaceId,
+        userTrustedDeviceId: trustedDeviceId,
+        refreshHash: "pending",
+        deviceName: this.deviceDisplayName(request.headers["user-agent"]),
+        ipAddress: request.ip,
+        userAgent: request.headers["user-agent"] ?? "unknown",
+        expiresAt
+      }
     });
     const requestUser = this.toRequestUser(user, session.id);
     const refreshToken = await this.tokens.signRefreshToken(requestUser);
     await this.prisma.session.update({ where: { id: session.id }, data: { refreshHash: await bcrypt.hash(refreshToken, 12) } });
     this.setRefreshCookie(reply, refreshToken);
-    await this.audit.record({ workspaceId: user.workspaceId, actorId: user.id, action: "tenant_auth.session.created", metadata: { sessionId: session.id, deviceId: trustedDeviceId, role: user.role } });
+    logTenantAuthDiagnostic({
+      event: this.role === "STAFF" ? "staffSessionCreated" : "coadminSessionCreated",
+      role: this.role,
+      cookieName: this.refreshCookieName,
+      cookiePath: tenantAuthCookiePath(this.role),
+      sessionId: session.id,
+      userId: user.id,
+      sessionRole: user.role
+    });
+    await this.audit.record({
+      workspaceId: user.workspaceId,
+      actorId: user.id,
+      action: "tenant_auth.session.created",
+      metadata: { sessionId: session.id, deviceId: trustedDeviceId, role: user.role }
+    });
     return { user: this.toAuthUser(user), accessToken: await this.tokens.signAccessToken(requestUser) };
+  }
+
+  private logRefreshFailure(
+    reason: TenantRefreshFailureReason,
+    sessionId?: string,
+    userId?: string,
+    sessionRole?: string
+  ): void {
+    logTenantAuthDiagnostic({
+      event: "refreshFailureReason",
+      role: this.role,
+      cookieName: this.refreshCookieName,
+      cookiePath: tenantAuthCookiePath(this.role),
+      refreshFailureReason: reason,
+      ...(sessionId ? { sessionId } : {}),
+      ...(userId ? { userId } : {}),
+      ...(sessionRole ? { sessionRole } : {})
+    });
+  }
+
+  private setRefreshCookie(reply: FastifyReply, token: string): void {
+    const path = tenantAuthCookiePath(this.role);
+    const options = this.refreshCookieOptions();
+    const legacy = tenantAuthLegacyDomainClearOptions(this.env, path);
+    if (legacy) {
+      reply.clearCookie(this.refreshCookieName, legacy);
+    }
+    reply.setCookie(this.refreshCookieName, token, options);
+    logTenantAuthDiagnostic(
+      cookieWrittenEvent(this.role, this.refreshCookieName, path, {
+        secure: options.secure,
+        sameSite: options.sameSite,
+        httpOnly: options.httpOnly
+      })
+    );
   }
 
   private async assertDashboardAccess(user: RequestUser): Promise<TenantUser> {
@@ -367,27 +495,28 @@ export class CoadminAuthService {
     reply: FastifyReply
   ): Promise<AuthResponse> {
     const raw = await this.redis.get(graceKey);
-    if (!raw) throw unauthorized();
+    if (!raw) {
+      this.logRefreshFailure("grace_unavailable", sessionId, user.id, user.role);
+      throw unauthorized();
+    }
     let grace: { oldHash?: string; currentToken?: string };
     try {
       grace = JSON.parse(raw) as { oldHash?: string; currentToken?: string };
     } catch {
+      this.logRefreshFailure("grace_unavailable", sessionId, user.id, user.role);
       throw unauthorized();
     }
-    if (!grace.oldHash || !grace.currentToken) throw unauthorized();
-    if (!(await bcrypt.compare(presentedToken, grace.oldHash))) throw unauthorized();
+    if (!grace.oldHash || !grace.currentToken) {
+      this.logRefreshFailure("grace_unavailable", sessionId, user.id, user.role);
+      throw unauthorized();
+    }
+    if (!(await bcrypt.compare(presentedToken, grace.oldHash))) {
+      this.logRefreshFailure("hash_mismatch", sessionId, user.id, user.role);
+      throw unauthorized();
+    }
     const requestUser = this.toRequestUser(user, sessionId);
     this.setRefreshCookie(reply, grace.currentToken);
     return { user: this.toAuthUser(user), accessToken: await this.tokens.signAccessToken(requestUser) };
-  }
-
-  private setRefreshCookie(reply: FastifyReply, token: string): void {
-    const path = tenantAuthCookiePath(this.role);
-    const legacy = tenantAuthLegacyDomainClearOptions(this.env, path);
-    if (legacy) {
-      reply.clearCookie(this.refreshCookieName, legacy);
-    }
-    reply.setCookie(this.refreshCookieName, token, this.refreshCookieOptions());
   }
 
   private refreshCookieOptions() {
