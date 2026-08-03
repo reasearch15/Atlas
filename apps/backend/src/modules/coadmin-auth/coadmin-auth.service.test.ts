@@ -249,9 +249,14 @@ describe("CoadminAuthService tenant password onboarding", () => {
     const service = new CoadminAuthService(prisma(store), fakeRedis, env);
     const login = await service.login(request({ username: "north-coadmin", password: "TempPassword123!" }), reply());
     if (!("requiresPasswordChange" in login)) throw new Error("Expected password change response.");
+    expect(login.passwordChangeToken).toBeTruthy();
 
     const response = await service.changePassword(
-      request({ changeToken: login.changeToken, password: "PermanentPass123!", confirmPassword: "PermanentPass123!" }),
+      request({
+        passwordChangeToken: login.passwordChangeToken,
+        newPassword: "PermanentPass123!",
+        confirmPassword: "PermanentPass123!"
+      }),
       reply()
     );
 
@@ -261,6 +266,66 @@ describe("CoadminAuthService tenant password onboarding", () => {
     expect(store.sessions).toHaveLength(1);
     expect(store.trustedDevices).toHaveLength(1);
     expect(store.auditLogs.some((entry) => entry.action === "first_login.password_changed")).toBe(true);
+
+    await expect(
+      service.changePassword(
+        request({
+          passwordChangeToken: login.passwordChangeToken,
+          newPassword: "AnotherPass1234!",
+          confirmPassword: "AnotherPass1234!"
+        }),
+        reply()
+      )
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("rejects a staff password-change token on the coadmin endpoint", async () => {
+    const staffStore = await storeFor("STAFF");
+    const r = redis();
+    const staffService = new CoadminAuthService(prisma(staffStore), r, env, "STAFF");
+    const login = await staffService.login(request({ username: "north-staff", password: "TempPassword123!" }), reply());
+    if (!("requiresPasswordChange" in login)) throw new Error("expected password change");
+
+    const coadminService = new CoadminAuthService(prisma(await storeFor("COADMIN")), r, env, "COADMIN");
+    await expect(
+      coadminService.changePassword(
+        request({
+          passwordChangeToken: login.passwordChangeToken,
+          newPassword: "PermanentPass123!",
+          confirmPassword: "PermanentPass123!"
+        }),
+        reply()
+      )
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("rejects mismatched or weak password change payloads", async () => {
+    const store = await storeFor("STAFF");
+    const service = new CoadminAuthService(prisma(store), redis(), env, "STAFF");
+    const login = await service.login(request({ username: "north-staff", password: "TempPassword123!" }), reply());
+    if (!("requiresPasswordChange" in login)) throw new Error("expected password change");
+
+    await expect(
+      service.changePassword(
+        request({
+          passwordChangeToken: login.passwordChangeToken,
+          newPassword: "PermanentPass123!",
+          confirmPassword: "DifferentPass123!"
+        }),
+        reply()
+      )
+    ).rejects.toThrow();
+
+    await expect(
+      service.changePassword(
+        request({
+          passwordChangeToken: login.passwordChangeToken,
+          newPassword: "short",
+          confirmPassword: "short"
+        }),
+        reply()
+      )
+    ).rejects.toThrow();
   });
 
   it("uses the same temporary-password flow for Staff without Coadmin email verification", async () => {
@@ -486,7 +551,7 @@ describe("Staff login rate limiting", () => {
       request({ username: "north-staff", password: "TempPass123!" }, {}, "203.0.113.30"),
       loginReply
     );
-    expect(login).toMatchObject({ requiresPasswordChange: true, changeToken: expect.any(String) });
+    expect(login).toMatchObject({ requiresPasswordChange: true, passwordChangeToken: expect.any(String) });
     expect(loginReply.cookies.atlas_staff_refresh).toBeUndefined();
     expect(loginReply.headers["x-atlas-staff-cookie"]).toBe("password-change-required");
     await expect(service.refresh(request({}, {}, "203.0.113.30"), reply())).rejects.toMatchObject({ code: "UNAUTHORIZED" });
@@ -504,7 +569,11 @@ describe("Staff login rate limiting", () => {
 
     const changeReply = reply();
     const changed = await service.changePassword(
-      request({ changeToken: login.changeToken, password: "PermanentPass123!", confirmPassword: "PermanentPass123!" }),
+      request({
+        passwordChangeToken: login.passwordChangeToken,
+        newPassword: "PermanentPass123!",
+        confirmPassword: "PermanentPass123!"
+      }),
       changeReply
     );
     expect(changed.accessToken).toBeTruthy();

@@ -63,10 +63,35 @@ export const createStaffSchemaV2 = z.object({
   status: z.enum(["ACTIVE", "SUSPENDED"]).default("ACTIVE")
 }).refine((value) => value.temporaryPassword === value.confirmTemporaryPassword, { message: "Passwords do not match.", path: ["confirmTemporaryPassword"] });
 
-export const tenantPasswordChangeSchema = z.object({
-  password: passwordSchema,
-  confirmPassword: passwordSchema
-}).refine((value) => value.password === value.confirmPassword, { message: "Passwords do not match.", path: ["confirmPassword"] });
+export const tenantPasswordChangeSchema = z
+  .object({
+    passwordChangeToken: z.string().trim().min(32).max(512).optional(),
+    /** @deprecated Prefer passwordChangeToken */
+    changeToken: z.string().trim().min(32).max(512).optional(),
+    newPassword: passwordSchema.optional(),
+    /** @deprecated Prefer newPassword */
+    password: passwordSchema.optional(),
+    confirmPassword: passwordSchema
+  })
+  .superRefine((value, ctx) => {
+    const token = value.passwordChangeToken ?? value.changeToken;
+    if (!token) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Password change token is required.", path: ["passwordChangeToken"] });
+    }
+    const nextPassword = value.newPassword ?? value.password;
+    if (!nextPassword) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "New password is required.", path: ["newPassword"] });
+      return;
+    }
+    if (nextPassword !== value.confirmPassword) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Passwords do not match.", path: ["confirmPassword"] });
+    }
+  })
+  .transform((value) => {
+    const passwordChangeToken = (value.passwordChangeToken ?? value.changeToken)!;
+    const newPassword = (value.newPassword ?? value.password)!;
+    return { passwordChangeToken, newPassword, confirmPassword: value.confirmPassword };
+  });
 
 export const createWorkspaceSchema = z.object({
   name: z.string().trim().min(2).max(120),

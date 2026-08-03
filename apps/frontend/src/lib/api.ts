@@ -39,6 +39,11 @@ import { ApiClientError } from "@/lib/api-client-error";
 import { publicApiUrl } from "@/lib/public-api-url";
 import { clearRoleSensitiveClientCaches } from "@/lib/sensitive-cache";
 import { isPasswordChangeRequired } from "@/lib/tenant-login-response";
+import {
+  clearTenantPasswordChangeChallenge,
+  pauseTenantCookieRefresh,
+  resumeTenantCookieRefresh
+} from "@/lib/tenant-password-change-storage";
 
 const baseUrl = publicApiUrl;
 
@@ -153,27 +158,18 @@ export async function adminResendCode(challengeId: string): Promise<{ maskedEmai
 }
 
 /**
- * Starts the Coadmin login flow.
- */
-export async function coadminLogin(payload: { username: string; password: string }): Promise<TenantLoginResponse> {
-  const response = await apiRequest<TenantLoginResponse>("/api/coadmin-auth/login", {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
-  if (!isPasswordChangeRequired(response)) {
-    applyAuthenticatedSession(response.accessToken, response.user);
-  }
-  return response;
-}
-
-/**
  * Completes Coadmin first-login password change.
  */
-export async function coadminChangePassword(payload: { changeToken: string; password: string; confirmPassword: string }): Promise<AuthResponse> {
+export async function coadminChangePassword(payload: {
+  passwordChangeToken: string;
+  newPassword: string;
+  confirmPassword: string;
+}): Promise<AuthResponse> {
   const response = await apiRequest<AuthResponse>("/api/coadmin-auth/change-password", {
     method: "POST",
     body: JSON.stringify(payload)
   });
+  clearTenantPasswordChangeChallenge("coadmin");
   applyAuthenticatedSession(response.accessToken, response.user);
   return response;
 }
@@ -182,14 +178,43 @@ export async function coadminChangePassword(payload: { changeToken: string; pass
  * Starts the Staff login flow.
  */
 export async function staffLogin(payload: { username: string; password: string }): Promise<TenantLoginResponse> {
-  const response = await apiRequest<TenantLoginResponse>("/api/staff-auth/login", {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
-  if (!isPasswordChangeRequired(response)) {
-    applyAuthenticatedSession(response.accessToken, response.user);
+  pauseTenantCookieRefresh();
+  try {
+    const response = await apiRequest<TenantLoginResponse>("/api/staff-auth/login", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    if (!isPasswordChangeRequired(response)) {
+      resumeTenantCookieRefresh();
+      applyAuthenticatedSession(response.accessToken, response.user);
+    }
+    // Password-change challenges keep the probe pause until storeTenantPasswordChangeChallenge / clear.
+    return response;
+  } catch (error) {
+    resumeTenantCookieRefresh();
+    throw error;
   }
-  return response;
+}
+
+/**
+ * Starts the Coadmin login flow.
+ */
+export async function coadminLogin(payload: { username: string; password: string }): Promise<TenantLoginResponse> {
+  pauseTenantCookieRefresh();
+  try {
+    const response = await apiRequest<TenantLoginResponse>("/api/coadmin-auth/login", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    if (!isPasswordChangeRequired(response)) {
+      resumeTenantCookieRefresh();
+      applyAuthenticatedSession(response.accessToken, response.user);
+    }
+    return response;
+  } catch (error) {
+    resumeTenantCookieRefresh();
+    throw error;
+  }
 }
 
 /**
@@ -210,11 +235,16 @@ export async function tenantLogin(payload: { username: string; password: string 
 /**
  * Completes Staff first-login password change.
  */
-export async function staffChangePassword(payload: { changeToken: string; password: string; confirmPassword: string }): Promise<AuthResponse> {
+export async function staffChangePassword(payload: {
+  passwordChangeToken: string;
+  newPassword: string;
+  confirmPassword: string;
+}): Promise<AuthResponse> {
   const response = await apiRequest<AuthResponse>("/api/staff-auth/change-password", {
     method: "POST",
     body: JSON.stringify(payload)
   });
+  clearTenantPasswordChangeChallenge("staff");
   applyAuthenticatedSession(response.accessToken, response.user);
   return response;
 }

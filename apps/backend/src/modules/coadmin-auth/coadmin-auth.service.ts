@@ -4,7 +4,6 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { AdminTrustedDeviceDto, AuthResponse, CoadminDashboardResponse, TenantLoginResponse } from "@atlas/shared";
 import { coadminLoginSchema, tenantPasswordChangeSchema } from "@atlas/shared";
-import { z } from "zod";
 import type Redis from "ioredis";
 import type { Env } from "../../config/env";
 import { unauthorized } from "../../utils/errors";
@@ -35,9 +34,14 @@ const passwordChangePrefix = "tenant-password-change:";
 const genericLoginMessage = "Invalid username or password.";
 const REFRESH_GRACE_TTL_SECONDS = 45;
 const REFRESH_LOCK_TTL_SECONDS = 10;
-const passwordChangeBodySchema = z
-  .object({ changeToken: z.string().trim().min(32).max(512) })
-  .and(tenantPasswordChangeSchema);
+const PASSWORD_CHANGE_TTL_SECONDS = 900;
+
+interface PasswordChangeChallenge {
+  readonly userId: string;
+  readonly workspaceId: string;
+  readonly role: "COADMIN" | "STAFF";
+  readonly action: "PASSWORD_CHANGE";
+}
 
 type TenantUser = Prisma.UserGetPayload<{ include: { workspace: true } }>;
 type TrustedDeviceRecord = Prisma.UserTrustedDeviceGetPayload<Record<string, never>>;
@@ -92,15 +96,33 @@ export class CoadminAuthService {
     }
     await clearTenantLoginFailures(this.redis, roleKey, input.username, request.ip);
     if (user.mustChangePassword) {
-      const changeToken = randomBytes(32).toString("base64url");
-      await this.redis.set(`${passwordChangePrefix}${this.hashToken(changeToken)}`, user.id, "EX", 900);
+      if (!user.workspaceId) throw unauthorized(genericLoginMessage);
+      const passwordChangeToken = randomBytes(32).toString("base64url");
+      const challenge: PasswordChangeChallenge = {
+        userId: user.id,
+        workspaceId: user.workspaceId,
+        role: this.role,
+        action: "PASSWORD_CHANGE"
+      };
+      await this.redis.set(
+        `${passwordChangePrefix}${this.hashToken(passwordChangeToken)}`,
+        JSON.stringify(challenge),
+        "EX",
+        PASSWORD_CHANGE_TTL_SECONDS
+      );
       const cookiePath = tenantAuthCookiePath(this.role);
       logTenantAuthDiagnostic(
         passwordChangeRequiredEvent(this.role, this.refreshCookieName, cookiePath, user.id)
       );
       // No refresh cookie by design — client must complete /change-password first.
       reply.header(this.cookieStatusHeaderName(), "password-change-required");
-      return { requiresPasswordChange: true, changeToken, user: this.toAuthUser(user) };
+      return {
+        requiresPasswordChange: true,
+        passwordChangeToken,
+        // Temporary alias for older clients still reading changeToken.
+        changeToken: passwordChangeToken,
+        user: this.toAuthUser(user)
+      };
     }
     const device = await this.trustOrTouchDevice(user, request, reply);
     return this.createSession(user, request, reply, device.id);
@@ -110,23 +132,55 @@ export class CoadminAuthService {
    * Changes a temporary password and creates the first normal session.
    */
   public async changePassword(request: FastifyRequest, reply: FastifyReply): Promise<AuthResponse> {
-    const body = passwordChangeBodySchema.parse(request.body);
-    const key = `${passwordChangePrefix}${this.hashToken(body.changeToken)}`;
-    const userId = await this.redis.get(key);
-    if (!userId) throw unauthorized("Password change session is invalid or expired.");
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, include: { workspace: true } });
-    if (!user || !this.isLoginAllowed(user) || !user.mustChangePassword) throw unauthorized("Password change session is invalid or expired.");
+    const body = tenantPasswordChangeSchema.parse(request.body);
+    const key = `${passwordChangePrefix}${this.hashToken(body.passwordChangeToken)}`;
+    const raw = await this.redis.get(key);
+    if (!raw) throw unauthorized("Password change session is invalid or expired.");
+
+    let challenge: PasswordChangeChallenge;
+    try {
+      challenge = JSON.parse(raw) as PasswordChangeChallenge;
+    } catch {
+      await this.redis.del(key);
+      throw unauthorized("Password change session is invalid or expired.");
+    }
+
+    if (
+      challenge.action !== "PASSWORD_CHANGE" ||
+      challenge.role !== this.role ||
+      typeof challenge.userId !== "string" ||
+      typeof challenge.workspaceId !== "string"
+    ) {
+      await this.redis.del(key);
+      throw unauthorized("Password change session is invalid or expired.");
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id: challenge.userId }, include: { workspace: true } });
+    if (
+      !user ||
+      !this.isLoginAllowed(user) ||
+      !user.mustChangePassword ||
+      user.workspaceId !== challenge.workspaceId ||
+      user.role !== challenge.role
+    ) {
+      await this.redis.del(key);
+      throw unauthorized("Password change session is invalid or expired.");
+    }
+
+    // Single-use: revoke before mutating so concurrent reuse fails.
+    await this.redis.del(key);
+
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
       await tx.user.update({
         where: { id: user.id },
-        data: { passwordHash: await bcrypt.hash(body.password, 12), mustChangePassword: false, passwordChangedAt: now }
+        data: { passwordHash: await bcrypt.hash(body.newPassword, 12), mustChangePassword: false, passwordChangedAt: now }
       });
+      await tx.session.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: now } });
       await tx.auditLog.create({
         data: { workspaceId: user.workspaceId, actorId: user.id, action: "first_login.password_changed", metadata: { userId: user.id, role: user.role } }
       });
     });
-    await this.redis.del(key);
     const fresh = await this.prisma.user.findUniqueOrThrow({ where: { id: user.id }, include: { workspace: true } });
     const device = await this.trustOrTouchDevice(fresh, request, reply);
     return this.createSession(fresh, request, reply, device.id);

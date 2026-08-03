@@ -29,7 +29,12 @@ export type CoadminLoginResponse = AuthResponse | AdminLoginChallengeResponse;
 
 export interface PasswordChangeRequiredResponse {
   readonly requiresPasswordChange: true;
-  readonly changeToken: string;
+  /** Short-lived, single-use challenge — never a refresh session cookie. */
+  readonly passwordChangeToken: string;
+  /**
+   * @deprecated Use passwordChangeToken. Kept briefly for older clients.
+   */
+  readonly changeToken?: string;
   readonly user: AuthUser;
 }
 

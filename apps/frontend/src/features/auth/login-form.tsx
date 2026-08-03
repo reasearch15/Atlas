@@ -10,11 +10,11 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useTenantLoginSessionGate } from "@/features/auth/use-tenant-login-session-gate";
-import { tenantPasswordChangeStorageKey } from "@/features/tenant-auth/tenant-login-form";
 import { loginPasswordInputProps, loginUsernameInputProps } from "@/lib/auth-form-fields";
 import { tenantLogin } from "@/lib/api";
 import { getPostLoginRoute } from "@/lib/post-login-route";
-import { isPasswordChangeRequired } from "@/lib/tenant-login-response";
+import { isPasswordChangeRequired, readPasswordChangeToken } from "@/lib/tenant-login-response";
+import { storeTenantPasswordChangeChallenge } from "@/lib/tenant-password-change-storage";
 import {
   applyRememberUsernamePreference,
   getRememberedUsername,
@@ -49,10 +49,11 @@ export function LoginForm() {
       setPassword("");
       const changeRoute = result.role === "coadmin" ? "/coadmin/change-password" : "/staff/change-password";
       if (isPasswordChangeRequired(result.response)) {
-        sessionStorage.setItem(
-          tenantPasswordChangeStorageKey(result.role),
-          JSON.stringify({ changeToken: result.response.changeToken, username: normalized })
-        );
+        const passwordChangeToken = readPasswordChangeToken(result.response);
+        if (!passwordChangeToken) {
+          throw new Error("Password change is required, but no change token was returned.");
+        }
+        storeTenantPasswordChangeChallenge(result.role, { passwordChangeToken, username: normalized });
         router.replace(changeRoute as Route);
         return;
       }

@@ -13,8 +13,11 @@ import { loginPasswordInputProps, loginUsernameInputProps } from "@/lib/auth-for
 import { ApiClientError } from "@/lib/api-client-error";
 import { coadminLogin, staffLogin } from "@/lib/api";
 import { getPostLoginRoute } from "@/lib/post-login-route";
-import { isPasswordChangeRequired } from "@/lib/tenant-login-response";
-import { tenantPasswordChangeStorageKey } from "@/lib/tenant-password-change-storage";
+import { isPasswordChangeRequired, readPasswordChangeToken } from "@/lib/tenant-login-response";
+import {
+  storeTenantPasswordChangeChallenge,
+  tenantPasswordChangeStorageKey
+} from "@/lib/tenant-password-change-storage";
 import {
   applyRememberUsernamePreference,
   getRememberedUsername,
@@ -75,10 +78,12 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
       setPassword("");
       setRetryAfterSeconds(0);
       if (isPasswordChangeRequired(response)) {
-        sessionStorage.setItem(
-          tenantPasswordChangeStorageKey(role),
-          JSON.stringify({ changeToken: response.changeToken, username: normalized })
-        );
+        const passwordChangeToken = readPasswordChangeToken(response);
+        if (!passwordChangeToken) {
+          throw new Error("Password change is required, but no change token was returned.");
+        }
+        // Store before any navigation / restore race. Do not call refresh.
+        storeTenantPasswordChangeChallenge(role, { passwordChangeToken, username: normalized });
         router.replace(changeRoute as Route);
         return;
       }

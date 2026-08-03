@@ -9,35 +9,35 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { confirmNewPasswordInputProps, newPasswordInputProps } from "@/lib/auth-form-fields";
+import { ApiClientError } from "@/lib/api-client-error";
 import { coadminChangePassword, staffChangePassword } from "@/lib/api";
 import { getPostLoginRoute } from "@/lib/post-login-route";
-import { tenantPasswordChangeStorageKey } from "./tenant-login-form";
-
-type StoredPasswordChange = {
-  readonly changeToken: string;
-  readonly username: string;
-};
+import {
+  clearTenantPasswordChangeChallenge,
+  readTenantPasswordChangeChallenge,
+  type StoredTenantPasswordChange
+} from "@/lib/tenant-password-change-storage";
 
 /**
  * Renders the mandatory first-login password change screen for tenant users.
  */
 export function TenantChangePasswordForm({ role }: { readonly role: "coadmin" | "staff" }) {
   const router = useRouter();
-  const [stored, setStored] = useState<StoredPasswordChange | null>(null);
+  const [stored, setStored] = useState<StoredTenantPasswordChange | null>(null);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const loginRoute = role === "coadmin" ? "/coadmin/login" : "/staff/login";
 
   useEffect(() => {
-    const raw = sessionStorage.getItem(tenantPasswordChangeStorageKey(role));
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as StoredPasswordChange;
-      if (parsed.changeToken && parsed.username) setStored(parsed);
-    } catch {
-      sessionStorage.removeItem(tenantPasswordChangeStorageKey(role));
+    const challenge = readTenantPasswordChangeChallenge(role);
+    if (challenge) {
+      setStored(challenge);
+      return;
     }
+    // Refresh before completion — require temporary password login again.
+    clearTenantPasswordChangeChallenge(role);
   }, [role]);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -48,15 +48,27 @@ export function TenantChangePasswordForm({ role }: { readonly role: "coadmin" | 
       return;
     }
     setLoading(true);
+    setFormError(null);
     try {
       const change = role === "coadmin" ? coadminChangePassword : staffChangePassword;
-      await change({ changeToken: stored.changeToken, password, confirmPassword });
-      sessionStorage.removeItem(tenantPasswordChangeStorageKey(role));
+      await change({
+        passwordChangeToken: stored.passwordChangeToken,
+        newPassword: password,
+        confirmPassword
+      });
+      clearTenantPasswordChangeChallenge(role);
       setPassword("");
       setConfirmPassword("");
       router.replace(getPostLoginRoute(role === "coadmin" ? "COADMIN" : "STAFF") as Route);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Password change failed.");
+      const message =
+        error instanceof ApiClientError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Password change failed.";
+      setFormError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -83,6 +95,7 @@ export function TenantChangePasswordForm({ role }: { readonly role: "coadmin" | 
               placeholder="New password"
               {...newPasswordInputProps}
               required
+              disabled={loading || !stored}
             />
           </label>
           <label className="mt-3 grid gap-2 text-sm font-medium">
@@ -93,8 +106,15 @@ export function TenantChangePasswordForm({ role }: { readonly role: "coadmin" | 
               placeholder="Confirm new password"
               {...confirmNewPasswordInputProps}
               required
+              disabled={loading || !stored}
             />
           </label>
+
+          {formError ? (
+            <p className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+              {formError}
+            </p>
+          ) : null}
 
           <Button className="mt-5 w-full" disabled={loading || !stored}>
             {loading ? "Please wait..." : "Set password and continue"}

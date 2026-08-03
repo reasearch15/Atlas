@@ -59,10 +59,20 @@ export function waitForAuthHydration(): Promise<void> {
  * Attempts a single cookie-backed refresh against the given endpoint.
  * Concurrent callers share one in-flight request per path (avoids refresh rotation races).
  * Network/CORS failures return null so callers can fall through to the login form.
+ * Never probes while a forced password-change challenge is pending.
  */
 export async function attemptRefresh(
   refreshPath: TenantRefreshPath | "/api/admin-auth/refresh" | "/api/auth/refresh"
 ): Promise<AuthResponse | null> {
+  if (
+    (refreshPath === "/api/staff-auth/refresh" || refreshPath === "/api/coadmin-auth/refresh") &&
+    hasPendingTenantPasswordChange(
+      refreshPath === "/api/staff-auth/refresh" ? "STAFF" : refreshPath === "/api/coadmin-auth/refresh" ? "COADMIN" : undefined
+    )
+  ) {
+    return null;
+  }
+
   const existing = refreshInflight.get(refreshPath);
   if (existing) return existing;
 

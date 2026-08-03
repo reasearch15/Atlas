@@ -259,16 +259,32 @@ describe("restoreTenantSession", () => {
         }
       }
     });
-    storage.set(
-      "atlas:staff:password-change",
-      JSON.stringify({ changeToken: "pending-token", username: "bella" })
+    const { storeTenantPasswordChangeChallenge, resumeTenantCookieRefresh } = await import(
+      "./tenant-password-change-storage"
     );
+    storeTenantPasswordChangeChallenge("staff", {
+      passwordChangeToken: "pending-token-pending-token-pending-tok",
+      username: "bella"
+    });
 
     const { restoreTenantSession, resetTenantRefreshInflightForTests } = await import("./session-restore");
     resetTenantRefreshInflightForTests();
     const restored = await restoreTenantSession({ expectedRole: "STAFF" });
     expect(restored).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
+    resumeTenantCookieRefresh();
     vi.unstubAllGlobals();
+  });
+
+  it("does not call staff refresh after a password-change login response", async () => {
+    vi.mocked(fetch).mockClear();
+    const { pauseTenantCookieRefresh, resumeTenantCookieRefresh } = await import("./tenant-password-change-storage");
+    pauseTenantCookieRefresh();
+    const { attemptRefresh, resetTenantRefreshInflightForTests } = await import("./session-restore");
+    resetTenantRefreshInflightForTests();
+    expect(await attemptRefresh("/api/staff-auth/refresh")).toBeNull();
+    expect(await attemptRefresh("/api/coadmin-auth/refresh")).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+    resumeTenantCookieRefresh();
   });
 });
