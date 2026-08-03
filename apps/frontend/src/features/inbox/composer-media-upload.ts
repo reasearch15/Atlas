@@ -1,5 +1,6 @@
 import type { TelegramMessageDto, TelegramSendMediaInput } from "@atlas/shared";
-import { api } from "@/lib/api";
+import { api, apiBaseUrl } from "@/lib/api";
+import { useAuthStore } from "@/stores/auth-store";
 
 export type ComposerContentType = TelegramSendMediaInput["contentType"];
 
@@ -11,7 +12,33 @@ export interface ComposerUploadHandlers {
 }
 
 /**
- * Presigns, uploads, and sends a media blob through the existing outbound pipeline.
+ * True when a browser upload target would hit private MinIO (unreachable / insecure).
+ */
+export function isBlockedPrivateUploadUrl(url: string): boolean {
+  return /127\.0\.0\.1|localhost|:9000|minio:|\/\/minio\b/i.test(url);
+}
+
+/**
+ * Resolves the absolute same-origin (or public API) upload URL from a presign response.
+ */
+export function resolveComposerUploadUrl(uploadUrl: string): string {
+  if (isBlockedPrivateUploadUrl(uploadUrl)) {
+    throw new Error(
+      "FAILED_UPLOAD: Upload target points at private storage. Refresh Atlas and retry."
+    );
+  }
+  if (uploadUrl.startsWith("http://") || uploadUrl.startsWith("https://")) {
+    if (isBlockedPrivateUploadUrl(uploadUrl)) {
+      throw new Error("FAILED_UPLOAD: Upload target is not reachable from the browser.");
+    }
+    return uploadUrl;
+  }
+  const path = uploadUrl.startsWith("/") ? uploadUrl : `/${uploadUrl}`;
+  return `${apiBaseUrl}${path}`;
+}
+
+/**
+ * Presigns, uploads via the Atlas same-origin proxy, and sends a media blob.
  */
 export async function uploadAndSendComposerMedia(
   chatId: string,
@@ -38,21 +65,30 @@ export async function uploadAndSendComposerMedia(
   const fileSizeBytes = file.size;
 
   handlers.onPhase?.("uploading");
-  const presign = await api.presignChatMedia(chatId, {
-    contentType: input.contentType === "LOCATION" || input.contentType === "CONTACT" ? "DOCUMENT" : input.contentType,
-    mimeType,
-    fileName,
-    fileSizeBytes,
-    idempotencyKey
-  });
-
-  await putBlobWithProgress(presign.uploadUrl, file, mimeType, handlers.onProgress, handlers.xhrRef);
+  let storageKey: string;
+  try {
+    const presign = await api.presignChatMedia(chatId, {
+      contentType: input.contentType === "LOCATION" || input.contentType === "CONTACT" ? "DOCUMENT" : input.contentType,
+      mimeType,
+      fileName,
+      fileSizeBytes,
+      idempotencyKey
+    });
+    storageKey = presign.storageKey;
+    const absoluteUploadUrl = resolveComposerUploadUrl(presign.uploadUrl);
+    await putBlobWithProgress(absoluteUploadUrl, file, mimeType, handlers.onProgress, handlers.xhrRef);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    const message = error instanceof Error ? error.message : "Upload failed";
+    if (message.startsWith("FAILED_UPLOAD:")) throw error;
+    throw new Error(`FAILED_UPLOAD: ${message}`);
+  }
 
   handlers.onPhase?.("sending");
   const body: TelegramSendMediaInput = {
     contentType: input.contentType,
     idempotencyKey,
-    storageKey: presign.storageKey,
+    storageKey,
     mimeType,
     fileName,
     fileSizeBytes,
@@ -70,9 +106,14 @@ export async function uploadAndSendComposerMedia(
   const optimisticAt = new Date().toISOString();
   handlers.onActivity?.(previewText, optimisticAt);
 
-  const pending = await api.sendChatMedia(chatId, body);
-  handlers.onActivity?.(pending.caption || pending.text || previewText, pending.sentAt);
-  return pending;
+  try {
+    const pending = await api.sendChatMedia(chatId, body);
+    handlers.onActivity?.(pending.caption || pending.text || previewText, pending.sentAt);
+    return pending;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Send failed";
+    throw new Error(`FAILED_SEND: ${message}`);
+  }
 }
 
 function putBlobWithProgress(
@@ -87,6 +128,11 @@ function putBlobWithProgress(
     if (xhrRef) xhrRef.current = xhr;
     xhr.open("PUT", uploadUrl);
     xhr.setRequestHeader("Content-Type", mimeType);
+    const token = useAuthStore.getState().accessToken;
+    if (token) {
+      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    }
+    xhr.withCredentials = true;
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable || event.total <= 0) return;
       onProgress?.(event.loaded / event.total);
@@ -98,11 +144,20 @@ function putBlobWithProgress(
         resolve();
         return;
       }
-      reject(new Error(`Upload failed (${xhr.status})`));
+      let detail = `HTTP ${xhr.status}`;
+      try {
+        const parsed = JSON.parse(xhr.responseText) as { error?: { code?: string; message?: string } };
+        if (parsed.error?.code) {
+          detail = `${parsed.error.code}: ${parsed.error.message ?? detail}`;
+        }
+      } catch {
+        // keep status detail
+      }
+      reject(new Error(detail));
     };
     xhr.onerror = () => {
       if (xhrRef) xhrRef.current = null;
-      reject(new Error("Upload failed"));
+      reject(new Error("Network error while uploading media"));
     };
     xhr.onabort = () => {
       if (xhrRef) xhrRef.current = null;
@@ -110,6 +165,22 @@ function putBlobWithProgress(
     };
     xhr.send(file);
   });
+}
+
+/**
+ * User-facing composer error that distinguishes upload vs send failures.
+ */
+export function formatComposerMediaError(error: unknown, kind: "attachment" | "voice" | "camera" = "attachment"): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.startsWith("FAILED_UPLOAD:")) {
+    return `Upload failed — ${raw.slice("FAILED_UPLOAD:".length).trim() || "could not store the file."}`;
+  }
+  if (raw.startsWith("FAILED_SEND:")) {
+    return `Send failed — ${raw.slice("FAILED_SEND:".length).trim() || "Telegram could not accept the media."}`;
+  }
+  if (kind === "voice") return raw || "Failed to send voice message.";
+  if (kind === "camera") return raw || "Failed to send camera capture.";
+  return raw || "Failed to send attachment.";
 }
 
 /**

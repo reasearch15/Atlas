@@ -36,6 +36,9 @@ declare module "fastify" {
   }
 }
 
+/** Max outbound media upload accepted by the same-origin proxy (matches shared schema). */
+const MEDIA_UPLOAD_BODY_LIMIT = 105 * 1024 * 1024;
+
 /**
  * Builds the Fastify application with plugins, infrastructure, and versioned routes.
  */
@@ -44,7 +47,8 @@ export async function buildApp(env: Env) {
     logger: {
       level: env.NODE_ENV === "production" ? "info" : "debug"
     },
-    genReqId: () => crypto.randomUUID()
+    genReqId: () => crypto.randomUUID(),
+    bodyLimit: MEDIA_UPLOAD_BODY_LIMIT
   });
   app.decorate("env", env);
 
@@ -61,6 +65,18 @@ export async function buildApp(env: Env) {
     await app.register(storagePlugin, { env });
     await app.register(realtimePlugin);
     await app.register(authPlugin, { env });
+
+    // Pass media upload bodies through as streams (do not buffer into JSON/string).
+    const passStream = (_request: unknown, payload: NodeJS.ReadableStream, done: (err: null, body: NodeJS.ReadableStream) => void) => {
+      done(null, payload);
+    };
+    app.addContentTypeParser(/^image\/.*/, passStream);
+    app.addContentTypeParser(/^video\/.*/, passStream);
+    app.addContentTypeParser(/^audio\/.*/, passStream);
+    app.addContentTypeParser("application/octet-stream", passStream);
+    app.addContentTypeParser("application/pdf", passStream);
+    app.addContentTypeParser("application/zip", passStream);
+    app.addContentTypeParser("application/x-tgsticker", passStream);
 
     await app.register(healthRoutes);
     await app.register(adminAuthRoutes, { prefix: "/api/admin-auth" });

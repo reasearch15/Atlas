@@ -120,9 +120,21 @@ export class TelegramMediaProxyService {
       streamed.contentType ||
       message.mimeType ||
       (variant === "thumbnail" ? "image/jpeg" : "application/octet-stream");
-    const safeName = sanitizeContentDispositionFilename(message.fileName || `${variant}.bin`);
+    const safeName = sanitizeContentDispositionFilename(
+      resolveMediaDownloadFilename({
+        fileName: message.fileName,
+        contentType: message.contentType,
+        mimeType: message.mimeType,
+        variant
+      })
+    );
+    const forceDownload = isDownloadQuery(request.query);
     const dispositionType =
-      variant === "thumbnail" || INLINE_CONTENT_TYPES.has(message.contentType) ? "inline" : "attachment";
+      forceDownload
+        ? "attachment"
+        : variant === "thumbnail" || INLINE_CONTENT_TYPES.has(message.contentType)
+          ? "inline"
+          : "attachment";
 
     reply.code(streamed.statusCode);
     reply.header("Content-Type", sanitizeHeaderToken(contentType));
@@ -227,6 +239,51 @@ export class TelegramMediaProxyService {
     const key = variant === "thumbnail" ? message.thumbnailStorageKey : message.mediaStorageKey;
     return { message, key };
   }
+}
+
+function isDownloadQuery(query: unknown): boolean {
+  if (!query || typeof query !== "object") return false;
+  const value = (query as { download?: unknown }).download;
+  if (value === true || value === 1) return true;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "1" || normalized === "true" || normalized === "download" || normalized === "attachment";
+  }
+  return false;
+}
+
+/**
+ * Picks a browser-friendly download filename for Telegram media.
+ * Photos without a stored fileName default to photo.jpg (or mime-derived extension).
+ */
+export function resolveMediaDownloadFilename(input: {
+  readonly fileName?: string | null;
+  readonly contentType?: string | null;
+  readonly mimeType?: string | null;
+  readonly variant?: "media" | "thumbnail";
+}): string {
+  const existing = typeof input.fileName === "string" ? input.fileName.trim() : "";
+  if (existing) return existing;
+
+  const mime = (input.mimeType ?? "").toLowerCase();
+  const contentType = (input.contentType ?? "").toUpperCase();
+  if (input.variant === "thumbnail") return "thumbnail.jpg";
+
+  if (contentType === "PHOTO" || mime.startsWith("image/")) {
+    if (mime.includes("png")) return "photo.png";
+    if (mime.includes("webp")) return "photo.webp";
+    if (mime.includes("gif")) return "photo.gif";
+    return "photo.jpg";
+  }
+  if (contentType === "VIDEO" || contentType === "VIDEO_NOTE" || mime.startsWith("video/")) {
+    return "video.mp4";
+  }
+  if (contentType === "VOICE" || contentType === "AUDIO" || mime.startsWith("audio/")) {
+    return mime.includes("mpeg") || mime.includes("mp3") ? "audio.mp3" : "audio.ogg";
+  }
+  if (contentType === "ANIMATION") return "animation.mp4";
+  if (contentType === "STICKER") return "sticker.webp";
+  return "file.bin";
 }
 
 function sanitizeContentDispositionFilename(name: string): string {

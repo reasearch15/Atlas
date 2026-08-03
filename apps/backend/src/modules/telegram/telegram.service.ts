@@ -45,6 +45,7 @@ import {
 import type { Role, TelegramAccountPermanentDeleteResponse } from "@atlas/shared";
 import { TelegramAccountPermanentDeleteService } from "./telegram-account-permanent-delete.service";
 import { signMediaAccessTicket, withMediaAccessTicket } from "./media-access-ticket";
+import { isPrivateMinioBrowserUrl, signMediaUploadTicket, verifyMediaUploadTicket } from "./media-upload-ticket";
 import {
   assertDeletableTelegramMessage,
   buildMessageDeletedEvent,
@@ -846,7 +847,8 @@ export class TelegramService {
   }
 
   /**
-   * Creates a presigned PUT URL for outbound media upload into workspace-scoped storage.
+   * Creates a same-origin authenticated upload target for outbound media.
+   * Never returns private MinIO / 127.0.0.1:9000 URLs to the browser.
    */
   public async createMediaUploadUrl(
     user: RequestUser,
@@ -866,8 +868,87 @@ export class TelegramService {
       fileName: input.fileName
     });
     this.app.storage.assertWorkspaceKey(account.workspaceId, storageKey);
-    const uploadUrl = await this.app.storage.getSignedPutUrl(storageKey, input.mimeType, 900);
+
+    const ticket = signMediaUploadTicket(this.app.env.JWT_ACCESS_SECRET, {
+      chatId,
+      workspaceId: account.workspaceId,
+      userId: user.id,
+      storageKey,
+      mimeType: input.mimeType,
+      fileName: input.fileName,
+      contentType: input.contentType,
+      fileSizeBytes: input.fileSizeBytes,
+      ttlSeconds: 900
+    });
+    const uploadUrl = `/api/telegram/chats/${chatId}/media/upload?upload=${encodeURIComponent(ticket)}`;
+    if (isPrivateMinioBrowserUrl(uploadUrl)) {
+      throw new AppError(500, "UPLOAD_URL_INVALID", "Refusing to expose a private storage endpoint to the browser.");
+    }
     return { uploadUrl, storageKey, expiresInSeconds: 900 };
+  }
+
+  /**
+   * Streams authenticated browser upload bytes into private MinIO.
+   * Idempotent when the object already exists for the ticketed storage key.
+   */
+  public async uploadMediaObject(
+    user: RequestUser,
+    chatId: string,
+    uploadToken: string | undefined,
+    bodyStream: NodeJS.ReadableStream,
+    requestContentType: string | undefined
+  ): Promise<{ readonly storageKey: string; readonly bytesReceived: number; readonly alreadyExisted: boolean }> {
+    this.assertWorkspaceMember(user);
+    const ticket = verifyMediaUploadTicket(this.app.env.JWT_ACCESS_SECRET, uploadToken);
+    if (!ticket) {
+      throw new AppError(401, "UPLOAD_TICKET_INVALID", "Upload ticket is missing, invalid, or expired. Retry to create a fresh upload.");
+    }
+    if (ticket.chatId !== chatId || ticket.userId !== user.id || ticket.workspaceId !== user.workspaceId) {
+      throw forbidden("Upload ticket does not match this chat or user.");
+    }
+
+    const chat = await this.repository.getChatForUser(user, chatId);
+    if (chat.workspaceId !== ticket.workspaceId) {
+      throw forbidden("Upload ticket workspace mismatch.");
+    }
+    this.app.storage.assertWorkspaceKey(ticket.workspaceId, ticket.storageKey);
+
+    const declaredMime = ticket.mimeType.toLowerCase();
+    const requestMime = (requestContentType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+    if (requestMime && requestMime !== declaredMime) {
+      throw new AppError(
+        400,
+        "UPLOAD_CONTENT_TYPE_MISMATCH",
+        "Upload Content-Type must match the type declared when the upload was created."
+      );
+    }
+
+    if (ticket.fileSizeBytes <= 0 || ticket.fileSizeBytes > 100 * 1024 * 1024) {
+      throw new AppError(400, "UPLOAD_SIZE_INVALID", "File size is outside the allowed range.");
+    }
+
+    const exists = await this.app.storage.objectExists(ticket.storageKey);
+    if (exists) {
+      return { storageKey: ticket.storageKey, bytesReceived: ticket.fileSizeBytes, alreadyExisted: true };
+    }
+
+    const { Readable } = await import("node:stream");
+    const stream = bodyStream instanceof Readable ? bodyStream : Readable.from(bodyStream as AsyncIterable<Uint8Array>);
+
+    try {
+      await this.app.storage.putObjectStream({
+        key: ticket.storageKey,
+        body: stream,
+        contentType: ticket.mimeType,
+        contentLength: ticket.fileSizeBytes
+      });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      this.app.log.error({ err: error, event: "telegram_media.upload_storage_failed", chatId });
+      throw new AppError(502, "UPLOAD_STORAGE_FAILED", "Failed to store uploaded media.");
+    }
+
+    return { storageKey: ticket.storageKey, bytesReceived: ticket.fileSizeBytes, alreadyExisted: false };
   }
 
   /**

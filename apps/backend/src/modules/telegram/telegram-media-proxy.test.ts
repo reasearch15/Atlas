@@ -2,7 +2,7 @@ import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { AppError } from "../../utils/errors";
 import { signMediaAccessTicket } from "./media-access-ticket";
-import { TelegramMediaProxyService } from "./telegram-media-proxy.service";
+import { TelegramMediaProxyService, resolveMediaDownloadFilename } from "./telegram-media-proxy.service";
 import { buildTelegramMessageMediaPath, isPrivateStorageMediaUrl } from "@atlas/shared";
 
 const workspaceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -321,6 +321,54 @@ describe("TelegramMediaProxyService", () => {
       "media"
     );
     expect(headers["content-type"]).toBe("image/jpeg");
+    expect(headers["content-disposition"]).toMatch(/^inline;/);
+  });
+
+  it("forces attachment Content-Disposition when download=1 for photos", async () => {
+    const { app, reply, headers } = makeApp({
+      message: {
+        id: messageId,
+        workspaceId,
+        telegramChatDbId: chatId,
+        telegramAccountId: accountId,
+        contentType: "PHOTO",
+        mimeType: "image/jpeg",
+        fileName: null,
+        mediaStorageKey: `workspaces/${workspaceId}/telegram/${accountId}/chat/msg/photo.jpg`,
+        thumbnailStorageKey: null,
+        mediaDownloadState: "STORED",
+        mediaUploadState: "STORED",
+        mediaError: null
+      }
+    });
+    const service = new TelegramMediaProxyService(app);
+    await service.streamMessageMedia(
+      { headers: { authorization: "Bearer token" }, query: { download: "1" } } as never,
+      reply,
+      messageId,
+      "media"
+    );
+    expect(headers["content-disposition"]).toMatch(/^attachment;/);
+    expect(headers["content-disposition"]).toContain("photo.jpg");
+  });
+
+  it("resolves photo download filenames when fileName is missing", () => {
+    expect(
+      resolveMediaDownloadFilename({
+        fileName: null,
+        contentType: "PHOTO",
+        mimeType: "image/jpeg",
+        variant: "media"
+      })
+    ).toBe("photo.jpg");
+    expect(
+      resolveMediaDownloadFilename({
+        fileName: "holiday.png",
+        contentType: "PHOTO",
+        mimeType: "image/png",
+        variant: "media"
+      })
+    ).toBe("holiday.png");
   });
 
   it("DTO media URLs are same-origin proxy paths without MinIO signatures", () => {

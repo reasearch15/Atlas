@@ -11,7 +11,8 @@ import {
   mediaPreviewLabel,
   readImageDimensions,
   readVideoMetadata,
-  uploadAndSendComposerMedia
+  uploadAndSendComposerMedia,
+  formatComposerMediaError
 } from "./composer-media-upload";
 import { insertTextAtCursor } from "./emoji-catalog";
 import { EmojiPicker } from "./emoji-picker";
@@ -190,7 +191,7 @@ export function MessageComposer({
         return;
       }
       setUploadPhase("error");
-      setUploadError(error instanceof Error ? error.message : "Failed to send attachment.");
+      setUploadError(formatComposerMediaError(error, "attachment"));
     }
   }
 
@@ -230,7 +231,7 @@ export function MessageComposer({
         return;
       }
       setVoicePhase("failed");
-      setUploadError(error instanceof Error ? error.message : "Failed to send voice message.");
+      setUploadError(formatComposerMediaError(error, "voice"));
     }
   }
 
@@ -271,7 +272,7 @@ export function MessageComposer({
         return;
       }
       setUploadPhase("error");
-      setUploadError(error instanceof Error ? error.message : "Failed to send camera capture.");
+      setUploadError(formatComposerMediaError(error, "camera"));
     }
   }
 

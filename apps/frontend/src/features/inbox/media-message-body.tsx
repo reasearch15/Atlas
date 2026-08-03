@@ -15,6 +15,7 @@ import {
   readLocationCoords,
   readPollMeta
 } from "./media-message-helpers";
+import { downloadMediaFile, resolveInboxMediaFileName } from "./media-download";
 import { RichMessageText } from "./rich-message-text";
 import { AuthMediaSrc } from "./auth-media-src";
 import { usePlayableMediaUrl } from "./media-url";
@@ -117,9 +118,10 @@ function MediaLoadingPlaceholder() {
 
 function PhotoBody({ message }: { readonly message: TelegramMessageDto }) {
   const ratio = aspectRatioStyle(message.width, message.height);
+  const downloadSource = message.mediaUrl ?? message.thumbnailUrl;
   return (
     <AuthMediaSrc
-      source={message.mediaUrl ?? message.thumbnailUrl}
+      source={downloadSource}
       variant={message.mediaUrl ? "media" : "thumbnail"}
       loadingFallback={<MediaLoadingPlaceholder />}
       errorFallback={<FallbackLabel>📷 Photo unavailable</FallbackLabel>}
@@ -139,23 +141,56 @@ function PhotoImage({
   readonly ratio?: string;
 }) {
   const [broken, setBroken] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState(false);
+
   if (broken) return <FallbackLabel>📷 Photo unavailable</FallbackLabel>;
+
+  const fileName = resolveInboxMediaFileName({
+    fileName: message.fileName,
+    contentType: message.contentType,
+    mediaType: message.mediaType,
+    mimeType: message.mimeType
+  });
+
   return (
-    <button
-      type="button"
-      className="block max-w-full overflow-hidden rounded-lg text-left"
-      onClick={() => window.open(src, "_blank", "noopener,noreferrer")}
-      aria-label="Open photo"
-    >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={src}
-        alt={message.caption || "Photo"}
-        className="max-h-80 max-w-full object-contain"
-        style={ratio ? { aspectRatio: ratio } : undefined}
-        onError={() => setBroken(true)}
-      />
-    </button>
+    <div className="group relative inline-block max-w-full">
+      <button
+        type="button"
+        className="block max-w-full overflow-hidden rounded-lg text-left"
+        onClick={() => window.open(src, "_blank", "noopener,noreferrer")}
+        aria-label="Open photo"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={message.caption || "Photo"}
+          className="max-h-80 max-w-full object-contain"
+          style={ratio ? { aspectRatio: ratio } : undefined}
+          onError={() => setBroken(true)}
+        />
+      </button>
+      <button
+        type="button"
+        className="absolute right-2 top-2 rounded-md bg-black/65 px-2 py-1 text-[11px] font-medium text-white opacity-100 shadow-sm transition hover:bg-black/80 sm:opacity-0 sm:group-hover:opacity-100"
+        aria-label="Download photo"
+        disabled={downloading}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setDownloadError(false);
+          setDownloading(true);
+          void downloadMediaFile(src, fileName)
+            .catch(() => setDownloadError(true))
+            .finally(() => setDownloading(false));
+        }}
+      >
+        {downloading ? "Saving…" : "Download"}
+      </button>
+      {downloadError ? (
+        <p className="mt-1 text-[11px] text-red-600">Couldn’t download photo. Try again.</p>
+      ) : null}
+    </div>
   );
 }
 

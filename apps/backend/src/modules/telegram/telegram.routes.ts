@@ -146,6 +146,36 @@ export async function telegramRoutes(app: FastifyInstance): Promise<void> {
     return service.createMediaUploadUrl(request.user!, params.chatId, request.body);
   });
 
+  app.put(
+    "/chats/:chatId/media/upload",
+    {
+      preHandler: [telegramSendGuard(app)],
+      bodyLimit: 105 * 1024 * 1024
+    },
+    async (request, reply) => {
+      const params = telegramChatIdParamsSchema.parse(request.params);
+      const query = request.query as { upload?: string };
+      const body = request.body;
+      if (!body || typeof (body as NodeJS.ReadableStream).pipe !== "function") {
+        return reply.status(400).send({
+          error: { code: "UPLOAD_BODY_REQUIRED", message: "Upload body stream is required." }
+        });
+      }
+      const result = await service.uploadMediaObject(
+        request.user!,
+        params.chatId,
+        query.upload,
+        body as NodeJS.ReadableStream,
+        typeof request.headers["content-type"] === "string" ? request.headers["content-type"] : undefined
+      );
+      return reply.status(result.alreadyExisted ? 200 : 201).send({
+        storageKey: result.storageKey,
+        bytesReceived: result.bytesReceived,
+        alreadyExisted: result.alreadyExisted
+      });
+    }
+  );
+
   app.post("/chats/:chatId/media", { preHandler: [telegramSendGuard(app)] }, async (request, reply) => {
     const params = telegramChatIdParamsSchema.parse(request.params);
     const result = await service.sendMediaByChatId(request.user!, params.chatId, request.body);

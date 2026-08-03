@@ -30,6 +30,12 @@ declare module "fastify" {
       bucket: string;
       assertReady: () => Promise<void>;
       putObject: (input: { key: string; body: Buffer; contentType: string }) => Promise<void>;
+      putObjectStream: (input: {
+        key: string;
+        body: Readable;
+        contentType: string;
+        contentLength: number;
+      }) => Promise<void>;
       deleteObject: (key: string) => Promise<void>;
       listObjectKeys: (prefix: string) => Promise<string[]>;
       objectExists: (key: string) => Promise<boolean>;
@@ -75,6 +81,17 @@ export const storagePlugin = fp<{ env: Env }>(async (app, options) => {
           Key: input.key,
           Body: input.body,
           ContentType: input.contentType
+        })
+      );
+    },
+    async putObjectStream(input) {
+      await client.send(
+        new PutObjectCommand({
+          Bucket: options.env.S3_BUCKET,
+          Key: input.key,
+          Body: input.body,
+          ContentType: input.contentType,
+          ContentLength: input.contentLength
         })
       );
     },
