@@ -46,18 +46,27 @@ export function useRoleWorkspaceBootstrap(expectedRole: ExpectedRole): {
     setError(null);
 
     void (async () => {
-      const result = await ensureRoleAuthenticated(expectedRole);
-      if (cancelled) return;
-      if (!result.ok) {
+      try {
+        const result = await ensureRoleAuthenticated(expectedRole);
+        if (cancelled) return;
+        if (!result.ok) {
+          clearRoleAuthBootstrap(expectedRole);
+          clearSession();
+          setStatus("UNAUTHENTICATED");
+          setError(result.error);
+          router.replace(getLoginRouteForRole(expectedRole) as Route);
+          return;
+        }
+        setStatus("AUTHENTICATED");
+        setError(null);
+      } catch {
+        if (cancelled) return;
         clearRoleAuthBootstrap(expectedRole);
         clearSession();
         setStatus("UNAUTHENTICATED");
-        setError(result.error);
+        setError("Session expired. Please sign in again.");
         router.replace(getLoginRouteForRole(expectedRole) as Route);
-        return;
       }
-      setStatus("AUTHENTICATED");
-      setError(null);
     })();
 
     return () => {

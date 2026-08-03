@@ -35,9 +35,10 @@ import type {
 import { useAuthStore } from "@/stores/auth-store";
 import { clearRoleAuthBootstrap, markRoleAuthenticated } from "@/lib/auth-bootstrap";
 import { handleFailedSessionRefresh, refreshPathFor, refreshSessionForPath } from "@/lib/auth-refresh";
+import { publicApiUrl } from "@/lib/public-api-url";
 import { clearRoleSensitiveClientCaches } from "@/lib/sensitive-cache";
 
-const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const baseUrl = publicApiUrl;
 
 /**
  * Applies a successful login/refresh response to client auth state.

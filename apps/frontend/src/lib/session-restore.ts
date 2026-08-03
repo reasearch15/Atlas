@@ -1,46 +1,71 @@
 import type { AuthResponse, AuthUser } from "@atlas/shared";
 import { isRoleAuthReady, markRoleAuthenticated } from "@/lib/auth-bootstrap";
 import { getPostLoginRoute } from "@/lib/post-login-route";
+import { publicApiUrl } from "@/lib/public-api-url";
 import { useAuthStore } from "@/stores/auth-store";
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const apiBaseUrl = publicApiUrl;
+const AUTH_HYDRATION_TIMEOUT_MS = 2_000;
+const REFRESH_TIMEOUT_MS = 10_000;
 
 export type TenantRefreshPath = "/api/coadmin-auth/refresh" | "/api/staff-auth/refresh";
 
 /**
  * Waits until the zustand auth persist layer has rehydrated from localStorage.
- * Re-checks after subscribing so hydration cannot complete between the check and the listener.
+ * Always resolves: missing persist, hydration errors, or a timeout must not block login.
  */
 export function waitForAuthHydration(): Promise<void> {
   if (typeof window === "undefined") return Promise.resolve();
-  if (useAuthStore.persist?.hasHydrated()) return Promise.resolve();
+  const persistApi = useAuthStore.persist;
+  if (!persistApi?.hasHydrated || !persistApi.onFinishHydration) {
+    return Promise.resolve();
+  }
+  if (persistApi.hasHydrated()) return Promise.resolve();
+
   return new Promise((resolve) => {
-    const unsubscribe = useAuthStore.persist.onFinishHydration(() => {
-      unsubscribe();
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      unsubscribe?.();
       resolve();
+    };
+
+    const unsubscribe = persistApi.onFinishHydration(() => {
+      finish();
     });
-    if (useAuthStore.persist?.hasHydrated()) {
-      unsubscribe();
-      resolve();
+
+    if (persistApi.hasHydrated()) {
+      finish();
+      return;
     }
+
+    const timeoutId = window.setTimeout(finish, AUTH_HYDRATION_TIMEOUT_MS);
   });
 }
 
 /**
  * Attempts a single cookie-backed refresh against the given endpoint.
+ * Network/CORS failures return null so callers can fall through to the login form.
  */
 export async function attemptRefresh(refreshPath: TenantRefreshPath | "/api/admin-auth/refresh" | "/api/auth/refresh"): Promise<AuthResponse | null> {
-  // Cookie-only POST: never send Content-Type without a JSON body (Fastify rejects empty JSON).
-  const response = await fetch(`${apiBaseUrl}${refreshPath}`, {
-    method: "POST",
-    credentials: "include"
-  });
-  if (!response.ok) return null;
-  const body = (await response.json()) as AuthResponse;
-  if (!body.accessToken || !body.user) return null;
-  useAuthStore.getState().setSession(body.accessToken, body.user);
-  markRoleAuthenticated(body.user.role);
-  return body;
+  try {
+    // Cookie-only POST: never send Content-Type without a JSON body (Fastify rejects empty JSON).
+    const response = await fetch(`${apiBaseUrl}${refreshPath}`, {
+      method: "POST",
+      credentials: "include",
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS)
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as AuthResponse;
+    if (!body.accessToken || !body.user) return null;
+    useAuthStore.getState().setSession(body.accessToken, body.user);
+    markRoleAuthenticated(body.user.role);
+    return body;
+  } catch {
+    return null;
+  }
 }
 
 /**

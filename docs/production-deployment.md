@@ -38,6 +38,12 @@ Production startup validation (backend):
 - `COOKIE_DOMAIN` not `localhost`
 - `FRONTEND_ORIGIN` must be `https://...`
 
+Frontend build-time (required in root `.env` / shared `.env` before `pnpm build`):
+
+- `NEXT_PUBLIC_API_URL` must be the public HTTPS origin (example: `https://platform.atlast.work`)
+- Loaded via `dotenv -e ../../.env -- next build` in `@atlas/frontend`
+- Production builds fail if missing, non-https, or pointing at localhost
+
 ## Folder layout (recommended)
 
 ```text

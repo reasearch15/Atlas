@@ -124,6 +124,30 @@ main() {
   fi
 
   log "build"
+  # NEXT_PUBLIC_API_URL is inlined into the Next.js client bundle at build time.
+  if [[ -z "${NEXT_PUBLIC_API_URL:-}" ]]; then
+    if [[ -f "${RELEASE_DIR}/.env" ]]; then
+      set -a
+      # shellcheck disable=SC1091
+      source "${RELEASE_DIR}/.env"
+      set +a
+    fi
+  fi
+  if [[ -z "${NEXT_PUBLIC_API_URL:-}" ]]; then
+    die "NEXT_PUBLIC_API_URL must be set in /opt/atlas/shared/.env before building the frontend"
+  fi
+  case "${NEXT_PUBLIC_API_URL}" in
+    https://localhost*|http://localhost*|https://127.0.0.1*|http://127.0.0.1*|http://*)
+      die "NEXT_PUBLIC_API_URL must be a public https origin for production builds (got a localhost/http value)"
+      ;;
+  esac
+  case "${NEXT_PUBLIC_API_URL}" in
+    https://*) ;;
+    *)
+      die "NEXT_PUBLIC_API_URL must start with https://"
+      ;;
+  esac
+  export NEXT_PUBLIC_API_URL
   pnpm build
 
   # Load DATABASE_URL for backup without printing secrets.

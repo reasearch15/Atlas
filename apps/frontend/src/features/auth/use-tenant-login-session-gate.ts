@@ -13,6 +13,7 @@ type SessionGateState =
 
 /**
  * Restores a tenant session before showing a login form, then redirects when valid.
+ * Always leaves "checking" — failures and cancellations must surface the login form.
  */
 export function useTenantLoginSessionGate(options?: { readonly expectedRole?: "COADMIN" | "STAFF" }) {
   const router = useRouter();
@@ -20,20 +21,27 @@ export function useTenantLoginSessionGate(options?: { readonly expectedRole?: "C
 
   useEffect(() => {
     let cancelled = false;
+
     void (async () => {
-      const user = await restoreTenantSession();
-      if (cancelled) return;
-      if (!user) {
+      try {
+        const user = await restoreTenantSession();
+        if (cancelled) return;
+        if (!user) {
+          setState({ status: "anonymous" });
+          return;
+        }
+        if (options?.expectedRole && user.role !== options.expectedRole) {
+          setState({ status: "anonymous" });
+          return;
+        }
+        setState({ status: "authenticated", user });
+        router.replace(resolveTenantLanding(user) as Route);
+      } catch {
+        if (cancelled) return;
         setState({ status: "anonymous" });
-        return;
       }
-      if (options?.expectedRole && user.role !== options.expectedRole) {
-        setState({ status: "anonymous" });
-        return;
-      }
-      setState({ status: "authenticated", user });
-      router.replace(resolveTenantLanding(user) as Route);
     })();
+
     return () => {
       cancelled = true;
     };

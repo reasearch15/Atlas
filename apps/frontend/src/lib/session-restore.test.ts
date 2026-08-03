@@ -134,6 +134,38 @@ describe("restoreTenantSession", () => {
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/staff-auth/refresh"), expect.any(Object));
   });
 
+  it("returns to anonymous state when refresh fetch throws (network/CORS)", async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    const { restoreTenantSession } = await import("./session-restore");
+    const restored = await restoreTenantSession();
+
+    expect(restored).toBeNull();
+    expect(clearSession).toHaveBeenCalled();
+  });
+
+  it("does not hang when persist hydration never finishes", async () => {
+    const { useAuthStore } = await import("@/stores/auth-store");
+    const originalPersist = useAuthStore.persist;
+    useAuthStore.persist = {
+      ...originalPersist,
+      hasHydrated: () => false,
+      onFinishHydration: () => () => undefined
+    };
+    vi.mocked(fetch).mockResolvedValue({ ok: false, json: async () => ({}) } as Response);
+
+    try {
+      const { restoreTenantSession } = await import("./session-restore");
+      const started = Date.now();
+      const restored = await restoreTenantSession();
+      expect(Date.now() - started).toBeLessThan(3_500);
+      expect(restored).toBeNull();
+    } finally {
+      useAuthStore.persist = originalPersist;
+    }
+  });
+
   it("uses staff refresh first for staff users and redirects via staff landing helper", async () => {
     authState = {
       accessToken: null,
