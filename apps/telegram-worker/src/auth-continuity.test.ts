@@ -218,9 +218,47 @@ describe("Telegram authorization continuity", () => {
         return { mode: "authorization", client: { session: { dcId: 5, save: () => "final-session" } } };
       },
       getSelf: async () => ({ id: "42", username: "Piccaso47" }),
+      resolveSelfUserId: async () => "42",
+      isIgnorableDialog: () => false,
       listDialogs: async () => [
-        { telegramChatId: "chat-ok", title: "Saved Chat", username: null, chatType: "PRIVATE", unreadCount: 0, isPinned: false, isBot: false, firstName: "Saved", lastName: "Chat", raw: {} },
-        { telegramChatId: "chat-bad", title: "Bad Chat", username: null, chatType: "PRIVATE", unreadCount: 0, isPinned: false, isBot: false, firstName: "Bad", lastName: "Chat", raw: {} }
+        {
+          telegramChatId: "chat-ok",
+          title: "Saved Chat",
+          username: null,
+          chatType: "PRIVATE",
+          unreadCount: 0,
+          isPinned: false,
+          isBot: false,
+          firstName: "Saved",
+          lastName: "Chat",
+          accessHash: "1",
+          peerType: "USER",
+          phone: null,
+          isSelf: false,
+          isSupport: false,
+          isArchived: false,
+          topMessageId: null,
+          raw: {}
+        },
+        {
+          telegramChatId: "chat-bad",
+          title: "Bad Chat",
+          username: null,
+          chatType: "PRIVATE",
+          unreadCount: 0,
+          isPinned: false,
+          isBot: false,
+          firstName: "Bad",
+          lastName: "Chat",
+          accessHash: "2",
+          peerType: "USER",
+          phone: null,
+          isSelf: false,
+          isSupport: false,
+          isArchived: false,
+          topMessageId: null,
+          raw: {}
+        }
       ],
       listRecentTextMessages: async (_runtime: unknown, chatId: string) => {
         if (chatId === "chat-bad") throw new Error("dialog fetch failed");
@@ -250,6 +288,9 @@ describe("Telegram authorization continuity", () => {
         accessHash: "123456789",
         peerType: "USER",
         phone: null,
+        isSelf: false,
+        isSupport: false,
+        isArchived: false,
         raw: {}
       }),
       safeDisconnect: async () => undefined
@@ -261,6 +302,7 @@ describe("Telegram authorization continuity", () => {
       telegramChat: {
         findUnique: async () => null,
         findMany: async () => [],
+        updateMany: async () => ({ count: 0 }),
         upsert: async (input: any) => {
           upsertedChats.push(input);
           return {

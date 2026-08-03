@@ -131,6 +131,9 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
         return toInboxConversation({ ...item.chat, unreadCount: 0 }, item.accountLabel);
       })
     );
+    void api.telegramMarkChatRead(chatId).catch(() => {
+      // Optimistic UI already cleared; refresh will reconcile if persistence failed.
+    });
   }, []);
 
   const deliverMessageToChat = useCallback((chatId: string, message: TelegramMessageDto) => {
@@ -226,7 +229,19 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
             previewText: event.lastMessagePreview ?? existing?.chat.lastMessagePreview ?? "",
             sentAt: event.lastMessageAt ?? existing?.chat.lastMessageAt ?? new Date().toISOString(),
             direction: event.lastMessageDirection ?? existing?.chat.lastMessageDirection ?? "INBOUND",
-            unreadCount: open ? 0 : event.unreadCount
+            unreadCount: open ? 0 : event.unreadCount,
+            ...(event.title !== undefined ? { title: event.title } : {}),
+            ...(event.firstName !== undefined ? { firstName: event.firstName } : {}),
+            ...(event.lastName !== undefined ? { lastName: event.lastName } : {}),
+            ...(event.username !== undefined ? { username: event.username } : {}),
+            ...(event.phone !== undefined ? { phone: event.phone } : {}),
+            ...(event.chatType !== undefined ? { chatType: event.chatType } : {}),
+            ...(event.isBot !== undefined ? { isBot: event.isBot } : {}),
+            ...(event.isPinned !== undefined ? { isPinned: event.isPinned } : {}),
+            ...(event.identityResolved !== undefined ? { identityResolved: event.identityResolved } : {}),
+            ...(event.needsCrmAttention !== undefined ? { needsCrmAttention: event.needsCrmAttention } : {}),
+            ...(event.telegramChatId !== undefined ? { telegramChatId: event.telegramChatId } : {}),
+            ...(existing ? { accountLabel: existing.accountLabel } : {})
           });
         });
         // Chat-list metadata only — message bodies arrive via WS message events.

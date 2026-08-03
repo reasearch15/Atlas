@@ -119,6 +119,7 @@ enum TelegramMediaDownloadState {
   STORED
   FAILED
   SKIPPED
+  UNAVAILABLE
 }
 
 enum TelegramSendStatus {
@@ -145,6 +146,7 @@ enum TelegramOutboundOperation {
   INITIAL_SYNC
   MEDIA_BACKFILL
   PERMANENT_DELETE
+  MARK_CHAT_READ
 }
 
 enum TelegramAccountDeletionStage {
@@ -429,6 +431,10 @@ model TelegramChat {
   unreadCount        Int                       @default(0) @map("unread_count")
   isPinned           Boolean                   @default(false) @map("is_pinned")
   isArchived         Boolean                   @default(false) @map("is_archived")
+  /** Max Telegram message id acknowledged as read by Atlas (durable read boundary). */
+  lastReadTelegramMessageId String?            @map("last_read_telegram_message_id") @db.VarChar(80)
+  /** When Atlas last persisted a read acknowledgement for this chat. */
+  lastReadAt         DateTime?                 @map("last_read_at")
   isDevelopmentFixture Boolean                 @default(false) @map("is_development_fixture")
   fixtureKey         String?                   @unique @map("fixture_key") @db.VarChar(120)
   rawMetadataJson    Json                      @default("{}") @map("raw_metadata_json")

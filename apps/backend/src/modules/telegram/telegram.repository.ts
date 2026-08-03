@@ -89,8 +89,8 @@ export class TelegramRepository {
   public async listChats(user: RequestUser, accountId: string) {
     const account = await this.getAccountForUser(user, accountId);
     return this.prisma.telegramChat.findMany({
-      where: { workspaceId: account.workspaceId, telegramAccountId: account.id },
-      orderBy: [{ isPinned: "desc" }, { lastMessageAt: "desc" }],
+      where: { workspaceId: account.workspaceId, telegramAccountId: account.id, isArchived: false },
+      orderBy: [{ isPinned: "desc" }, { lastMessageAt: "desc" }, { id: "asc" }],
       take: 100,
       include: {
         messages: {

@@ -1,4 +1,4 @@
-import { PutObjectCommand, S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { PutObjectCommand, S3Client, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { WorkerEnv } from "./env";
 
@@ -9,6 +9,7 @@ export type MediaObjectStore = {
     readonly contentType: string;
   }) => Promise<void>;
   readonly getSignedGetUrl: (key: string, expiresInSeconds?: number) => Promise<string>;
+  readonly objectExists: (key: string) => Promise<boolean>;
   readonly buildObjectKey: (input: {
     readonly workspaceId: string;
     readonly telegramAccountId: string;
@@ -64,6 +65,14 @@ export function createMediaObjectStore(env: WorkerEnv): MediaObjectStore {
         }),
         { expiresIn: expiresInSeconds }
       );
+    },
+    async objectExists(key) {
+      try {
+        await client.send(new HeadObjectCommand({ Bucket: env.S3_BUCKET, Key: key }));
+        return true;
+      } catch {
+        return false;
+      }
     }
   };
 }

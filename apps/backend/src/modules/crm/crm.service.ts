@@ -388,15 +388,16 @@ export class CrmService {
     this.assertStaffOrCoadmin(user);
     const workspaceId = this.requireWorkspaceId(user);
 
+    const activeChat = { workspaceId, isArchived: false as const };
     const [all, unassigned, mine, newCount, open, waiting, unread, resolved] = await Promise.all([
-      this.app.prisma.telegramChat.count({ where: { workspaceId } }),
-      this.app.prisma.telegramChat.count({ where: { workspaceId, assignedUserId: null } }),
-      this.app.prisma.telegramChat.count({ where: { workspaceId, assignedUserId: user.id } }),
-      this.app.prisma.telegramChat.count({ where: { workspaceId, crmStatus: "NEW" } }),
-      this.app.prisma.telegramChat.count({ where: { workspaceId, crmStatus: "OPEN" } }),
-      this.app.prisma.telegramChat.count({ where: { workspaceId, crmStatus: "WAITING" } }),
-      this.app.prisma.telegramChat.count({ where: { workspaceId, unreadCount: { gt: 0 } } }),
-      this.app.prisma.telegramChat.count({ where: { workspaceId, crmStatus: "RESOLVED" } })
+      this.app.prisma.telegramChat.count({ where: activeChat }),
+      this.app.prisma.telegramChat.count({ where: { ...activeChat, assignedUserId: null } }),
+      this.app.prisma.telegramChat.count({ where: { ...activeChat, assignedUserId: user.id } }),
+      this.app.prisma.telegramChat.count({ where: { ...activeChat, crmStatus: "NEW" } }),
+      this.app.prisma.telegramChat.count({ where: { ...activeChat, crmStatus: "OPEN" } }),
+      this.app.prisma.telegramChat.count({ where: { ...activeChat, crmStatus: "WAITING" } }),
+      this.app.prisma.telegramChat.count({ where: { ...activeChat, unreadCount: { gt: 0 } } }),
+      this.app.prisma.telegramChat.count({ where: { ...activeChat, crmStatus: "RESOLVED" } })
     ]);
 
     return { all, unassigned, mine, new: newCount, open, waiting, unread, resolved };

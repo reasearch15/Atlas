@@ -1,12 +1,18 @@
 import { Prisma, type CrmContactKind, type PrismaClient } from "@prisma/client";
 import Redis from "ioredis";
-import type { CrmConversationStatus, TelegramMessageDto } from "@atlas/shared";
-import { reopenStatusOnInbound } from "@atlas/shared";
+import {
+  buildCrmContactDisplayTitle,
+  isOfficialTelegramServicePeer,
+  reopenStatusOnInbound,
+  shouldIgnoreTelegramDialog,
+  type CrmConversationStatus,
+  type TelegramMessageDto
+} from "@atlas/shared";
 import { decryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
 import type { WorkerEnv } from "./env";
 import { AccountLease } from "./heartbeat";
 import { TelegramClientAdapter, type NormalizedTextMessage, type TelegramRuntime, isUsableDisplayTitle } from "./telegram-client";
-import { messageCreatedEvent, chatUpdatedEvent } from "./update-normalizer";
+import { messageCreatedEvent, chatUpdatedEvent, chatUpdatedFieldsFromRow } from "./update-normalizer";
 import { toTelegramMessageDto } from "./message-dto";
 import { buildIdentityFillUpdate } from "./chat-identity";
 import { createMediaObjectStore } from "./media-storage";
@@ -84,8 +90,18 @@ async function attachConnectedAccounts(
       apiHash: decryptSecret(account.developerApp.encryptedApiHash as unknown as EncryptedSecret, env.TELEGRAM_SESSION_ENCRYPTION_KEY)
     }, { mode: "live" });
     activeAccounts.set(account.id, runtime);
+    const selfTelegramUserId = await adapter.resolveSelfUserId(runtime);
     adapter.listenForTextMessages(runtime, async (message) => {
-      const chat = await upsertChat(prisma, adapter, runtime, account.workspaceId, account.id, message);
+      if (isOfficialTelegramServicePeer(message.telegramChatId)) {
+        return;
+      }
+      if (selfTelegramUserId && message.telegramChatId === selfTelegramUserId) {
+        return;
+      }
+      const chat = await upsertChat(prisma, adapter, runtime, account.workspaceId, account.id, message, selfTelegramUserId);
+      if (!chat) {
+        return;
+      }
       const persisted = await persistInboundMessage(prisma, redis, account.workspaceId, account.id, chat.id, message);
       const refreshed = await prisma.telegramChat.findUnique({ where: { id: chat.id } });
       await redis.publish("atlas.workspace-events", JSON.stringify(messageCreatedEvent(account.workspaceId, persisted)));
@@ -93,14 +109,13 @@ async function attachConnectedAccounts(
         await redis.publish(
           "atlas.workspace-events",
           JSON.stringify(
-            chatUpdatedEvent(account.workspaceId, {
-              telegramAccountId: account.id,
-              chatId: refreshed.id,
-              lastMessagePreview: refreshed.lastMessagePreview,
-              lastMessageAt: refreshed.lastMessageAt?.toISOString() ?? null,
-              lastMessageDirection: persisted.direction,
-              unreadCount: refreshed.unreadCount
-            })
+            chatUpdatedEvent(
+              account.workspaceId,
+              chatUpdatedFieldsFromRow({
+                ...refreshed,
+                lastMessageDirection: persisted.direction
+              })
+            )
           )
         );
       }
@@ -136,11 +151,16 @@ async function upsertChat(
   runtime: TelegramRuntime,
   workspaceId: string,
   telegramAccountId: string,
-  message: NormalizedTextMessage
+  message: NormalizedTextMessage,
+  selfTelegramUserId: string | null
 ) {
   const existing = await prisma.telegramChat.findUnique({
     where: { telegramAccountId_telegramChatId: { telegramAccountId, telegramChatId: message.telegramChatId } }
   });
+
+  if (existing?.isArchived) {
+    return null;
+  }
 
   let identity = null as Awaited<ReturnType<TelegramClientAdapter["resolveChatIdentity"]>> | null;
   const needsIdentity =
@@ -162,6 +182,42 @@ async function upsertChat(
     } catch {
       identity = null;
     }
+  }
+
+  if (
+    identity &&
+    adapter.isIgnorableDialog(identity, selfTelegramUserId)
+  ) {
+    if (existing) {
+      await prisma.telegramChat.update({
+        where: { id: existing.id },
+        data: { isArchived: true, unreadCount: 0, needsCrmAttention: false, isPinned: false }
+      });
+    }
+    return null;
+  }
+
+  if (
+    shouldIgnoreTelegramDialog({
+      telegramChatId: message.telegramChatId,
+      chatType: identity?.chatType ?? existing?.chatType ?? "UNKNOWN",
+      title: identity?.title ?? existing?.title ?? null,
+      username: identity?.username ?? existing?.username ?? null,
+      firstName: identity?.firstName ?? existing?.firstName ?? null,
+      lastName: identity?.lastName ?? existing?.lastName ?? null,
+      isSelf: identity?.isSelf ?? false,
+      isSupport: identity?.isSupport ?? false,
+      isArchived: identity?.isArchived ?? false,
+      selfTelegramUserId
+    })
+  ) {
+    if (existing) {
+      await prisma.telegramChat.update({
+        where: { id: existing.id },
+        data: { isArchived: true, unreadCount: 0, needsCrmAttention: false, isPinned: false }
+      });
+    }
+    return null;
   }
 
   const crmContactId = existing?.crmContactId ?? (await linkCrmContact(prisma, workspaceId, message, identity));
@@ -208,6 +264,18 @@ async function upsertChat(
     );
   }
 
+  const createTitle =
+    identity?.title ??
+    buildCrmContactDisplayTitle({
+      firstName: identity?.firstName ?? null,
+      lastName: identity?.lastName ?? null,
+      username: identity?.username ?? null,
+      phone: identity?.phone ?? null,
+      telegramChatId: message.telegramChatId,
+      chatType: identity?.chatType ?? "UNKNOWN",
+      isBot: identity?.isBot ?? false
+    });
+
   const chat = await prisma.telegramChat.upsert({
     where: { telegramAccountId_telegramChatId: { telegramAccountId, telegramChatId: message.telegramChatId } },
     update: updateData,
@@ -216,7 +284,7 @@ async function upsertChat(
       telegramAccountId,
       telegramChatId: message.telegramChatId,
       chatType: identity?.chatType ?? "UNKNOWN",
-      title: identity?.title ?? "Unknown User",
+      title: createTitle,
       username: identity?.username ?? null,
       firstName: identity?.firstName ?? null,
       lastName: identity?.lastName ?? null,
@@ -260,15 +328,24 @@ async function linkCrmContact(
   prisma: PrismaClient,
   workspaceId: string,
   message: NormalizedTextMessage,
-  identity: { chatType: string; title: string; username: string | null; firstName: string | null; lastName: string | null } | null
+  identity: {
+    chatType: string;
+    title: string;
+    username: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    phone?: string | null;
+  } | null
 ): Promise<string> {
-  const displayName =
-    (identity?.title && isUsableDisplayTitle(identity.title, message.telegramChatId) ? identity.title : null) ||
-    (identity?.firstName && identity?.lastName && `${identity.firstName} ${identity.lastName}`.trim()) ||
-    identity?.firstName ||
-    identity?.lastName ||
-    identity?.username ||
-    null;
+  const displayName = buildCrmContactDisplayTitle({
+    firstName: identity?.firstName ?? null,
+    lastName: identity?.lastName ?? null,
+    username: identity?.username ?? null,
+    phone: identity?.phone ?? null,
+    telegramChatId: message.telegramChatId,
+    groupTitle: identity?.title ?? null,
+    chatType: identity?.chatType ?? "PRIVATE"
+  });
 
   const contact = await prisma.crmContact.upsert({
     where: { workspaceId_telegramPeerId: { workspaceId, telegramPeerId: message.telegramChatId } },
@@ -280,13 +357,13 @@ async function linkCrmContact(
       workspaceId,
       telegramPeerId: message.telegramChatId,
       kind: mapContactKind(identity?.chatType),
-      displayName: displayName ?? "Unknown",
+      displayName,
       username: identity?.username ?? null
     }
   });
 
   // Upgrade placeholder CRM names without overwriting curated contact names.
-  if (displayName && /^unknown(\s|$)/i.test(contact.displayName)) {
+  if (/^unknown(\s|$)/i.test(contact.displayName) && !/^unknown(\s|$)/i.test(displayName)) {
     await prisma.crmContact.update({
       where: { id: contact.id },
       data: { displayName }
@@ -371,19 +448,21 @@ async function persistInboundMessage(
     });
     const delivered = await prisma.telegramMessage.findUnique({ where: { id: persisted.id } });
     if (delivered) {
+      const chat = await prisma.telegramChat.findUnique({ where: { id: chatDbId } });
       return toTelegramMessageDto(delivered, {
         direction: "OUTBOUND",
-        chatTitle: null,
-        chatType: "UNKNOWN",
-        chatUsername: null
+        chatTitle: chat?.title ?? null,
+        chatType: chat?.chatType ?? "UNKNOWN",
+        chatUsername: chat?.username ?? null
       });
     }
   }
 
+  const chat = await prisma.telegramChat.findUnique({ where: { id: chatDbId } });
   return toTelegramMessageDto(persisted, {
     direction: persisted.direction === "OUTBOUND" ? "OUTBOUND" : "INBOUND",
-    chatTitle: null,
-    chatType: "UNKNOWN",
-    chatUsername: null
+    chatTitle: chat?.title ?? null,
+    chatType: chat?.chatType ?? "UNKNOWN",
+    chatUsername: chat?.username ?? null
   });
 }

@@ -9,8 +9,11 @@ import type {
   TelegramQueueHealthDto
 } from "@atlas/shared";
 import {
+  buildCrmContactDisplayTitle,
   contentTypeToMediaType,
   formatTelegramMediaPreview,
+  isUsableHumanDisplayTitle,
+  shouldIgnoreTelegramDialog,
   type TelegramContentType
 } from "@atlas/shared";
 import { decryptSecret, encryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
@@ -258,7 +261,109 @@ export class TelegramService {
   public async listChats(user: RequestUser, accountId: string): Promise<TelegramChatDto[]> {
     this.assertWorkspaceMember(user);
     const chats = await this.repository.listChats(user, accountId);
-    return chats.map((chat) => this.toChatDto(chat, user));
+    return chats
+      .filter((chat) => {
+        const meta =
+          chat.rawMetadataJson && typeof chat.rawMetadataJson === "object" && !Array.isArray(chat.rawMetadataJson)
+            ? (chat.rawMetadataJson as Record<string, unknown>)
+            : {};
+        return !shouldIgnoreTelegramDialog({
+          telegramChatId: chat.telegramChatId,
+          chatType: chat.chatType,
+          title: chat.title,
+          username: chat.username,
+          firstName: chat.firstName,
+          lastName: chat.lastName,
+          isSelf: Boolean(meta.self),
+          isSupport: Boolean(meta.support),
+          isArchived: chat.isArchived || Boolean(meta.archived)
+        });
+      })
+      .map((chat) => this.toChatDto(chat, user));
+  }
+
+  /**
+   * Persists conversation read state and enqueues Telegram readHistory acknowledgement.
+   */
+  public async markChatRead(user: RequestUser, chatId: string): Promise<{ readonly unreadCount: 0; readonly chatId: string }> {
+    this.assertWorkspaceMember(user);
+    const chat = await this.app.prisma.telegramChat.findFirst({
+      where: { id: chatId, workspaceId: user.workspaceId ?? "" }
+    });
+    if (!chat) {
+      throw telegramNotFound();
+    }
+
+    const previousUnread = chat.unreadCount;
+    const maxId = chat.lastMessageId;
+    const updated = await this.app.prisma.telegramChat.update({
+      where: { id: chat.id },
+      data: {
+        unreadCount: 0,
+        ...(maxId
+          ? {
+              lastReadTelegramMessageId: maxId,
+              lastReadAt: new Date()
+            }
+          : { lastReadAt: new Date() })
+      }
+    });
+
+    this.app.log.info(
+      {
+        event: "telegram_chat.mark_read_api",
+        conversationId: chat.id,
+        telegramAccountId: chat.telegramAccountId,
+        peerId: chat.telegramChatId,
+        previousUnreadCount: previousUnread,
+        newUnreadCount: 0,
+        readMaxMessageId: maxId
+      },
+      "chat marked read"
+    );
+
+    await this.app.redis.publish(
+      "atlas.workspace-events",
+      JSON.stringify({
+        type: "telegram.chat.updated",
+        eventId: crypto.randomUUID(),
+        workspaceId: chat.workspaceId,
+        telegramAccountId: chat.telegramAccountId,
+        chatId: chat.id,
+        lastMessagePreview: updated.lastMessagePreview,
+        lastMessageAt: updated.lastMessageAt?.toISOString() ?? null,
+        lastMessageDirection: null,
+        unreadCount: 0,
+        title: updated.title,
+        firstName: updated.firstName,
+        lastName: updated.lastName,
+        username: updated.username,
+        phone: updated.peerPhone,
+        chatType: updated.chatType,
+        isBot: updated.isBot,
+        isPinned: updated.isPinned,
+        identityResolved: Boolean(updated.title && !/^unknown(\s|$)/i.test(updated.title)),
+        needsCrmAttention: updated.needsCrmAttention,
+        telegramChatId: updated.telegramChatId
+      })
+    );
+
+    if (maxId) {
+      try {
+        await this.enqueue(
+          chat.workspaceId,
+          chat.telegramAccountId,
+          user,
+          "MARK_CHAT_READ",
+          { chatDbId: chat.id, maxTelegramMessageId: maxId },
+          `mark-read:${chat.id}:${maxId}`
+        );
+      } catch (error) {
+        this.app.log.warn({ err: error, chatId: chat.id }, "mark-read enqueue skipped");
+      }
+    }
+
+    return { unreadCount: 0, chatId: chat.id };
   }
 
   /**
@@ -971,7 +1076,7 @@ export class TelegramService {
         unreadCount: chat.unreadCount,
         isPinned: chat.isPinned,
         isBot,
-        identityResolved: isUsableTitle(composedTitle, chat.telegramChatId),
+        identityResolved: isUsableHumanDisplayTitle(composedTitle, chat.telegramChatId),
         crmStatus: (chat.crmStatus as TelegramChatDto["crmStatus"]) ?? "NEW",
         assignedUserId: chat.assignedUserId ?? null,
         assignedUserName: chat.assignedUser?.name ?? null,
@@ -1055,16 +1160,36 @@ export class TelegramService {
 
     let mediaUrl: string | null = null;
     let thumbnailUrl: string | null = null;
+    let mediaDownloadState = (message.mediaDownloadState as TelegramMessageDto["mediaDownloadState"]) ?? "NONE";
+    let mediaError = message.mediaError ?? null;
     const workspaceId = message.workspaceId ?? chat.workspaceId;
     if (message.mediaStorageKey && workspaceId) {
       try {
         this.app.storage.assertWorkspaceKey(workspaceId, message.mediaStorageKey);
-        mediaUrl = await this.app.storage.getSignedGetUrl(message.mediaStorageKey);
+        const exists = await this.app.storage.objectExists(message.mediaStorageKey);
+        if (!exists) {
+          mediaUrl = null;
+          mediaDownloadState = "UNAVAILABLE";
+          mediaError = "OBJECT_MISSING";
+          // Persist unavailable so clients stop requesting broken signed URLs.
+          void this.app.prisma.telegramMessage
+            .update({
+              where: { id: message.id },
+              data: {
+                mediaDownloadState: "UNAVAILABLE",
+                mediaUploadState: "UNAVAILABLE",
+                mediaError: "OBJECT_MISSING"
+              }
+            })
+            .catch(() => undefined);
+        } else {
+          mediaUrl = await this.app.storage.getSignedGetUrl(message.mediaStorageKey);
+        }
       } catch {
         mediaUrl = null;
       }
     }
-    if (message.thumbnailStorageKey && workspaceId) {
+    if (message.thumbnailStorageKey && workspaceId && mediaDownloadState !== "UNAVAILABLE") {
       try {
         this.app.storage.assertWorkspaceKey(workspaceId, message.thumbnailStorageKey);
         thumbnailUrl = await this.app.storage.getSignedGetUrl(message.thumbnailStorageKey);
@@ -1094,9 +1219,12 @@ export class TelegramService {
         mediaMetadata: metadata,
         mediaUrl,
         thumbnailUrl,
-        mediaDownloadState: (message.mediaDownloadState as TelegramMessageDto["mediaDownloadState"]) ?? "NONE",
-        mediaUploadState: (message.mediaUploadState as TelegramMessageDto["mediaUploadState"]) ?? "NONE",
-        mediaError: message.mediaError ?? null,
+        mediaDownloadState,
+        mediaUploadState:
+          mediaDownloadState === "UNAVAILABLE"
+            ? "UNAVAILABLE"
+            : ((message.mediaUploadState as TelegramMessageDto["mediaUploadState"]) ?? "NONE"),
+        mediaError,
         sentAt: message.telegramCreatedAt.toISOString(),
         editedAt: message.telegramEditedAt?.toISOString() ?? null,
         isEdited: Boolean(message.telegramEditedAt),
@@ -1142,30 +1270,16 @@ function composeDisplayTitle(input: {
   telegramChatId: string;
   phone?: string | null;
 }): string {
-  if (input.chatType === "GROUP" || input.chatType === "SUPERGROUP" || input.chatType === "CHANNEL") {
-    if (isUsableTitle(input.title, input.telegramChatId)) return input.title.trim();
-    if (input.username) return input.username;
-    return input.chatType === "CHANNEL" ? "Unknown Channel" : "Unknown Group";
-  }
-  // Private: title → first+last → username → phone → Unknown
-  if (isUsableTitle(input.title, input.telegramChatId)) return input.title.trim();
-  if (input.firstName && input.lastName) return `${input.firstName} ${input.lastName}`.trim();
-  if (input.firstName) return input.firstName;
-  if (input.lastName) return input.lastName;
-  if (input.username) return input.username;
-  if (input.phone?.trim()) return input.phone.trim();
-  if (input.isBot) return "Unknown Bot";
-  return "Unknown User";
-}
-
-function isUsableTitle(title: string | null | undefined, telegramChatId: string): boolean {
-  if (!title) return false;
-  const trimmed = title.trim();
-  if (!trimmed) return false;
-  if (trimmed === telegramChatId) return false;
-  if (/^-?\d{5,}$/.test(trimmed)) return false;
-  if (/^unknown(\s|$)/i.test(trimmed)) return false;
-  return true;
+  return buildCrmContactDisplayTitle({
+    firstName: input.firstName,
+    lastName: input.lastName,
+    username: input.username,
+    phone: input.phone ?? null,
+    telegramChatId: input.telegramChatId,
+    groupTitle: input.title,
+    chatType: input.chatType,
+    isBot: input.isBot
+  });
 }
 
 function resolveSenderDisplayName(

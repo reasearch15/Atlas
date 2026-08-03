@@ -408,7 +408,8 @@ export type TelegramMediaDownloadStateDto =
   | "DOWNLOADING"
   | "STORED"
   | "FAILED"
-  | "SKIPPED";
+  | "SKIPPED"
+  | "UNAVAILABLE";
 
 export interface TelegramMessageDto {
   readonly id: string;
@@ -483,6 +484,18 @@ export interface TelegramChatUpdatedEvent {
   readonly lastMessageAt: string | null;
   readonly lastMessageDirection: "INBOUND" | "OUTBOUND" | null;
   readonly unreadCount: number;
+  /** Optional identity / CRM fields — same shape fragments as REST TelegramChatDto. */
+  readonly title?: string;
+  readonly firstName?: string | null;
+  readonly lastName?: string | null;
+  readonly username?: string | null;
+  readonly phone?: string | null;
+  readonly chatType?: string;
+  readonly isBot?: boolean;
+  readonly isPinned?: boolean;
+  readonly identityResolved?: boolean;
+  readonly needsCrmAttention?: boolean;
+  readonly telegramChatId?: string;
 }
 
 export interface CrmConversationUpdatedEvent {

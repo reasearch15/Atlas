@@ -1,5 +1,11 @@
 import { decryptSecret, encryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
-import { normalizeMarkedTelegramChatId, sanitizeTelegramError } from "@atlas/shared";
+import {
+  buildCrmContactDisplayTitle,
+  isUsableHumanDisplayTitle,
+  normalizeMarkedTelegramChatId,
+  sanitizeTelegramError,
+  shouldIgnoreTelegramDialog
+} from "@atlas/shared";
 import type { WorkerEnv } from "./env";
 import { assertPlainSerializable } from "./plain-serialization";
 import { normalizeGramJsMedia } from "./media-normalize";
@@ -32,6 +38,14 @@ export interface NormalizedDialog {
   readonly accessHash: string | null;
   readonly peerType: "USER" | "CHAT" | "CHANNEL" | null;
   readonly phone: string | null;
+  /** GramJS User.self — Saved Messages. */
+  readonly isSelf: boolean;
+  /** GramJS User.support — Telegram support. */
+  readonly isSupport: boolean;
+  /** Dialog archived / archive folder. */
+  readonly isArchived: boolean;
+  /** Top message id from the dialog snapshot (for unread sync). */
+  readonly topMessageId: string | null;
   readonly raw: Record<string, unknown>;
 }
 
@@ -228,12 +242,48 @@ export class TelegramClientAdapter {
 
   /**
    * Loads the newest Telegram dialog page.
+   * Official service / Saved Messages / archived dialogs are excluded — they must never enter CRM.
    */
   public async listDialogs(runtime: TelegramRuntime, limit: number): Promise<NormalizedDialog[]> {
     const dialogs = await runtime.client.getDialogs({ limit });
     const { seedDialogEntities } = await import("./entity-resolution");
     seedDialogEntities(runtime, dialogs);
-    return dialogs.map((dialog) => this.normalizeDialog(dialog));
+    const selfTelegramUserId = await this.resolveSelfUserId(runtime);
+    return dialogs
+      .map((dialog) => this.normalizeDialog(dialog))
+      .filter((dialog) => !this.isIgnorableDialog(dialog, selfTelegramUserId));
+  }
+
+  /**
+   * Returns whether a normalized dialog must be excluded from CRM sync.
+   */
+  public isIgnorableDialog(dialog: NormalizedDialog, selfTelegramUserId?: string | null): boolean {
+    return shouldIgnoreTelegramDialog({
+      telegramChatId: dialog.telegramChatId,
+      chatType: dialog.chatType,
+      title: dialog.title,
+      username: dialog.username,
+      firstName: dialog.firstName,
+      lastName: dialog.lastName,
+      isSelf: dialog.isSelf,
+      isSupport: dialog.isSupport,
+      isArchived: dialog.isArchived,
+      selfTelegramUserId: selfTelegramUserId ?? null
+    });
+  }
+
+  /**
+   * Resolves the authenticated account's Telegram user id when available.
+   */
+  public async resolveSelfUserId(runtime: TelegramRuntime): Promise<string | null> {
+    if (typeof runtime.client.getMe !== "function") return null;
+    try {
+      const me = (await runtime.client.getMe()) as Record<string, unknown> | null;
+      if (!me?.id) return null;
+      return String(me.id);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -385,6 +435,28 @@ export class TelegramClientAdapter {
   }
 
   /**
+   * Acknowledges Telegram read history up to maxId for a peer (messages.ReadHistory).
+   */
+  public async markChatHistoryRead(
+    runtime: TelegramRuntime,
+    hints: PeerResolutionHints,
+    maxTelegramMessageId: string
+  ): Promise<{ readonly ok: true; readonly maxId: number }> {
+    const resolved = await this.resolvePeer(runtime, hints);
+    const maxId = Number(maxTelegramMessageId);
+    if (!Number.isFinite(maxId) || maxId < 0) {
+      throw new Error("TELEGRAM_READ_MAX_ID_INVALID");
+    }
+    const Api = runtime.Api as {
+      messages: {
+        ReadHistory: new (input: { peer: unknown; maxId: number }) => unknown;
+      };
+    };
+    await runtime.client.invoke(new Api.messages.ReadHistory({ peer: resolved.inputPeer, maxId }));
+    return { ok: true, maxId };
+  }
+
+  /**
    * Sends a media file to Telegram using the live client.
    * Buffers are wrapped with a GramJS-recognized filename so photos are not sent as documents.
    */
@@ -486,9 +558,30 @@ export class TelegramClientAdapter {
     const phone = cleanOptionalString(entity.phone);
     const peerFields = extractPeerFields(entity, id);
     const isBot = Boolean(entity.bot) || Boolean(username && username.toLowerCase().endsWith("bot"));
+    const isSelf = Boolean(entity.self);
+    const isSupport = Boolean(entity.support);
+    const isArchived = Boolean(value.archived) || value.folderId === 1;
+    const groupTitle = cleanOptionalString(entity.title);
+    const messageObj = value.message as Record<string, unknown> | undefined;
+    const topMessageId =
+      messageObj?.id != null
+        ? String(messageObj.id)
+        : value.topMessage != null
+          ? String(value.topMessage)
+          : null;
+    const title = buildCrmContactDisplayTitle({
+      firstName,
+      lastName,
+      username,
+      phone,
+      telegramChatId: id,
+      groupTitle,
+      chatType,
+      isBot
+    });
     return {
       telegramChatId: id,
-      title: buildEntityTitle(entity, chatType, isBot),
+      title,
       username,
       chatType,
       unreadCount: Number(value.unreadCount ?? 0),
@@ -499,7 +592,23 @@ export class TelegramClientAdapter {
       accessHash: peerFields.accessHash,
       peerType: peerFields.peerType,
       phone,
-      raw: this.redacted(entity, isBot, firstName, lastName, username, peerFields.accessHash, peerFields.peerType, phone)
+      isSelf,
+      isSupport,
+      isArchived,
+      topMessageId,
+      raw: this.redacted(
+        entity,
+        isBot,
+        firstName,
+        lastName,
+        username,
+        peerFields.accessHash,
+        peerFields.peerType,
+        phone,
+        isSelf,
+        isSupport,
+        isArchived
+      )
     };
   }
 
@@ -568,7 +677,10 @@ export class TelegramClientAdapter {
     username: string | null,
     accessHash: string | null = null,
     peerType: string | null = null,
-    phone: string | null = null
+    phone: string | null = null,
+    isSelf = false,
+    isSupport = false,
+    isArchived = false
   ): Record<string, unknown> {
     const resolvedHash = accessHash ?? accessHashAsString(value.accessHash);
     const resolvedPeerType = peerType ?? normalizePeerType(null, this.chatType(value), value.id ? String(value.id) : undefined);
@@ -583,6 +695,9 @@ export class TelegramClientAdapter {
       accessHash: resolvedHash,
       peerType: resolvedPeerType,
       phone,
+      self: isSelf,
+      support: isSupport,
+      archived: isArchived,
       photo: value.photo ? { hasPhoto: true } : null
     };
     assertPlainSerializable(dto, "TELEGRAM_RAW_METADATA");
@@ -665,68 +780,18 @@ export async function withAuthRpcTimeout<T>(promise: Promise<T>, timeoutMs: numb
   }
 }
 
-/**
- * Builds a human title that never falls back to a raw Telegram id.
- * Private priority: first+last → first → last → username → Unknown User
- * Group/channel priority: title → username → Unknown Group/Channel
- */
-function buildEntityTitle(
-  entity: Record<string, unknown>,
-  chatType: NormalizedDialog["chatType"],
-  isBot: boolean
-): string {
-  const groupTitle = typeof entity.title === "string" ? entity.title.trim() : "";
-  if ((chatType === "GROUP" || chatType === "SUPERGROUP" || chatType === "CHANNEL") && groupTitle && !isRawTelegramId(groupTitle)) {
-    return groupTitle.slice(0, 255);
-  }
-  if (groupTitle && !isRawTelegramId(groupTitle) && chatType !== "PRIVATE") {
-    return groupTitle.slice(0, 255);
-  }
-
-  const firstName = typeof entity.firstName === "string" ? entity.firstName.trim() : "";
-  const lastName = typeof entity.lastName === "string" ? entity.lastName.trim() : "";
-  if (firstName && lastName) {
-    return `${firstName} ${lastName}`.slice(0, 255);
-  }
-  if (firstName && !isRawTelegramId(firstName)) {
-    return firstName.slice(0, 255);
-  }
-  if (lastName && !isRawTelegramId(lastName)) {
-    return lastName.slice(0, 255);
-  }
-  if (groupTitle && !isRawTelegramId(groupTitle)) {
-    return groupTitle.slice(0, 255);
-  }
-
-  const username = typeof entity.username === "string" ? entity.username.trim() : "";
-  if (username && !isRawTelegramId(username)) {
-    return username.slice(0, 255);
-  }
-  if (isBot) return "Unknown Bot";
-  if (chatType === "CHANNEL") return "Unknown Channel";
-  if (chatType === "GROUP" || chatType === "SUPERGROUP") return "Unknown Group";
-  if (chatType === "PRIVATE") return "Unknown User";
-  return "Unknown Chat";
-}
-
 function cleanOptionalString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function isRawTelegramId(value: string): boolean {
-  return /^-?\d{5,}$/.test(value.trim());
-}
-
+/**
+ * Returns whether a title is a usable human label (not Unknown / raw id).
+ * Phones and Telegram ids alone still trigger identity backfill.
+ */
 export function isUsableDisplayTitle(title: string | null | undefined, telegramChatId?: string | null): boolean {
-  if (!title) return false;
-  const trimmed = title.trim();
-  if (!trimmed) return false;
-  if (telegramChatId && trimmed === telegramChatId) return false;
-  if (isRawTelegramId(trimmed)) return false;
-  if (/^unknown(\s|$)/i.test(trimmed)) return false;
-  return true;
+  return isUsableHumanDisplayTitle(title, telegramChatId);
 }
 
 function toDownloadResult(

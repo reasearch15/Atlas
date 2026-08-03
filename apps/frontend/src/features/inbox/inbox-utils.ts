@@ -283,7 +283,7 @@ export function filterConversations(
 
 /**
  * Pins first, then conversations needing attention (needs-CRM-attention or assigned+unread),
- * then lastMessageAt descending.
+ * then lastMessageAt descending, then id ascending for deterministic ties.
  */
 export function sortConversations(conversations: readonly InboxConversation[]): InboxConversation[] {
   return conversations.slice().sort((left, right) => {
@@ -291,7 +291,11 @@ export function sortConversations(conversations: readonly InboxConversation[]): 
     if (tierDelta !== 0) return tierDelta;
     const leftAt = left.chat.lastMessageAt ? Date.parse(left.chat.lastMessageAt) : 0;
     const rightAt = right.chat.lastMessageAt ? Date.parse(right.chat.lastMessageAt) : 0;
-    return rightAt - leftAt;
+    if (rightAt !== leftAt) return rightAt - leftAt;
+    const leftUpdated = left.chat.assignedAt ? Date.parse(left.chat.assignedAt) : 0;
+    const rightUpdated = right.chat.assignedAt ? Date.parse(right.chat.assignedAt) : 0;
+    if (rightUpdated !== leftUpdated) return rightUpdated - leftUpdated;
+    return left.chat.id.localeCompare(right.chat.id);
   });
 }
 
@@ -307,6 +311,7 @@ function urgencyTier(item: InboxConversation): number {
 
 /**
  * Patches one conversation after a message activity and re-sorts the inbox.
+ * Merges by chat id only — never duplicates. Preserves identity fields when partial.
  */
 export function applyChatActivity(
   conversations: readonly InboxConversation[],
@@ -317,11 +322,25 @@ export function applyChatActivity(
     readonly direction: "INBOUND" | "OUTBOUND";
     readonly unreadCount?: number;
     readonly bumpUnread?: boolean;
+    readonly title?: string;
+    readonly firstName?: string | null;
+    readonly lastName?: string | null;
+    readonly username?: string | null;
+    readonly phone?: string | null;
+    readonly chatType?: string;
+    readonly isBot?: boolean;
+    readonly isPinned?: boolean;
+    readonly identityResolved?: boolean;
+    readonly needsCrmAttention?: boolean;
+    readonly telegramChatId?: string;
+    readonly accountLabel?: string;
   }
 ): InboxConversation[] {
+  let found = false;
   const next = conversations.map((item) => {
     if (item.chat.id !== input.chatId) return item;
-    const chat = {
+    found = true;
+    const chat: TelegramChatDto = {
       ...item.chat,
       lastMessagePreview: input.previewText.slice(0, 500),
       lastMessageAt: input.sentAt,
@@ -331,11 +350,59 @@ export function applyChatActivity(
           ? input.unreadCount
           : input.bumpUnread
             ? item.chat.unreadCount + 1
-            : item.chat.unreadCount
+            : item.chat.unreadCount,
+      ...(input.title !== undefined && isBetterTitle(input.title, item.chat.title) ? { title: input.title } : {}),
+      ...(input.firstName !== undefined && input.firstName && !item.chat.firstName ? { firstName: input.firstName } : {}),
+      ...(input.lastName !== undefined && input.lastName && !item.chat.lastName ? { lastName: input.lastName } : {}),
+      ...(input.username !== undefined && input.username && !item.chat.username ? { username: input.username } : {}),
+      ...(input.phone !== undefined && input.phone && !item.chat.phone ? { phone: input.phone } : {}),
+      ...(input.chatType !== undefined && input.chatType !== "UNKNOWN" ? { chatType: input.chatType } : {}),
+      ...(input.isBot !== undefined ? { isBot: input.isBot } : {}),
+      ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
+      ...(input.identityResolved !== undefined ? { identityResolved: input.identityResolved } : {}),
+      ...(input.needsCrmAttention !== undefined ? { needsCrmAttention: input.needsCrmAttention } : {}),
+      ...(input.telegramChatId !== undefined ? { telegramChatId: input.telegramChatId } : {})
     };
     return toInboxConversation(chat, item.accountLabel);
   });
+
+  if (!found && input.accountLabel) {
+    const stub: TelegramChatDto = {
+      id: input.chatId,
+      telegramAccountId: "",
+      telegramChatId: input.telegramChatId ?? input.chatId,
+      chatType: input.chatType ?? "PRIVATE",
+      title: input.title ?? "Unknown User",
+      username: input.username ?? null,
+      firstName: input.firstName ?? null,
+      lastName: input.lastName ?? null,
+      phone: input.phone ?? null,
+      lastMessagePreview: input.previewText.slice(0, 500),
+      lastMessageAt: input.sentAt,
+      lastMessageDirection: input.direction,
+      unreadCount: typeof input.unreadCount === "number" ? input.unreadCount : input.bumpUnread ? 1 : 0,
+      isPinned: input.isPinned ?? false,
+      isBot: input.isBot ?? false,
+      identityResolved: input.identityResolved ?? false,
+      crmStatus: "NEW",
+      assignedUserId: null,
+      assignedUserName: null,
+      assignedAt: null,
+      claimedAt: null,
+      needsCrmAttention: input.needsCrmAttention ?? true,
+      tags: []
+    };
+    next.push(toInboxConversation(stub, input.accountLabel));
+  }
+
   return sortConversations(next);
+}
+
+function isBetterTitle(incoming: string, existing: string): boolean {
+  if (!incoming.trim()) return false;
+  if (/^unknown(\s|$)/i.test(existing.trim()) && !/^unknown(\s|$)/i.test(incoming.trim())) return true;
+  if (!existing.trim()) return true;
+  return incoming.trim() !== existing.trim() && !/^unknown(\s|$)/i.test(incoming.trim());
 }
 
 /**
@@ -366,6 +433,17 @@ export function mergeAndDeduplicate(
       ...existing,
       ...incoming,
       id: existing.id,
+      mediaUrl: incoming.mediaUrl ?? existing.mediaUrl,
+      thumbnailUrl: incoming.thumbnailUrl ?? existing.thumbnailUrl,
+      mediaDownloadState:
+        incoming.mediaDownloadState && incoming.mediaDownloadState !== "NONE"
+          ? incoming.mediaDownloadState
+          : existing.mediaDownloadState,
+      mediaUploadState:
+        incoming.mediaUploadState && incoming.mediaUploadState !== "NONE"
+          ? incoming.mediaUploadState
+          : existing.mediaUploadState,
+      mediaError: incoming.mediaError ?? existing.mediaError,
       internalSenderUserId: incoming.internalSenderUserId ?? existing.internalSenderUserId,
       internalSenderSessionId: incoming.internalSenderSessionId ?? existing.internalSenderSessionId ?? null,
       internalSenderRole: incoming.internalSenderRole ?? existing.internalSenderRole ?? null,

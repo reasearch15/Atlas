@@ -2,12 +2,12 @@ import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { Queue, Worker } from "bullmq";
 import Redis from "ioredis";
-import { classifyTelegramFailure, sanitizeTelegramError, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
+import { classifyTelegramFailure, resolveSyncedUnreadCount, sanitizeTelegramError, shouldIgnoreTelegramDialog, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
 import { decryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
 import type { WorkerEnv } from "./env";
 import { TelegramClientAdapter, type NormalizedTextMessage, type TelegramApiCredentials, isUsableDisplayTitle, TelegramAuthNetworkTimeoutError } from "./telegram-client";
 import { AccountLease } from "./heartbeat";
-import { messageCreatedEvent, chatUpdatedEvent } from "./update-normalizer";
+import { messageCreatedEvent, chatUpdatedEvent, chatUpdatedFieldsFromRow } from "./update-normalizer";
 import { TelegramAuthorizationAttemptStore } from "./auth-attempt";
 import { assertPlainSerializable } from "./plain-serialization";
 import { detachLiveSyncAccount, getLiveSyncRuntime } from "./live-sync";
@@ -86,6 +86,9 @@ export function createCommandConsumer(prisma: PrismaClient, redis: Redis, env: W
 
       if (command.operation === "SEND_MEDIA_MESSAGE") {
         return processSendMediaJob(prisma, redis, adapter, lease, env, store, command);
+      }
+      if (command.operation === "MARK_CHAT_READ") {
+        return processMarkChatReadJob(prisma, redis, adapter, lease, env, command);
       }
 
       if (command.operation === "MEDIA_BACKFILL") {
@@ -526,6 +529,29 @@ export async function processInitialSync(
       ? 0
       : await syncInitialPage(prisma, adapter, runtime, command.workspaceId, command.telegramAccountId);
     const backfill = await runIdentityBackfillBatches(prisma, adapter, runtime, command.telegramAccountId);
+    if (!metadataOnly && redis) {
+      try {
+        const store = createMediaObjectStore(env);
+        await runMediaBackfill({
+          prisma,
+          redis,
+          adapter,
+          runtime,
+          store,
+          workspaceId: command.workspaceId,
+          telegramAccountId: command.telegramAccountId,
+          limit: 40
+        });
+      } catch (error) {
+        const safe = sanitizeTelegramError(error, false);
+        logPlain({
+          event: "telegram_sync.media_backfill_skipped",
+          accountId: command.telegramAccountId,
+          code: safe.code ?? safe.name,
+          message: safe.message
+        });
+      }
+    }
     if (redis) {
       await redis.set(
         identityBackfillKey(command.telegramAccountId),
@@ -633,6 +659,99 @@ async function clearAccountOperationalErrors(prisma: PrismaClient, accountId: st
       lastUpdateAt: new Date()
     }
   });
+}
+
+async function processMarkChatReadJob(
+  prisma: PrismaClient,
+  redis: Redis,
+  adapter: TelegramClientAdapter,
+  lease: AccountLease,
+  env: WorkerEnv,
+  command: CommandWithAccount
+): Promise<WorkerCommandResult> {
+  await prisma.telegramOutboundCommand.update({
+    where: { id: command.id },
+    data: { status: "SENDING", attempts: { increment: 1 } }
+  });
+  const payload = (command.payloadJson ?? {}) as {
+    chatDbId?: string;
+    maxTelegramMessageId?: string;
+  };
+  if (!payload.chatDbId || !payload.maxTelegramMessageId) {
+    throw new Error("TELEGRAM_MARK_READ_PAYLOAD_INVALID");
+  }
+
+  const chat = await prisma.telegramChat.findFirst({
+    where: { id: payload.chatDbId, telegramAccountId: command.telegramAccountId, workspaceId: command.workspaceId }
+  });
+  if (!chat) {
+    throw new Error("TELEGRAM_CHAT_NOT_FOUND");
+  }
+
+  const previousUnread = chat.unreadCount;
+  const liveRuntime = getLiveSyncRuntime(command.telegramAccountId);
+  let runtime = liveRuntime;
+  let temporary = false;
+  if (!runtime) {
+    if (!command.telegramAccount.sessionEncrypted) {
+      throw new Error("TELEGRAM_AUTH_CONTEXT_MISSING");
+    }
+    if (!(await lease.acquire(command.telegramAccountId))) {
+      throw new Error("TELEGRAM_WORKER_LEASE_UNAVAILABLE");
+    }
+    temporary = true;
+    runtime = await adapter.connect(command.telegramAccount.sessionEncrypted as unknown as EncryptedSecret, developerAppCredentials(command.telegramAccount.developerApp, env), {
+      mode: "live"
+    });
+  }
+
+  try {
+    const ack = await adapter.markChatHistoryRead(
+      runtime,
+      {
+        telegramChatId: chat.telegramChatId,
+        chatType: chat.chatType,
+        username: chat.username,
+        ...(chat.accessHash != null ? { accessHash: chat.accessHash } : {}),
+        ...(chat.peerType != null ? { peerType: chat.peerType } : {}),
+        ...(chat.peerPhone != null ? { phone: chat.peerPhone } : {})
+      },
+      payload.maxTelegramMessageId
+    );
+
+    const updated = await prisma.telegramChat.update({
+      where: { id: chat.id },
+      data: {
+        unreadCount: 0,
+        lastReadTelegramMessageId: payload.maxTelegramMessageId,
+        lastReadAt: new Date()
+      }
+    });
+
+    logPlain({
+      event: "telegram_chat.mark_read",
+      conversationId: chat.id,
+      telegramAccountId: command.telegramAccountId,
+      peerId: chat.telegramChatId,
+      previousUnreadCount: previousUnread,
+      newUnreadCount: 0,
+      readMaxMessageId: payload.maxTelegramMessageId,
+      telegramAck: ack.ok,
+      databasePersisted: true
+    });
+
+    await redis.publish(
+      "atlas.workspace-events",
+      JSON.stringify(chatUpdatedEvent(command.workspaceId, chatUpdatedFieldsFromRow({ ...updated, lastMessageDirection: null })))
+    );
+
+    return commandResult(command.telegramAccountId, "CONNECTED");
+  } finally {
+    if (temporary) {
+      await adapter.safeDisconnect(runtime);
+      await lease.release(command.telegramAccountId).catch(() => undefined);
+    }
+  }
 }
 
 async function processSendMediaJob(
@@ -1172,9 +1291,30 @@ async function syncInitialPage(
   workspaceId: string,
   telegramAccountId: string
 ): Promise<number> {
+  const selfTelegramUserId = await adapter.resolveSelfUserId(runtime);
+  await quarantineIgnoredChats(prisma, telegramAccountId, selfTelegramUserId);
+
   const dialogs = await adapter.listDialogs(runtime, 100);
   let savedDialogs = 0;
   for (const dialog of dialogs) {
+    if (
+      adapter.isIgnorableDialog(dialog, selfTelegramUserId) ||
+      shouldIgnoreTelegramDialog({
+        telegramChatId: dialog.telegramChatId,
+        chatType: dialog.chatType,
+        title: dialog.title,
+        username: dialog.username,
+        firstName: dialog.firstName,
+        lastName: dialog.lastName,
+        isSelf: dialog.isSelf,
+        isSupport: dialog.isSupport,
+        isArchived: dialog.isArchived,
+        selfTelegramUserId
+      })
+    ) {
+      await quarantineChatByPeerId(prisma, telegramAccountId, dialog.telegramChatId);
+      continue;
+    }
     try {
       const existing = await prisma.telegramChat.findUnique({
         where: { telegramAccountId_telegramChatId: { telegramAccountId, telegramChatId: dialog.telegramChatId } }
@@ -1182,8 +1322,15 @@ async function syncInitialPage(
       const chat = await prisma.telegramChat.upsert({
         where: { telegramAccountId_telegramChatId: { telegramAccountId, telegramChatId: dialog.telegramChatId } },
         update: {
-          unreadCount: dialog.unreadCount,
+          unreadCount: resolveSyncedUnreadCount({
+            dialogUnreadCount: dialog.unreadCount,
+            existingUnreadCount: existing?.unreadCount,
+            lastReadTelegramMessageId: existing?.lastReadTelegramMessageId,
+            dialogTopMessageId: dialog.topMessageId,
+            isCreate: false
+          }),
           isPinned: dialog.isPinned,
+          isArchived: false,
           ...buildIdentityFillUpdate(
             {
               title: existing?.title ?? "",
@@ -1212,8 +1359,15 @@ async function syncInitialPage(
           firstName: dialog.firstName,
           lastName: dialog.lastName,
           isBot: dialog.isBot,
-          unreadCount: dialog.unreadCount,
+          unreadCount: resolveSyncedUnreadCount({
+            dialogUnreadCount: dialog.unreadCount,
+            existingUnreadCount: null,
+            lastReadTelegramMessageId: null,
+            dialogTopMessageId: dialog.topMessageId,
+            isCreate: true
+          }),
           isPinned: dialog.isPinned,
+          isArchived: false,
           accessHash: dialog.accessHash,
           peerType: dialog.peerType,
           peerPhone: dialog.phone,
@@ -1247,6 +1401,80 @@ async function syncInitialPage(
 }
 
 /**
+ * Archives previously imported official/service/self dialogs so they leave CRM counts and inbox.
+ */
+async function quarantineIgnoredChats(
+  prisma: PrismaClient,
+  telegramAccountId: string,
+  selfTelegramUserId: string | null
+): Promise<void> {
+  const chats = await prisma.telegramChat.findMany({
+    where: { telegramAccountId, isArchived: false },
+    select: {
+      id: true,
+      telegramChatId: true,
+      chatType: true,
+      title: true,
+      username: true,
+      firstName: true,
+      lastName: true,
+      rawMetadataJson: true
+    },
+    take: 500
+  });
+  for (const chat of chats) {
+    const meta = chat.rawMetadataJson && typeof chat.rawMetadataJson === "object" && !Array.isArray(chat.rawMetadataJson)
+      ? (chat.rawMetadataJson as Record<string, unknown>)
+      : {};
+    if (
+      shouldIgnoreTelegramDialog({
+        telegramChatId: chat.telegramChatId,
+        chatType: chat.chatType,
+        title: chat.title,
+        username: chat.username,
+        firstName: chat.firstName,
+        lastName: chat.lastName,
+        isSelf: Boolean(meta.self),
+        isSupport: Boolean(meta.support),
+        isArchived: Boolean(meta.archived),
+        selfTelegramUserId
+      })
+    ) {
+      await prisma.telegramChat.update({
+        where: { id: chat.id },
+        data: {
+          isArchived: true,
+          unreadCount: 0,
+          needsCrmAttention: false,
+          isPinned: false,
+          rawMetadataJson: mergeIdentityMetadata(chat.rawMetadataJson, {
+            crmIgnored: true,
+            crmIgnoredReason: "telegram_service_or_system_dialog",
+            identityResolvedAt: new Date().toISOString()
+          })
+        }
+      });
+    }
+  }
+}
+
+async function quarantineChatByPeerId(
+  prisma: PrismaClient,
+  telegramAccountId: string,
+  telegramChatId: string
+): Promise<void> {
+  await prisma.telegramChat.updateMany({
+    where: { telegramAccountId, telegramChatId, isArchived: false },
+    data: {
+      isArchived: true,
+      unreadCount: 0,
+      needsCrmAttention: false,
+      isPinned: false
+    }
+  });
+}
+
+/**
  * Re-resolves Telegram entities for chats that still lack usable titles.
  */
 async function backfillMissingChatIdentities(
@@ -1259,6 +1487,7 @@ async function backfillMissingChatIdentities(
   const candidates = await prisma.telegramChat.findMany({
     where: {
       telegramAccountId,
+      isArchived: false,
       OR: [
         { chatType: "UNKNOWN" },
         { title: "" },
@@ -1272,7 +1501,7 @@ async function backfillMissingChatIdentities(
   });
   // Also catch rows whose title is still the raw telegram id / unusable even if typed.
   const recent = await prisma.telegramChat.findMany({
-    where: { telegramAccountId },
+    where: { telegramAccountId, isArchived: false },
     take: batchSize * 2,
     orderBy: { updatedAt: "asc" }
   });
@@ -1458,14 +1687,13 @@ async function publishMessage(prisma: PrismaClient, redis: Redis, workspaceId: s
     await redis.publish(
       "atlas.workspace-events",
       JSON.stringify(
-        chatUpdatedEvent(workspaceId, {
-          telegramAccountId: message.telegramAccountId,
-          chatId: chat.id,
-          lastMessagePreview: chat.lastMessagePreview,
-          lastMessageAt: chat.lastMessageAt?.toISOString() ?? null,
-          lastMessageDirection: message.direction,
-          unreadCount: chat.unreadCount
-        })
+        chatUpdatedEvent(
+          workspaceId,
+          chatUpdatedFieldsFromRow({
+            ...chat,
+            lastMessageDirection: message.direction
+          })
+        )
       )
     );
   }

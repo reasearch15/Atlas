@@ -28,10 +28,26 @@ export const TELEGRAM_MEDIA_DOWNLOAD_STATES = [
   "DOWNLOADING",
   "STORED",
   "FAILED",
-  "SKIPPED"
+  "SKIPPED",
+  "UNAVAILABLE"
 ] as const;
 
 export type TelegramMediaDownloadState = (typeof TELEGRAM_MEDIA_DOWNLOAD_STATES)[number];
+
+/** Persisted when mediaStorageKey points at a missing object (e.g. after MinIO migration). */
+export const MEDIA_ERROR_OBJECT_MISSING = "OBJECT_MISSING";
+
+/**
+ * Returns true when media bytes are known missing or permanently unavailable for display.
+ */
+export function isMediaUnavailable(message: {
+  readonly mediaDownloadState?: string | null;
+  readonly mediaError?: string | null;
+}): boolean {
+  if (message.mediaDownloadState === "UNAVAILABLE") return true;
+  if (message.mediaError === MEDIA_ERROR_OBJECT_MISSING) return true;
+  return false;
+}
 
 /** Maps content type → chat-list / notification preview label. */
 const PREVIEW_LABELS: Record<TelegramContentType, string> = {

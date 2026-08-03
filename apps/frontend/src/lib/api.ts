@@ -372,6 +372,8 @@ export const api = {
     apiRequest<TelegramMessageDto[]>(`/api/telegram/accounts/${accountId}/chats/${chatId}/messages`),
   telegramChatMessages: (chatId: string, signal?: AbortSignal) =>
     apiRequest<TelegramMessageDto[]>(`/api/telegram/chats/${chatId}/messages`, signal ? { signal } : {}),
+  telegramMarkChatRead: (chatId: string) =>
+    apiRequest<{ unreadCount: 0; chatId: string }>(`/api/telegram/chats/${chatId}/read`, { method: "POST" }),
   sendChatText: (chatId: string, text: string, idempotencyKey: string, replyToTelegramMessageId?: string) =>
     apiRequest<TelegramMessageDto>(`/api/telegram/chats/${chatId}/messages`, {
       method: "POST",

@@ -52,13 +52,15 @@ export function composePrivacySafeTitle(input: {
     return input.chatType === "CHANNEL" ? "Unknown Channel" : "Unknown Group";
   }
 
-  const title = usable(input.title);
-  if (title) return title;
+  // Private priority: first+last → first → last → username → phone → Telegram ID → Unknown
   if (input.firstName && input.lastName) return `${input.firstName} ${input.lastName}`.trim();
   if (input.firstName) return input.firstName;
   if (input.lastName) return input.lastName;
+  const title = usable(input.title);
+  if (title) return title;
   if (input.caps.canViewTelegramUsername && input.username) return input.username;
   if (input.caps.canViewCustomerPhone && input.phone?.trim()) return input.phone.trim();
+  if (input.caps.canViewExternalContactIds && input.telegramChatId?.trim()) return input.telegramChatId.trim();
   if (input.isBot) return "Unknown Bot";
   return "Unknown User";
 }

@@ -93,6 +93,11 @@ export async function telegramRoutes(app: FastifyInstance): Promise<void> {
     return service.listMessagesByChatId(request.user!, params.chatId);
   });
 
+  app.post("/chats/:chatId/read", { preHandler: [telegramReadGuard(app)] }, async (request) => {
+    const params = telegramChatIdParamsSchema.parse(request.params);
+    return service.markChatRead(request.user!, params.chatId);
+  });
+
   app.post("/chats/:chatId/messages", { preHandler: [telegramSendGuard(app)] }, async (request, reply) => {
     const params = telegramChatIdParamsSchema.parse(request.params);
     const result = await service.sendTextByChatId(request.user!, params.chatId, request.body);

@@ -1,6 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import type Redis from "ioredis";
-import type { TelegramMessageDto } from "@atlas/shared";
+import { MEDIA_ERROR_OBJECT_MISSING, type TelegramMessageDto } from "@atlas/shared";
 import type { TelegramClientAdapter, TelegramRuntime, NormalizedTextMessage } from "./telegram-client";
 import type { MediaObjectStore } from "./media-storage";
 import { toTelegramMessageDto } from "./message-dto";
@@ -26,7 +26,17 @@ export async function enqueueMediaDownload(input: {
   await withDownloadSlot(async () => {
     const { prisma, redis, adapter, runtime, store, workspaceId, messageId, telegramMessage } = input;
     const row = await prisma.telegramMessage.findUnique({ where: { id: messageId } });
-    if (!row || row.mediaDownloadState === "STORED" || !row.mediaDownloadState || row.mediaDownloadState === "SKIPPED") {
+    if (
+      !row ||
+      !row.mediaDownloadState ||
+      row.mediaDownloadState === "NONE" ||
+      row.mediaDownloadState === "SKIPPED" ||
+      row.mediaDownloadState === "UNAVAILABLE"
+    ) {
+      return;
+    }
+    // STORED with a key still re-checked by backfill when HeadObject fails; normal path skips.
+    if (row.mediaDownloadState === "STORED" && row.mediaStorageKey) {
       return;
     }
     if (!telegramMessage.needsBinaryDownload) {
@@ -72,10 +82,17 @@ export async function enqueueMediaDownload(input: {
           }
         : undefined);
       if (!downloaded) {
-        await prisma.telegramMessage.update({
+        const skipped = await prisma.telegramMessage.update({
           where: { id: messageId },
           data: { mediaDownloadState: "SKIPPED", mediaUploadState: "SKIPPED", mediaError: "No downloadable media" }
         });
+        const dto = toTelegramMessageDto(skipped, {
+          direction: skipped.direction === "OUTBOUND" ? "OUTBOUND" : "INBOUND",
+          chatTitle: null,
+          chatType: "UNKNOWN",
+          chatUsername: null
+        });
+        await redis.publish("atlas.workspace-events", JSON.stringify(messageUpdatedEvent(workspaceId, dto)));
         return;
       }
 
@@ -143,10 +160,17 @@ export async function enqueueMediaDownload(input: {
       await redis.publish("atlas.workspace-events", JSON.stringify(messageUpdatedEvent(workspaceId, dto)));
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 500) : "Media download failed";
-      await prisma.telegramMessage.update({
+      const failed = await prisma.telegramMessage.update({
         where: { id: messageId },
         data: { mediaDownloadState: "FAILED", mediaUploadState: "FAILED", mediaError: message }
       });
+      const dto = toTelegramMessageDto(failed, {
+        direction: failed.direction === "OUTBOUND" ? "OUTBOUND" : "INBOUND",
+        chatTitle: null,
+        chatType: "UNKNOWN",
+        chatUsername: null
+      });
+      await redis.publish("atlas.workspace-events", JSON.stringify(messageUpdatedEvent(workspaceId, dto)));
     }
   });
 }
@@ -174,6 +198,43 @@ export async function runMediaBackfill(input: {
     orderBy: { telegramCreatedAt: "desc" },
     take: limit
   });
+
+  // Heal STORED rows whose objects were not migrated to production MinIO.
+  const storedOrphans = await input.prisma.telegramMessage.findMany({
+    where: {
+      telegramAccountId: input.telegramAccountId,
+      mediaDownloadState: "STORED",
+      mediaStorageKey: { not: null },
+      contentType: { in: ["PHOTO", "VIDEO", "VIDEO_NOTE", "VOICE", "AUDIO", "DOCUMENT", "ANIMATION", "STICKER"] }
+    },
+    orderBy: { telegramCreatedAt: "desc" },
+    take: Math.max(5, Math.floor(limit / 2))
+  });
+  for (const row of storedOrphans) {
+    if (!row.mediaStorageKey) continue;
+    const exists = await input.store.objectExists(row.mediaStorageKey);
+    if (exists) continue;
+    await input.prisma.telegramMessage.update({
+      where: { id: row.id },
+      data: {
+        mediaDownloadState: "UNAVAILABLE",
+        mediaUploadState: "UNAVAILABLE",
+        mediaError: MEDIA_ERROR_OBJECT_MISSING
+      }
+    });
+    // Reset to PENDING so Telegram re-download can heal when the peer is still available.
+    await input.prisma.telegramMessage.update({
+      where: { id: row.id },
+      data: {
+        mediaDownloadState: "PENDING",
+        mediaUploadState: "PENDING",
+        mediaStorageKey: null,
+        thumbnailStorageKey: null,
+        mediaError: MEDIA_ERROR_OBJECT_MISSING
+      }
+    });
+    pending.push(row);
+  }
 
   let downloaded = 0;
   let uploaded = 0;

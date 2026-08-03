@@ -7,6 +7,7 @@ import {
   formatDuration,
   formatFileSize,
   isMediaLoading,
+  isMediaUnavailableForDisplay,
   normalizeWaveform,
   readAudioMeta,
   readContactMeta,
@@ -29,6 +30,7 @@ export function MediaMessageBody({ message }: MediaMessageBodyProps) {
   const role = useAuthStore((state) => state.user?.role ?? "STAFF");
   const allowExternalContactLinks = canViewDirectCustomerContact(role as Role);
   const loading = isMediaLoading(message);
+  const unavailable = isMediaUnavailableForDisplay(message);
   const isVideoNote = message.contentType === "VIDEO_NOTE" || message.mediaType === "VIDEO_NOTE";
   const mediaKind = isVideoNote ? "VIDEO_NOTE" : message.mediaType;
 
@@ -40,7 +42,13 @@ export function MediaMessageBody({ message }: MediaMessageBodyProps) {
         </div>
       ) : null}
 
-      {loading ? <MediaLoadingPlaceholder /> : <MediaContent message={message} mediaKind={mediaKind} />}
+      {loading ? (
+        <MediaLoadingPlaceholder />
+      ) : unavailable ? (
+        <FallbackLabel>Media unavailable</FallbackLabel>
+      ) : (
+        <MediaContent message={message} mediaKind={mediaKind} />
+      )}
 
       {message.caption ? (
         <p className="whitespace-pre-wrap break-words leading-relaxed">
@@ -107,8 +115,9 @@ function MediaLoadingPlaceholder() {
 
 function PhotoBody({ message }: { readonly message: TelegramMessageDto }) {
   const src = message.mediaUrl ?? message.thumbnailUrl;
-  if (!src) {
-    return <FallbackLabel>📷 Photo</FallbackLabel>;
+  const [broken, setBroken] = useState(false);
+  if (!src || broken) {
+    return <FallbackLabel>{broken ? "📷 Photo unavailable" : "📷 Photo"}</FallbackLabel>;
   }
   const ratio = aspectRatioStyle(message.width, message.height);
   return (
@@ -126,6 +135,7 @@ function PhotoBody({ message }: { readonly message: TelegramMessageDto }) {
         alt={message.caption || "Photo"}
         className="max-h-80 max-w-full object-contain"
         style={ratio ? { aspectRatio: ratio } : undefined}
+        onError={() => setBroken(true)}
       />
     </button>
   );

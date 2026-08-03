@@ -2,6 +2,7 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client
@@ -20,6 +21,7 @@ declare module "fastify" {
       putObject: (input: { key: string; body: Buffer; contentType: string }) => Promise<void>;
       deleteObject: (key: string) => Promise<void>;
       listObjectKeys: (prefix: string) => Promise<string[]>;
+      objectExists: (key: string) => Promise<boolean>;
       getSignedGetUrl: (key: string, expiresInSeconds?: number) => Promise<string>;
       getSignedPutUrl: (key: string, contentType: string, expiresInSeconds?: number) => Promise<string>;
       buildWorkspaceMediaKey: (input: {
@@ -84,6 +86,14 @@ export const storagePlugin = fp<{ env: Env }>(async (app, options) => {
         continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
       } while (continuationToken);
       return keys;
+    },
+    async objectExists(key) {
+      try {
+        await client.send(new HeadObjectCommand({ Bucket: options.env.S3_BUCKET, Key: key }));
+        return true;
+      } catch {
+        return false;
+      }
     },
     async getSignedGetUrl(key, expiresInSeconds = 3600) {
       return getSignedUrl(

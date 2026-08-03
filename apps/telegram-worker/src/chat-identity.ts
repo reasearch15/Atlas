@@ -1,6 +1,10 @@
 import type { Prisma } from "@prisma/client";
+import {
+  buildCrmContactDisplayTitle,
+  contactDisplayTitleQuality,
+  isUsableHumanDisplayTitle
+} from "@atlas/shared";
 import type { NormalizedDialog } from "./telegram-client";
-import { isUsableDisplayTitle } from "./telegram-client";
 
 export interface IdentityBackfillCounts {
   readonly scanned: number;
@@ -12,6 +16,7 @@ export interface IdentityBackfillCounts {
 /**
  * Builds a Prisma update that only fills missing identity fields.
  * Always refreshes accessHash/peerType when Telegram provides them.
+ * Replaces placeholder / weaker titles when entity resolution improves identity.
  */
 export function buildIdentityFillUpdate(
   existing: {
@@ -32,9 +37,26 @@ export function buildIdentityFillUpdate(
 ): Prisma.TelegramChatUncheckedUpdateInput {
   const data: Prisma.TelegramChatUncheckedUpdateInput = {};
 
-  if (!isUsableDisplayTitle(existing.title, existing.telegramChatId) && isUsableDisplayTitle(identity.title, identity.telegramChatId)) {
+  const nextTitle = buildCrmContactDisplayTitle({
+    firstName: identity.firstName ?? existing.firstName ?? null,
+    lastName: identity.lastName ?? existing.lastName ?? null,
+    username: identity.username ?? existing.username,
+    phone: identity.phone ?? existing.peerPhone ?? null,
+    telegramChatId: identity.telegramChatId || existing.telegramChatId,
+    groupTitle: identity.title,
+    chatType: identity.chatType !== "UNKNOWN" ? identity.chatType : existing.chatType,
+    isBot: Boolean(identity.isBot || existing.isBot)
+  });
+
+  if (contactDisplayTitleQuality(nextTitle, existing.telegramChatId) > contactDisplayTitleQuality(existing.title, existing.telegramChatId)) {
+    data.title = nextTitle;
+  } else if (
+    !isUsableHumanDisplayTitle(existing.title, existing.telegramChatId) &&
+    isUsableHumanDisplayTitle(identity.title, identity.telegramChatId)
+  ) {
     data.title = identity.title;
   }
+
   if (!existing.username && identity.username) {
     data.username = identity.username;
   }
@@ -66,6 +88,7 @@ export function buildIdentityFillUpdate(
     data.photoMetadata = photo as Prisma.InputJsonValue;
   }
 
+  const resolvedTitle = typeof data.title === "string" ? data.title : existing.title;
   data.rawMetadataJson = mergeIdentityMetadata(existing.rawMetadataJson, {
     ...identity.raw,
     firstName: identity.firstName,
@@ -74,8 +97,11 @@ export function buildIdentityFillUpdate(
     accessHash: identity.accessHash,
     peerType: identity.peerType,
     phone: identity.phone,
+    isSelf: identity.isSelf,
+    isSupport: identity.isSupport,
+    isArchived: identity.isArchived,
     identityResolvedAt: new Date().toISOString(),
-    identityResolved: isUsableDisplayTitle(identity.title, identity.telegramChatId)
+    identityResolved: isUsableHumanDisplayTitle(resolvedTitle, existing.telegramChatId)
   });
 
   return data;
@@ -89,10 +115,13 @@ export function identityUpdateImproves(
   data: Prisma.TelegramChatUpdateInput
 ): "updated" | "unresolved" {
   const nextTitle = typeof data.title === "string" ? data.title : existing.title;
-  if (isUsableDisplayTitle(nextTitle, existing.telegramChatId)) {
+  if (isUsableHumanDisplayTitle(nextTitle, existing.telegramChatId)) {
     return "updated";
   }
   if (data.username || data.firstName || data.lastName) {
+    return "updated";
+  }
+  if (typeof data.title === "string" && contactDisplayTitleQuality(data.title, existing.telegramChatId) > contactDisplayTitleQuality(existing.title, existing.telegramChatId)) {
     return "updated";
   }
   return "unresolved";
@@ -107,7 +136,7 @@ export function needsIdentityBackfillRow(chat: {
   chatType: string;
   accessHash?: string | null;
 }): boolean {
-  if (!isUsableDisplayTitle(chat.title, chat.telegramChatId)) return true;
+  if (!isUsableHumanDisplayTitle(chat.title, chat.telegramChatId)) return true;
   if (chat.chatType === "UNKNOWN") return true;
   // Private/channel peers need a durable access hash for InputPeer reconstruction.
   if ((chat.chatType === "PRIVATE" || chat.chatType === "CHANNEL" || chat.chatType === "SUPERGROUP") && !chat.accessHash) {
@@ -137,7 +166,10 @@ export function mergeIdentityMetadata(existing: unknown, incoming: Record<string
       key === "bot" ||
       key === "accessHash" ||
       key === "peerType" ||
-      key === "phone"
+      key === "phone" ||
+      key === "isSelf" ||
+      key === "isSupport" ||
+      key === "isArchived"
     ) {
       merged[key] = value;
     }

@@ -1,10 +1,20 @@
 import type { TelegramMessageDto } from "@atlas/shared";
+import { isMediaUnavailable } from "@atlas/shared";
 
 /**
  * Returns whether media bytes are still loading from Telegram/storage.
  */
 export function isMediaLoading(message: Pick<TelegramMessageDto, "mediaDownloadState">): boolean {
   return message.mediaDownloadState === "PENDING" || message.mediaDownloadState === "DOWNLOADING";
+}
+
+/**
+ * Returns whether media should render an unavailable placeholder instead of a broken image.
+ */
+export function isMediaUnavailableForDisplay(
+  message: Pick<TelegramMessageDto, "mediaDownloadState" | "mediaError">
+): boolean {
+  return isMediaUnavailable(message);
 }
 
 /**

@@ -50,10 +50,11 @@ export function resolveContactIdentity(input: ContactIdentityInput): ContactIden
 
   const displayName =
     crmName ||
-    title ||
     fullName ||
+    title ||
     (username ? username.replace(/^@/, "") : null) ||
     phone ||
+    telegramChatId ||
     unknownForKind(kind);
 
   const isUnknown = /^unknown(\s|$)/i.test(displayName);
