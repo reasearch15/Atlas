@@ -1,4 +1,5 @@
 import type { CrmConversationStatus, CrmInboxCountsDto, CrmInboxFilter, TelegramChatDto, TelegramMessageDto } from "@atlas/shared";
+import { isPrivateStorageMediaUrl } from "@atlas/shared";
 import { resolveContactIdentity } from "./contact-identity";
 
 export type InboxChatKind = "private" | "group" | "channel" | "bot";
@@ -433,8 +434,8 @@ export function mergeAndDeduplicate(
       ...existing,
       ...incoming,
       id: existing.id,
-      mediaUrl: incoming.mediaUrl ?? existing.mediaUrl,
-      thumbnailUrl: incoming.thumbnailUrl ?? existing.thumbnailUrl,
+      mediaUrl: pickPlayableMediaUrl(incoming.mediaUrl, existing.mediaUrl),
+      thumbnailUrl: pickPlayableMediaUrl(incoming.thumbnailUrl, existing.thumbnailUrl),
       mediaDownloadState:
         incoming.mediaDownloadState && incoming.mediaDownloadState !== "NONE"
           ? incoming.mediaDownloadState
@@ -554,4 +555,16 @@ export function needsIdentityBackfill(chat: TelegramChatDto): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Prefer incoming media URLs unless they are null or private MinIO endpoints.
+ */
+function pickPlayableMediaUrl(
+  incoming: string | null | undefined,
+  existing: string | null | undefined
+): string | null {
+  if (incoming && !isPrivateStorageMediaUrl(incoming)) return incoming;
+  if (existing && !isPrivateStorageMediaUrl(existing)) return existing;
+  return null;
 }

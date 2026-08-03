@@ -23,6 +23,14 @@ export const telegramChatIdParamsSchema = z.object({
   chatId: uuidSchema
 });
 
+export const telegramMessageIdParamsSchema = z.object({
+  messageId: uuidSchema
+});
+
+export const telegramMediaVariantQuerySchema = z.object({
+  variant: z.enum(["media", "thumbnail"]).default("media")
+});
+
 export const createAccountBodySchema = createTelegramAccountSchema;
 export const phoneBodySchema = telegramPhoneSchema;
 export const codeBodySchema = telegramCodeSchema;

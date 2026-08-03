@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -12,6 +13,16 @@ import fp from "fastify-plugin";
 import type { Env } from "../config/env";
 import { forbidden } from "../utils/errors";
 
+export type StorageObjectStreamResult = {
+  readonly body: Readable;
+  readonly statusCode: 200 | 206;
+  readonly contentType: string | null;
+  readonly contentLength: number | null;
+  readonly contentRange: string | null;
+  readonly acceptRanges: string;
+  readonly etag: string | null;
+};
+
 declare module "fastify" {
   interface FastifyInstance {
     storage: {
@@ -22,6 +33,7 @@ declare module "fastify" {
       deleteObject: (key: string) => Promise<void>;
       listObjectKeys: (prefix: string) => Promise<string[]>;
       objectExists: (key: string) => Promise<boolean>;
+      getObjectStream: (input: { key: string; range?: string | null }) => Promise<StorageObjectStreamResult>;
       getSignedGetUrl: (key: string, expiresInSeconds?: number) => Promise<string>;
       getSignedPutUrl: (key: string, contentType: string, expiresInSeconds?: number) => Promise<string>;
       buildWorkspaceMediaKey: (input: {
@@ -94,6 +106,35 @@ export const storagePlugin = fp<{ env: Env }>(async (app, options) => {
       } catch {
         return false;
       }
+    },
+    async getObjectStream(input) {
+      const response = await client.send(
+        new GetObjectCommand({
+          Bucket: options.env.S3_BUCKET,
+          Key: input.key,
+          ...(input.range ? { Range: input.range } : {})
+        })
+      );
+      const body = response.Body;
+      if (!body) {
+        throw new Error("S3_OBJECT_BODY_EMPTY");
+      }
+      const nodeStream =
+        typeof (body as { transformToWebStream?: unknown }).transformToWebStream === "function"
+          ? Readable.fromWeb((body as { transformToWebStream: () => ReadableStream }).transformToWebStream() as never)
+          : (body as Readable);
+
+      const contentRange = response.ContentRange ?? null;
+      const statusCode: 200 | 206 = contentRange ? 206 : 200;
+      return {
+        body: nodeStream,
+        statusCode,
+        contentType: response.ContentType ?? null,
+        contentLength: typeof response.ContentLength === "number" ? response.ContentLength : null,
+        contentRange,
+        acceptRanges: "bytes",
+        etag: response.ETag ?? null
+      };
     },
     async getSignedGetUrl(key, expiresInSeconds = 3600) {
       return getSignedUrl(

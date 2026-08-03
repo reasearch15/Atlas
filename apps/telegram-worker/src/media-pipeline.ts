@@ -148,14 +148,12 @@ export async function enqueueMediaDownload(input: {
         }
       });
 
-      const mediaUrl = await store.getSignedGetUrl(key);
-      const thumbnailUrl = thumbnailKey ? await store.getSignedGetUrl(thumbnailKey) : null;
       const dto = toTelegramMessageDto(updated, {
         direction: updated.direction === "OUTBOUND" ? "OUTBOUND" : "INBOUND",
         chatTitle: null,
         chatType: "UNKNOWN",
         chatUsername: null
-      }, { mediaUrl, thumbnailUrl });
+      });
 
       await redis.publish("atlas.workspace-events", JSON.stringify(messageUpdatedEvent(workspaceId, dto)));
     } catch (error) {

@@ -10,6 +10,7 @@ import type {
 } from "@atlas/shared";
 import {
   buildCrmContactDisplayTitle,
+  buildTelegramMessageMediaPath,
   contentTypeToMediaType,
   formatTelegramMediaPreview,
   isUsableHumanDisplayTitle,
@@ -38,6 +39,7 @@ import {
 } from "../privacy/customer-privacy-mapper";
 import type { Role, TelegramAccountPermanentDeleteResponse } from "@atlas/shared";
 import { TelegramAccountPermanentDeleteService } from "./telegram-account-permanent-delete.service";
+import { signMediaAccessTicket, withMediaAccessTicket } from "./media-access-ticket";
 
 const manageableStates: readonly TelegramAccountStatus[] = [
   "PENDING",
@@ -1171,7 +1173,6 @@ export class TelegramService {
           mediaUrl = null;
           mediaDownloadState = "UNAVAILABLE";
           mediaError = "OBJECT_MISSING";
-          // Persist unavailable so clients stop requesting broken signed URLs.
           void this.app.prisma.telegramMessage
             .update({
               where: { id: message.id },
@@ -1183,7 +1184,7 @@ export class TelegramService {
             })
             .catch(() => undefined);
         } else {
-          mediaUrl = await this.app.storage.getSignedGetUrl(message.mediaStorageKey);
+          mediaUrl = this.buildProxiedMediaUrl(user, message.id, workspaceId, "media");
         }
       } catch {
         mediaUrl = null;
@@ -1192,7 +1193,10 @@ export class TelegramService {
     if (message.thumbnailStorageKey && workspaceId && mediaDownloadState !== "UNAVAILABLE") {
       try {
         this.app.storage.assertWorkspaceKey(workspaceId, message.thumbnailStorageKey);
-        thumbnailUrl = await this.app.storage.getSignedGetUrl(message.thumbnailStorageKey);
+        const thumbExists = await this.app.storage.objectExists(message.thumbnailStorageKey);
+        if (thumbExists) {
+          thumbnailUrl = this.buildProxiedMediaUrl(user, message.id, workspaceId, "thumbnail");
+        }
       } catch {
         thumbnailUrl = null;
       }
@@ -1243,6 +1247,22 @@ export class TelegramService {
       },
       user.role as Role
     );
+  }
+
+  private buildProxiedMediaUrl(
+    user: RequestUser,
+    messageId: string,
+    workspaceId: string,
+    variant: "media" | "thumbnail"
+  ): string {
+    const path = buildTelegramMessageMediaPath(messageId, variant);
+    const ticket = signMediaAccessTicket(this.app.env.JWT_ACCESS_SECRET, {
+      messageId,
+      workspaceId,
+      userId: user.id,
+      variant
+    });
+    return withMediaAccessTicket(path, ticket);
   }
 }
 

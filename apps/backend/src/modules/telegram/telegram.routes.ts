@@ -1,13 +1,21 @@
 import type { FastifyInstance } from "fastify";
-import { telegramAccountParamsSchema, telegramChatIdParamsSchema, telegramChatParamsSchema } from "./telegram.schemas";
+import {
+  telegramAccountParamsSchema,
+  telegramChatIdParamsSchema,
+  telegramChatParamsSchema,
+  telegramMediaVariantQuerySchema,
+  telegramMessageIdParamsSchema
+} from "./telegram.schemas";
 import { telegramManageGuard, telegramReadGuard, telegramSendGuard } from "./telegram.permissions";
 import { TelegramService } from "./telegram.service";
+import { TelegramMediaProxyService } from "./telegram-media-proxy.service";
 
 /**
  * Registers Telegram account, inbox, message, and operational health routes.
  */
 export async function telegramRoutes(app: FastifyInstance): Promise<void> {
   const service = new TelegramService(app);
+  const mediaProxy = new TelegramMediaProxyService(app);
   const authRateLimit = { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } };
 
   app.post("/accounts", { preHandler: [telegramManageGuard(app)] }, async (request) =>
@@ -91,6 +99,22 @@ export async function telegramRoutes(app: FastifyInstance): Promise<void> {
   app.get("/chats/:chatId/messages", { preHandler: [telegramReadGuard(app)] }, async (request) => {
     const params = telegramChatIdParamsSchema.parse(request.params);
     return service.listMessagesByChatId(request.user!, params.chatId);
+  });
+
+  app.get("/messages/:messageId/media", { preHandler: [] }, async (request, reply) => {
+    const params = telegramMessageIdParamsSchema.parse(request.params);
+    return mediaProxy.streamMessageMedia(request, reply, params.messageId, "media");
+  });
+
+  app.get("/messages/:messageId/thumbnail", { preHandler: [] }, async (request, reply) => {
+    const params = telegramMessageIdParamsSchema.parse(request.params);
+    return mediaProxy.streamMessageMedia(request, reply, params.messageId, "thumbnail");
+  });
+
+  app.get("/messages/:messageId/media-access", { preHandler: [telegramReadGuard(app)] }, async (request) => {
+    const params = telegramMessageIdParamsSchema.parse(request.params);
+    const query = telegramMediaVariantQuerySchema.parse(request.query);
+    return mediaProxy.mintMediaAccessUrl(request.user!, params.messageId, query.variant);
   });
 
   app.post("/chats/:chatId/read", { preHandler: [telegramReadGuard(app)] }, async (request) => {

@@ -16,6 +16,8 @@ import {
   readPollMeta
 } from "./media-message-helpers";
 import { RichMessageText } from "./rich-message-text";
+import { AuthMediaSrc } from "./auth-media-src";
+import { usePlayableMediaUrl } from "./media-url";
 import { useAuthStore } from "@/stores/auth-store";
 import { canViewDirectCustomerContact, type Role } from "@atlas/shared";
 
@@ -114,19 +116,35 @@ function MediaLoadingPlaceholder() {
 }
 
 function PhotoBody({ message }: { readonly message: TelegramMessageDto }) {
-  const src = message.mediaUrl ?? message.thumbnailUrl;
-  const [broken, setBroken] = useState(false);
-  if (!src || broken) {
-    return <FallbackLabel>{broken ? "📷 Photo unavailable" : "📷 Photo"}</FallbackLabel>;
-  }
   const ratio = aspectRatioStyle(message.width, message.height);
+  return (
+    <AuthMediaSrc
+      source={message.mediaUrl ?? message.thumbnailUrl}
+      variant={message.mediaUrl ? "media" : "thumbnail"}
+      loadingFallback={<MediaLoadingPlaceholder />}
+      errorFallback={<FallbackLabel>📷 Photo unavailable</FallbackLabel>}
+    >
+      {(src) => <PhotoImage src={src} message={message} {...(ratio ? { ratio } : {})} />}
+    </AuthMediaSrc>
+  );
+}
+
+function PhotoImage({
+  src,
+  message,
+  ratio
+}: {
+  readonly src: string;
+  readonly message: TelegramMessageDto;
+  readonly ratio?: string;
+}) {
+  const [broken, setBroken] = useState(false);
+  if (broken) return <FallbackLabel>📷 Photo unavailable</FallbackLabel>;
   return (
     <button
       type="button"
       className="block max-w-full overflow-hidden rounded-lg text-left"
-      onClick={() => {
-        if (message.mediaUrl) window.open(message.mediaUrl, "_blank", "noopener,noreferrer");
-      }}
+      onClick={() => window.open(src, "_blank", "noopener,noreferrer")}
       aria-label="Open photo"
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -142,34 +160,39 @@ function PhotoBody({ message }: { readonly message: TelegramMessageDto }) {
 }
 
 function VideoBody({ message }: { readonly message: TelegramMessageDto }) {
-  if (!message.mediaUrl) {
-    return <FallbackLabel>🎥 Video</FallbackLabel>;
-  }
   const ratio = aspectRatioStyle(message.width, message.height);
+  const poster = usePlayableMediaUrl(message.thumbnailUrl, "thumbnail");
   return (
-    <video
-      src={message.mediaUrl}
-      controls
-      preload="metadata"
-      poster={message.thumbnailUrl ?? undefined}
-      className="max-h-80 max-w-full rounded-lg bg-black"
-      style={ratio ? { aspectRatio: ratio } : undefined}
-    />
+    <AuthMediaSrc
+      source={message.mediaUrl}
+      loadingFallback={<MediaLoadingPlaceholder />}
+      errorFallback={<FallbackLabel>🎥 Video unavailable</FallbackLabel>}
+    >
+      {(src) => (
+        <video
+          src={src}
+          controls
+          preload="metadata"
+          poster={poster.url ?? undefined}
+          className="max-h-80 max-w-full rounded-lg bg-black"
+          style={ratio ? { aspectRatio: ratio } : undefined}
+        />
+      )}
+    </AuthMediaSrc>
   );
 }
 
 function VideoNoteBody({ message }: { readonly message: TelegramMessageDto }) {
-  if (!message.mediaUrl) {
-    return <FallbackLabel>🎥 Video message</FallbackLabel>;
-  }
   return (
-    <video
-      src={message.mediaUrl}
-      controls
-      playsInline
-      preload="metadata"
-      className="size-48 rounded-full object-cover bg-black"
-    />
+    <AuthMediaSrc
+      source={message.mediaUrl}
+      loadingFallback={<MediaLoadingPlaceholder />}
+      errorFallback={<FallbackLabel>🎥 Video message unavailable</FallbackLabel>}
+    >
+      {(src) => (
+        <video src={src} controls playsInline preload="metadata" className="size-48 rounded-full object-cover bg-black" />
+      )}
+    </AuthMediaSrc>
   );
 }
 
@@ -178,6 +201,7 @@ function VoiceBody({ message }: { readonly message: TelegramMessageDto }) {
   const [progress, setProgress] = useState(0);
   const [playing, setPlaying] = useState(false);
   const bars = useMemo(() => normalizeWaveform(message.waveform), [message.waveform]);
+  const resolved = usePlayableMediaUrl(message.mediaUrl);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -196,11 +220,10 @@ function VoiceBody({ message }: { readonly message: TelegramMessageDto }) {
       audio.removeEventListener("timeupdate", onTime);
       audio.removeEventListener("ended", onEnded);
     };
-  }, []);
+  }, [resolved.url]);
 
-  if (!message.mediaUrl) {
-    return <FallbackLabel>🎤 Voice Message</FallbackLabel>;
-  }
+  if (resolved.loading) return <MediaLoadingPlaceholder />;
+  if (!resolved.url) return <FallbackLabel>🎤 Voice unavailable</FallbackLabel>;
 
   return (
     <div className="flex min-w-[14rem] items-center gap-2">
@@ -247,7 +270,7 @@ function VoiceBody({ message }: { readonly message: TelegramMessageDto }) {
         ))}
       </button>
       <span className="shrink-0 text-[10px] text-muted-foreground">{formatDuration(message.durationSeconds)}</span>
-      <audio ref={audioRef} src={message.mediaUrl} preload="metadata" />
+      <audio ref={audioRef} src={resolved.url} preload="metadata" />
     </div>
   );
 }
@@ -255,77 +278,101 @@ function VoiceBody({ message }: { readonly message: TelegramMessageDto }) {
 function AudioBody({ message }: { readonly message: TelegramMessageDto }) {
   const meta = readAudioMeta(message.mediaMetadata);
   const title = meta.title || message.fileName || "Audio";
-  if (!message.mediaUrl) {
-    return (
-      <div>
-        <FallbackLabel>🎵 {title}</FallbackLabel>
-        {meta.performer ? <p className="text-xs text-muted-foreground">{meta.performer}</p> : null}
-      </div>
-    );
-  }
   return (
-    <div className="min-w-[12rem] space-y-1">
-      <p className="text-sm font-medium leading-tight">{title}</p>
-      {meta.performer ? <p className="text-xs text-muted-foreground">{meta.performer}</p> : null}
-      <audio src={message.mediaUrl} controls preload="metadata" className="w-full max-w-xs" />
-    </div>
+    <AuthMediaSrc
+      source={message.mediaUrl}
+      loadingFallback={<MediaLoadingPlaceholder />}
+      errorFallback={
+        <div>
+          <FallbackLabel>🎵 {title}</FallbackLabel>
+          {meta.performer ? <p className="text-xs text-muted-foreground">{meta.performer}</p> : null}
+        </div>
+      }
+    >
+      {(src) => (
+        <div className="min-w-[12rem] space-y-1">
+          <p className="text-sm font-medium leading-tight">{title}</p>
+          {meta.performer ? <p className="text-xs text-muted-foreground">{meta.performer}</p> : null}
+          <audio src={src} controls preload="metadata" className="w-full max-w-xs" />
+        </div>
+      )}
+    </AuthMediaSrc>
   );
 }
 
 function DocumentBody({ message }: { readonly message: TelegramMessageDto }) {
   const name = message.fileName || "Document";
   const size = formatFileSize(message.fileSizeBytes);
-  if (!message.mediaUrl) {
-    return <FallbackLabel>📄 {name}</FallbackLabel>;
-  }
   return (
-    <a
-      href={message.mediaUrl}
-      target="_blank"
-      rel="noopener noreferrer"
-      download={message.fileName ?? undefined}
-      className="flex items-center gap-2 rounded-lg bg-black/5 px-3 py-2 text-sm hover:bg-black/10"
+    <AuthMediaSrc
+      source={message.mediaUrl}
+      loadingFallback={<MediaLoadingPlaceholder />}
+      errorFallback={<FallbackLabel>📄 {name}</FallbackLabel>}
     >
-      <span aria-hidden="true">📄</span>
-      <span className="min-w-0">
-        <span className="block truncate font-medium">{name}</span>
-        {size ? <span className="block text-[10px] text-muted-foreground">{size}</span> : null}
-      </span>
-    </a>
+      {(src) => (
+        <a
+          href={src}
+          target="_blank"
+          rel="noopener noreferrer"
+          download={message.fileName ?? undefined}
+          className="flex items-center gap-2 rounded-lg bg-black/5 px-3 py-2 text-sm hover:bg-black/10"
+        >
+          <span aria-hidden="true">📄</span>
+          <span className="min-w-0">
+            <span className="block truncate font-medium">{name}</span>
+            {size ? <span className="block text-[10px] text-muted-foreground">{size}</span> : null}
+          </span>
+        </a>
+      )}
+    </AuthMediaSrc>
   );
 }
 
 function AnimationBody({ message }: { readonly message: TelegramMessageDto }) {
-  const src = message.mediaUrl ?? message.thumbnailUrl;
-  if (!src) {
-    return <FallbackLabel>🎞 GIF</FallbackLabel>;
-  }
-  if (message.mediaUrl && (message.mimeType?.includes("video") || message.mediaUrl.includes(".mp4"))) {
+  const mime = message.mimeType?.toLowerCase() ?? "";
+  const isVideoAnim =
+    mime.includes("video") || mime === "video/mp4" || message.fileName?.toLowerCase().endsWith(".mp4") === true;
+
+  if (message.mediaUrl && isVideoAnim) {
     return (
-      <video
-        src={message.mediaUrl}
-        autoPlay
-        muted
-        loop
-        playsInline
-        className="max-h-80 max-w-full rounded-lg"
-      />
+      <AuthMediaSrc
+        source={message.mediaUrl}
+        loadingFallback={<MediaLoadingPlaceholder />}
+        errorFallback={<FallbackLabel>🎞 GIF unavailable</FallbackLabel>}
+      >
+        {(src) => (
+          <video src={src} autoPlay muted loop playsInline className="max-h-80 max-w-full rounded-lg" />
+        )}
+      </AuthMediaSrc>
     );
   }
+
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img src={src} alt={message.caption || "GIF"} className="max-h-80 max-w-full rounded-lg object-contain" />
+    <AuthMediaSrc
+      source={message.mediaUrl ?? message.thumbnailUrl}
+      loadingFallback={<MediaLoadingPlaceholder />}
+      errorFallback={<FallbackLabel>🎞 GIF unavailable</FallbackLabel>}
+    >
+      {(src) => (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={src} alt={message.caption || "GIF"} className="max-h-80 max-w-full rounded-lg object-contain" />
+      )}
+    </AuthMediaSrc>
   );
 }
 
 function StickerBody({ message }: { readonly message: TelegramMessageDto }) {
-  const src = message.mediaUrl ?? message.thumbnailUrl;
-  if (!src) {
-    return <FallbackLabel>🖼 Sticker</FallbackLabel>;
-  }
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img src={src} alt="Sticker" className="max-h-40 max-w-[10rem] bg-transparent object-contain" />
+    <AuthMediaSrc
+      source={message.mediaUrl ?? message.thumbnailUrl}
+      loadingFallback={<MediaLoadingPlaceholder />}
+      errorFallback={<FallbackLabel>🖼 Sticker unavailable</FallbackLabel>}
+    >
+      {(src) => (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={src} alt="Sticker" className="max-h-40 max-w-[10rem] bg-transparent object-contain" />
+      )}
+    </AuthMediaSrc>
   );
 }
 

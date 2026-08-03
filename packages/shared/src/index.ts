@@ -10,5 +10,6 @@ export * from "./telegram-peer-id";
 export * from "./telegram-crm-identity";
 export * from "./telegram-unread";
 export * from "./telegram-media";
+export * from "./telegram-media-url";
 export * from "./telegram-account-deletion";
 export * from "./telegram-account-actions";

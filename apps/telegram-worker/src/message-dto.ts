@@ -1,4 +1,5 @@
 import {
+  buildTelegramMessageMediaPath,
   contentTypeToMediaType,
   type TelegramContentType,
   type TelegramMediaDownloadState,
@@ -27,6 +28,8 @@ type MessageRow = {
   readonly mediaDownloadState?: TelegramMediaDownloadState | string | null;
   readonly mediaUploadState?: TelegramMediaDownloadState | string | null;
   readonly mediaError?: string | null;
+  readonly mediaStorageKey?: string | null;
+  readonly thumbnailStorageKey?: string | null;
   readonly replyToTelegramMessageId: string | null;
   readonly telegramCreatedAt: Date;
   readonly telegramEditedAt: Date | null;
@@ -97,8 +100,14 @@ export function toTelegramMessageDto(
     durationSeconds: message.durationSeconds ?? null,
     waveform: Array.isArray(message.waveformJson) ? (message.waveformJson as number[]) : null,
     mediaMetadata: metadata,
-    mediaUrl: urls.mediaUrl ?? null,
-    thumbnailUrl: urls.thumbnailUrl ?? null,
+    mediaUrl:
+      urls.mediaUrl ??
+      (message.mediaStorageKey && message.mediaDownloadState === "STORED"
+        ? buildTelegramMessageMediaPath(message.id, "media")
+        : null),
+    thumbnailUrl:
+      urls.thumbnailUrl ??
+      (message.thumbnailStorageKey ? buildTelegramMessageMediaPath(message.id, "thumbnail") : null),
     mediaDownloadState: (message.mediaDownloadState as TelegramMessageDto["mediaDownloadState"]) ?? "NONE",
     mediaUploadState: (message.mediaUploadState as TelegramMessageDto["mediaUploadState"]) ?? "NONE",
     mediaError: message.mediaError ?? null,

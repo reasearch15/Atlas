@@ -67,6 +67,7 @@ describe("inbox realtime merge", () => {
   });
 
   it("preserves mediaUrl when a status update arrives without urls", () => {
+    const proxyUrl = "/api/telegram/messages/m1/media";
     const base: TelegramMessageDto = {
       id: "m1",
       telegramAccountId: "acc",
@@ -90,7 +91,7 @@ describe("inbox realtime merge", () => {
       attributionSource: "ATLAS",
       sendStatus: "SENT",
       ...emptyMediaFields(),
-      mediaUrl: "https://example.test/photo.jpg",
+      mediaUrl: proxyUrl,
       mediaDownloadState: "STORED",
       mediaUploadState: "STORED"
     };
@@ -99,8 +100,44 @@ describe("inbox realtime merge", () => {
       sendStatus: "DELIVERED",
       mediaUrl: null
     });
-    expect(merged[0]?.mediaUrl).toBe("https://example.test/photo.jpg");
+    expect(merged[0]?.mediaUrl).toBe(proxyUrl);
     expect(merged[0]?.sendStatus).toBe("DELIVERED");
+  });
+
+  it("rejects private MinIO URLs during realtime merge", () => {
+    const proxyUrl = "/api/telegram/messages/m1/media";
+    const base: TelegramMessageDto = {
+      id: "m1",
+      telegramAccountId: "acc",
+      chatId: "c1",
+      telegramMessageId: "10",
+      direction: "INBOUND",
+      contentType: "VIDEO",
+      mediaType: "VIDEO",
+      text: "",
+      sentAt: "2026-01-01T00:00:00.000Z",
+      editedAt: null,
+      isEdited: false,
+      isDeleted: false,
+      senderTelegramUserId: null,
+      senderDisplayName: null,
+      replyToTelegramMessageId: null,
+      internalSenderUserId: null,
+      internalSenderSessionId: null,
+      internalSenderRole: null,
+      internalSenderName: null,
+      attributionSource: null,
+      sendStatus: "SENT",
+      ...emptyMediaFields(),
+      mediaUrl: proxyUrl,
+      mediaDownloadState: "STORED",
+      mediaUploadState: "STORED"
+    };
+    const merged = mergeAndDeduplicate([base], {
+      ...base,
+      mediaUrl: "http://127.0.0.1:9000/bucket/key?X-Amz-Signature=abc"
+    });
+    expect(merged[0]?.mediaUrl).toBe(proxyUrl);
   });
 
   it("does not duplicate rows for repeated realtime events", () => {

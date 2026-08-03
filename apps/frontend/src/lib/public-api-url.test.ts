@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolvePublicApiUrl } from "./public-api-url";
+import { resolvePublicApiUrl } from "./resolve-public-api-url";
 
 describe("resolvePublicApiUrl", () => {
   it("requires NEXT_PUBLIC_API_URL when unset", () => {

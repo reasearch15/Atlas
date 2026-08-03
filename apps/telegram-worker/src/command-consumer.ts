@@ -902,16 +902,16 @@ async function processSendMediaJob(
       });
     }
     const refreshed = await prisma.telegramMessage.findUniqueOrThrow({ where: { id: message.id } });
-    const mediaUrl = refreshed.mediaStorageKey ? await store.getSignedGetUrl(refreshed.mediaStorageKey) : null;
     await publishMessage(
       prisma,
       redis,
       command.workspaceId,
-      toTelegramMessageDto(
-        refreshed,
-        { direction: "OUTBOUND", chatTitle: null, chatType: "UNKNOWN", chatUsername: null },
-        { mediaUrl }
-      )
+      toTelegramMessageDto(refreshed, {
+        direction: "OUTBOUND",
+        chatTitle: null,
+        chatType: "UNKNOWN",
+        chatUsername: null
+      })
     );
     await confirmOutboundDelivery({
       prisma,
