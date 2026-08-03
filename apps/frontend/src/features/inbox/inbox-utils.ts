@@ -1,5 +1,5 @@
 import type { CrmConversationStatus, CrmInboxCountsDto, CrmInboxFilter, TelegramChatDto, TelegramMessageDto } from "@atlas/shared";
-import { isPrivateStorageMediaUrl } from "@atlas/shared";
+import { contactDisplayTitleQuality, formatTelegramUserFallbackTitle, isPrivateStorageMediaUrl, isTemporaryTelegramUserTitle } from "@atlas/shared";
 import { resolveContactIdentity } from "./contact-identity";
 
 export type InboxChatKind = "private" | "group" | "channel" | "bot";
@@ -335,6 +335,12 @@ export function applyChatActivity(
     readonly needsCrmAttention?: boolean;
     readonly telegramChatId?: string;
     readonly accountLabel?: string;
+    readonly telegramAccountId?: string;
+    readonly crmStatus?: TelegramChatDto["crmStatus"];
+    readonly assignedUserId?: string | null;
+    readonly assignedUserName?: string | null;
+    readonly assignedAt?: string | null;
+    readonly claimedAt?: string | null;
   }
 ): InboxConversation[] {
   let found = false;
@@ -352,7 +358,9 @@ export function applyChatActivity(
           : input.bumpUnread
             ? item.chat.unreadCount + 1
             : item.chat.unreadCount,
-      ...(input.title !== undefined && isBetterTitle(input.title, item.chat.title) ? { title: input.title } : {}),
+      ...(input.title !== undefined && isBetterTitle(input.title, item.chat.title, item.chat.telegramChatId)
+        ? { title: input.title }
+        : {}),
       ...(input.firstName !== undefined && input.firstName && !item.chat.firstName ? { firstName: input.firstName } : {}),
       ...(input.lastName !== undefined && input.lastName && !item.chat.lastName ? { lastName: input.lastName } : {}),
       ...(input.username !== undefined && input.username && !item.chat.username ? { username: input.username } : {}),
@@ -362,18 +370,30 @@ export function applyChatActivity(
       ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
       ...(input.identityResolved !== undefined ? { identityResolved: input.identityResolved } : {}),
       ...(input.needsCrmAttention !== undefined ? { needsCrmAttention: input.needsCrmAttention } : {}),
-      ...(input.telegramChatId !== undefined ? { telegramChatId: input.telegramChatId } : {})
+      ...(input.telegramChatId !== undefined ? { telegramChatId: input.telegramChatId } : {}),
+      ...(input.crmStatus !== undefined ? { crmStatus: input.crmStatus } : {}),
+      ...(input.assignedUserId !== undefined ? { assignedUserId: input.assignedUserId } : {}),
+      ...(input.assignedUserName !== undefined ? { assignedUserName: input.assignedUserName } : {}),
+      ...(input.assignedAt !== undefined ? { assignedAt: input.assignedAt } : {}),
+      ...(input.claimedAt !== undefined ? { claimedAt: input.claimedAt } : {})
     };
     return toInboxConversation(chat, item.accountLabel);
   });
 
-  if (!found && input.accountLabel) {
+  if (!found && (input.accountLabel || input.telegramAccountId)) {
+    const peerId = input.telegramChatId ?? "";
+    const stubTitle =
+      input.title && !isTemporaryTelegramUserTitle(input.title) && !/^-?\d{5,}$/.test(input.title.trim())
+        ? input.title
+        : peerId
+          ? formatTelegramUserFallbackTitle(peerId)
+          : input.title ?? "Unknown User";
     const stub: TelegramChatDto = {
       id: input.chatId,
-      telegramAccountId: "",
+      telegramAccountId: input.telegramAccountId ?? "",
       telegramChatId: input.telegramChatId ?? input.chatId,
       chatType: input.chatType ?? "PRIVATE",
-      title: input.title ?? "Unknown User",
+      title: stubTitle,
       username: input.username ?? null,
       firstName: input.firstName ?? null,
       lastName: input.lastName ?? null,
@@ -385,25 +405,23 @@ export function applyChatActivity(
       isPinned: input.isPinned ?? false,
       isBot: input.isBot ?? false,
       identityResolved: input.identityResolved ?? false,
-      crmStatus: "NEW",
-      assignedUserId: null,
-      assignedUserName: null,
-      assignedAt: null,
-      claimedAt: null,
+      crmStatus: input.crmStatus ?? "NEW",
+      assignedUserId: input.assignedUserId ?? null,
+      assignedUserName: input.assignedUserName ?? null,
+      assignedAt: input.assignedAt ?? null,
+      claimedAt: input.claimedAt ?? null,
       needsCrmAttention: input.needsCrmAttention ?? true,
       tags: []
     };
-    next.push(toInboxConversation(stub, input.accountLabel));
+    next.push(toInboxConversation(stub, input.accountLabel ?? "Telegram"));
   }
 
   return sortConversations(next);
 }
 
-function isBetterTitle(incoming: string, existing: string): boolean {
+function isBetterTitle(incoming: string, existing: string, telegramChatId?: string | null): boolean {
   if (!incoming.trim()) return false;
-  if (/^unknown(\s|$)/i.test(existing.trim()) && !/^unknown(\s|$)/i.test(incoming.trim())) return true;
-  if (!existing.trim()) return true;
-  return incoming.trim() !== existing.trim() && !/^unknown(\s|$)/i.test(incoming.trim());
+  return contactDisplayTitleQuality(incoming, telegramChatId) > contactDisplayTitleQuality(existing, telegramChatId);
 }
 
 /**

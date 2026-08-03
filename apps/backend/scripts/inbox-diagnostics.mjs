@@ -54,12 +54,17 @@ async function main() {
       username: true,
       firstName: true,
       lastName: true,
-      rawMetadataJson: true
+      accessHash: true,
+      peerType: true,
+      rawMetadataJson: true,
+      _count: { select: { messages: true } }
     },
     take: 5000
   });
 
   let serviceCandidates = 0;
+  let incompletePrivatePeers = 0;
+  let nakedNumericTitles = 0;
   for (const chat of chats) {
     const meta =
       chat.rawMetadataJson && typeof chat.rawMetadataJson === "object" && !Array.isArray(chat.rawMetadataJson)
@@ -79,6 +84,17 @@ async function main() {
       })
     ) {
       serviceCandidates += 1;
+      continue;
+    }
+    const isPrivate =
+      chat.chatType === "PRIVATE" ||
+      chat.peerType === "USER" ||
+      (!String(chat.telegramChatId).startsWith("-") && chat.chatType !== "GROUP" && chat.chatType !== "CHANNEL");
+    if (isPrivate && chat._count.messages > 0 && (!chat.accessHash || !chat.peerType)) {
+      incompletePrivatePeers += 1;
+    }
+    if (/^-?\d{5,}$/.test(String(chat.title).trim())) {
+      nakedNumericTitles += 1;
     }
   }
 
@@ -129,11 +145,14 @@ async function main() {
         contactsOrChatsTitledUnknown: unknownTitle,
         conversationsWithUnread: unread,
         officialOrServiceConversationCandidates: serviceCandidates,
+        incompletePrivatePeersMissingAccessHashOrPeerType: incompletePrivatePeers,
+        nakedNumericChatTitles: nakedNumericTitles,
         minioBucketProbe: objectCount,
         sqlNotes: {
           mediaWithKey: `SELECT COUNT(*) FROM telegram_messages WHERE media_storage_key IS NOT NULL;`,
           unread: `SELECT COUNT(*) FROM telegram_chats WHERE is_archived = false AND unread_count > 0;`,
           unknown: `SELECT COUNT(*) FROM telegram_chats WHERE is_archived = false AND title ILIKE 'Unknown%';`,
+          incompletePrivate: `SELECT COUNT(*) FROM telegram_chats c WHERE c.is_archived = false AND (c.chat_type = 'PRIVATE' OR c.peer_type = 'USER') AND (c.access_hash IS NULL OR c.peer_type IS NULL) AND EXISTS (SELECT 1 FROM telegram_messages m WHERE m.telegram_chat_db_id = c.id);`,
           servicePeers: `SELECT id, telegram_chat_id, title FROM telegram_chats WHERE telegram_chat_id IN ('777000','42777');`
         }
       },

@@ -24,7 +24,8 @@
     "admin:cleanup-orphans": "dotenv -e ../../.env -- tsx src/scripts/admin-cleanup-orphans.ts",
     "fixtures:clean": "dotenv -e ../../.env -- tsx src/scripts/fixtures-clean.ts",
     "inbox:diagnostics": "dotenv -e ../../.env -- node scripts/inbox-diagnostics.mjs",
-    "cleanup:telegram": "dotenv -e ../../.env -- node scripts/cleanup-telegram-service-chats.mjs"
+    "cleanup:telegram": "dotenv -e ../../.env -- node scripts/cleanup-telegram-service-chats.mjs",
+    "identity:backfill": "dotenv -e ../../.env -- node scripts/backfill-telegram-identity.mjs"
   },
   "dependencies": {
     "@atlas/shared": "workspace:*",

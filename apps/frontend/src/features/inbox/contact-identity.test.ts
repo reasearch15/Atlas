@@ -39,20 +39,15 @@ describe("contact identity", () => {
     expect(identity.displayName).toBe("VIP Buyer");
     expect(identity.presenceLabel).toBe("Online");
   });
-  it("hides username and phone when direct contact is not allowed", () => {
+  it("never shows naked peer id as display name", () => {
     const identity = resolveContactIdentity({
-      title: "Ada Lovelace",
-      username: "ada",
-      phone: "+15551234567",
-      telegramChatId: "99",
+      title: "8291583373",
+      telegramChatId: "8291583373",
       chatType: "PRIVATE",
-      allowDirectContact: false
+      allowDirectContact: true
     });
-    expect(identity.displayName).toBe("Ada Lovelace");
-    expect(identity.username).toBeNull();
-    expect(identity.phone).toBeNull();
-    expect(identity.privacyNotice).toBeTruthy();
-    expect(identity.subtitle).not.toMatch(/ada|1555/i);
+    expect(identity.displayName).toBe("Telegram user 8291583373");
+    expect(identity.displayName).not.toBe("8291583373");
   });
 });
 

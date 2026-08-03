@@ -2,7 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { Queue, Worker } from "bullmq";
 import Redis from "ioredis";
-import { classifyTelegramFailure, resolveSyncedUnreadCount, sanitizeTelegramError, shouldIgnoreTelegramDialog, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
+import { classifyTelegramFailure, formatTelegramUserFallbackTitle, resolveSyncedUnreadCount, sanitizeTelegramError, shouldIgnoreTelegramDialog, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
 import { decryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
 import type { WorkerEnv } from "./env";
 import { TelegramClientAdapter, type NormalizedTextMessage, type TelegramApiCredentials, isUsableDisplayTitle, TelegramAuthNetworkTimeoutError } from "./telegram-client";
@@ -233,7 +233,10 @@ async function processMetadataIdentityBackfillJob(
       accountId: command.telegramAccountId,
       viaLiveSync: !ownsTemporaryRuntime
     });
-    const backfill = await runIdentityBackfillBatches(prisma, adapter, runtime, command.telegramAccountId, 1);
+    const backfill = await runIdentityBackfillBatches(prisma, adapter, runtime, command.telegramAccountId, 1, {
+      redis,
+      workspaceId: command.workspaceId
+    });
     await writeMetadataBackfillTerminal(redis, command.telegramAccountId, backfill);
     await prisma.telegramOutboundCommand.update({
       where: { id: command.id },
@@ -528,7 +531,14 @@ export async function processInitialSync(
     const savedDialogs = metadataOnly
       ? 0
       : await syncInitialPage(prisma, adapter, runtime, command.workspaceId, command.telegramAccountId);
-    const backfill = await runIdentityBackfillBatches(prisma, adapter, runtime, command.telegramAccountId);
+    const backfill = await runIdentityBackfillBatches(
+      prisma,
+      adapter,
+      runtime,
+      command.telegramAccountId,
+      5,
+      redis ? { redis, workspaceId: command.workspaceId } : { workspaceId: command.workspaceId }
+    );
     if (!metadataOnly && redis) {
       try {
         const store = createMediaObjectStore(env);
@@ -1476,12 +1486,14 @@ async function quarantineChatByPeerId(
 
 /**
  * Re-resolves Telegram entities for chats that still lack usable titles.
+ * Updates the existing row and publishes telegram.chat.updated (no duplicates).
  */
 async function backfillMissingChatIdentities(
   prisma: PrismaClient,
   adapter: TelegramClientAdapter,
   runtime: Awaited<ReturnType<TelegramClientAdapter["connect"]>>,
-  telegramAccountId: string
+  telegramAccountId: string,
+  options?: { readonly redis?: Redis; readonly workspaceId?: string }
 ): Promise<IdentityBackfillCounts> {
   const batchSize = 40;
   const candidates = await prisma.telegramChat.findMany({
@@ -1491,6 +1503,8 @@ async function backfillMissingChatIdentities(
       OR: [
         { chatType: "UNKNOWN" },
         { title: "" },
+        { title: { startsWith: "Unknown", mode: "insensitive" } },
+        { title: { startsWith: "Telegram user ", mode: "insensitive" } },
         { chatType: "PRIVATE", firstName: null, lastName: null, username: null },
         { chatType: "PRIVATE", firstName: null, lastName: null, username: "" },
         { chatType: { in: ["PRIVATE", "CHANNEL", "SUPERGROUP"] }, accessHash: null }
@@ -1541,12 +1555,29 @@ async function backfillMissingChatIdentities(
         ...(chat.peerPhone != null ? { phone: chat.peerPhone } : {})
       });
       const data = buildIdentityFillUpdate(chat, identity);
-      await prisma.telegramChat.update({
+      const row = await prisma.telegramChat.update({
         where: { id: chat.id },
         data
       });
-      if (identityUpdateImproves(chat, data) === "updated" || isUsableDisplayTitle(identity.title, identity.telegramChatId)) {
+      const improved =
+        identityUpdateImproves(chat, data) === "updated" ||
+        isUsableDisplayTitle(identity.title, identity.telegramChatId);
+      if (improved) {
         updated += 1;
+        if (options?.redis && options.workspaceId) {
+          await options.redis.publish(
+            "atlas.workspace-events",
+            JSON.stringify(
+              chatUpdatedEvent(
+                options.workspaceId,
+                chatUpdatedFieldsFromRow({
+                  ...row,
+                  lastMessageDirection: null
+                })
+              )
+            )
+          );
+        }
       } else {
         unresolved += 1;
       }
@@ -1560,16 +1591,35 @@ async function backfillMissingChatIdentities(
         code: safe.code ?? safe.name,
         message: safe.message
       });
-      await prisma.telegramChat.update({
-        where: { id: chat.id },
-        data: {
-          rawMetadataJson: mergeIdentityMetadata(chat.rawMetadataJson, {
-            identityResolved: false,
-            identityResolutionError: safe.code ?? safe.name,
-            identityResolvedAt: new Date().toISOString()
+      // Normalize naked numeric titles even when entity resolve fails.
+      if (/^-?\d{5,}$/.test(chat.title.trim())) {
+        await prisma.telegramChat
+          .update({
+            where: { id: chat.id },
+            data: {
+              title: formatTelegramUserFallbackTitle(chat.telegramChatId),
+              rawMetadataJson: mergeIdentityMetadata(chat.rawMetadataJson, {
+                identityResolved: false,
+                identityResolutionError: safe.code ?? safe.name,
+                identityResolvedAt: new Date().toISOString()
+              })
+            }
           })
-        }
-      }).catch(() => undefined);
+          .catch(() => undefined);
+      } else {
+        await prisma.telegramChat
+          .update({
+            where: { id: chat.id },
+            data: {
+              rawMetadataJson: mergeIdentityMetadata(chat.rawMetadataJson, {
+                identityResolved: false,
+                identityResolutionError: safe.code ?? safe.name,
+                identityResolvedAt: new Date().toISOString()
+              })
+            }
+          })
+          .catch(() => undefined);
+      }
     }
   }
 
@@ -1643,14 +1693,15 @@ async function runIdentityBackfillBatches(
   adapter: TelegramClientAdapter,
   runtime: Awaited<ReturnType<TelegramClientAdapter["connect"]>>,
   telegramAccountId: string,
-  maxBatches = 5
+  maxBatches = 5,
+  options?: { readonly redis?: Redis; readonly workspaceId?: string }
 ): Promise<IdentityBackfillCounts> {
   let scanned = 0;
   let updated = 0;
   let unresolved = 0;
   let failed = 0;
   for (let i = 0; i < maxBatches; i += 1) {
-    const batch = await backfillMissingChatIdentities(prisma, adapter, runtime, telegramAccountId);
+    const batch = await backfillMissingChatIdentities(prisma, adapter, runtime, telegramAccountId, options);
     scanned += batch.scanned;
     updated += batch.updated;
     unresolved += batch.unresolved;

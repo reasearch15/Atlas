@@ -134,8 +134,10 @@ export function shouldIgnoreTelegramDialog(input: TelegramDialogEligibilityInput
 
 /**
  * Builds a CRM display title with stable priority.
- * Private: first+last → first → last → username → phone → Telegram ID → Unknown User
- * Group/channel: title → username → Unknown Group/Channel
+ * Private: first+last → first → last → groupTitle/display_name → username → phone →
+ *   "Telegram user <peerId>" → Unknown Bot/User (only when peer id is also missing).
+ * Group/channel: title → username → Unknown Group/Channel.
+ * Never returns a naked numeric peer id as the title.
  */
 export function buildCrmContactDisplayTitle(input: ContactDisplayTitleInput): string {
   const chatType = String(input.chatType ?? "PRIVATE").toUpperCase();
@@ -145,9 +147,10 @@ export function buildCrmContactDisplayTitle(input: ContactDisplayTitleInput): st
   const username = cleanDisplayPart(input.username)?.replace(/^@/, "") ?? null;
   const phone = cleanDisplayPart(input.phone);
   const telegramId = cleanDisplayPart(input.telegramChatId);
+  const barePeerId = bareTelegramPeerId(telegramId);
 
   if (chatType === "GROUP" || chatType === "SUPERGROUP" || chatType === "CHANNEL") {
-    if (groupTitle && !isRawTelegramId(groupTitle) && !/^unknown(\s|$)/i.test(groupTitle)) {
+    if (groupTitle && !isRawTelegramId(groupTitle) && !isTemporaryTelegramUserTitle(groupTitle) && !/^unknown(\s|$)/i.test(groupTitle)) {
       return groupTitle.slice(0, 255);
     }
     if (username && !isRawTelegramId(username)) return username.slice(0, 255);
@@ -163,7 +166,12 @@ export function buildCrmContactDisplayTitle(input: ContactDisplayTitleInput): st
   if (lastName && !isRawTelegramId(lastName)) {
     return lastName.slice(0, 255);
   }
-  if (groupTitle && !isRawTelegramId(groupTitle) && !/^unknown(\s|$)/i.test(groupTitle)) {
+  if (
+    groupTitle &&
+    !isRawTelegramId(groupTitle) &&
+    !isTemporaryTelegramUserTitle(groupTitle) &&
+    !/^unknown(\s|$)/i.test(groupTitle)
+  ) {
     return groupTitle.slice(0, 255);
   }
   if (username && !isRawTelegramId(username)) {
@@ -172,16 +180,35 @@ export function buildCrmContactDisplayTitle(input: ContactDisplayTitleInput): st
   if (phone) {
     return phone.slice(0, 255);
   }
-  if (telegramId) {
-    return telegramId.slice(0, 255);
+  if (barePeerId) {
+    return formatTelegramUserFallbackTitle(barePeerId);
   }
   if (input.isBot) return "Unknown Bot";
   return "Unknown User";
 }
 
 /**
+ * Stable temporary title when Telegram entity fields are not yet available.
+ */
+export function formatTelegramUserFallbackTitle(peerId: string): string {
+  const bare = bareTelegramPeerId(peerId) || peerId.trim();
+  return `Telegram user ${bare}`.slice(0, 255);
+}
+
+/**
+ * Returns true for temporary "Telegram user <peerId>" titles (and legacy naked numeric titles).
+ */
+export function isTemporaryTelegramUserTitle(title: string | null | undefined): boolean {
+  if (!title) return false;
+  const trimmed = title.trim();
+  if (!trimmed) return false;
+  if (isRawTelegramId(trimmed)) return true;
+  return /^telegram\s+user\s+-?\d+$/i.test(trimmed);
+}
+
+/**
  * Ranking used when upgrading an existing conversation title after entity resolution.
- * Higher is better. Unknown placeholders rank lowest; Telegram id ranks above Unknown.
+ * Higher is better. Unknown / temporary peer titles rank lowest.
  */
 export function contactDisplayTitleQuality(
   title: string | null | undefined,
@@ -191,6 +218,7 @@ export function contactDisplayTitleQuality(
   const trimmed = title.trim();
   if (!trimmed) return 0;
   if (/^unknown(\s|$)/i.test(trimmed)) return 0;
+  if (isTemporaryTelegramUserTitle(trimmed)) return 1;
   if (telegramChatId && trimmed === telegramChatId.trim()) return 1;
   if (isRawTelegramId(trimmed)) return 1;
   if (/^\+?[0-9][\d\s()-]{5,}$/.test(trimmed)) return 2;
@@ -201,8 +229,7 @@ export function contactDisplayTitleQuality(
 
 /**
  * Returns true when a stored title is a real human/group label (not Unknown / empty).
- * Raw Telegram ids and phones count as resolved enough to display, but identity backfill
- * may still improve them via {@link needsIdentityBackfillRow}.
+ * Temporary "Telegram user <id>" and naked ids count as present but not human-resolved.
  */
 export function isResolvedCrmDisplayTitle(
   title: string | null | undefined,
@@ -225,6 +252,7 @@ export function isUsableHumanDisplayTitle(
 ): boolean {
   if (!isResolvedCrmDisplayTitle(title, telegramChatId)) return false;
   const trimmed = title!.trim();
+  if (isTemporaryTelegramUserTitle(trimmed)) return false;
   if (telegramChatId && trimmed === telegramChatId.trim()) return false;
   if (isRawTelegramId(trimmed)) return false;
   return true;

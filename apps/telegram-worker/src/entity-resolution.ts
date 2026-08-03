@@ -160,7 +160,9 @@ export function extractPeerFields(
     peerType = normalizePeerType(null, null, telegramChatId) ?? "USER";
   }
 
-  const accessHash = accessHashAsString(value.accessHash);
+  const accessHash =
+    accessHashAsString(value.accessHash) ??
+    extractAccessHashFromPeerCandidate(value);
   const username = typeof value.username === "string" && value.username.trim() ? value.username.trim() : null;
   const phone = typeof value.phone === "string" && value.phone.trim() ? value.phone.trim() : null;
   const firstName = typeof value.firstName === "string" && value.firstName.trim() ? value.firstName.trim() : null;
@@ -515,6 +517,83 @@ export function accessHashAsString(value: unknown): string | null {
   }
   const text = String(value);
   return /^-?\d+$/.test(text) ? text : null;
+}
+
+/**
+ * Extracts accessHash from InputPeerUser / InputPeerChannel / User / Channel shapes.
+ */
+export function extractAccessHashFromPeerCandidate(candidate: unknown): string | null {
+  if (!candidate || typeof candidate !== "object") return null;
+  const value = candidate as Record<string, unknown>;
+  const direct = accessHashAsString(value.accessHash);
+  if (direct) return direct;
+  // Some GramJS wrappers nest the peer.
+  if (value.peer && typeof value.peer === "object") {
+    return accessHashAsString((value.peer as Record<string, unknown>).accessHash);
+  }
+  return null;
+}
+
+/**
+ * Returns true when a private USER peer is missing durable InputPeer fields.
+ */
+export function isIncompletePrivatePeer(input: {
+  readonly chatType?: string | null;
+  readonly peerType?: string | null;
+  readonly accessHash?: string | null;
+  readonly telegramChatId?: string | null;
+}): boolean {
+  const peerType = normalizePeerType(input.peerType, input.chatType, input.telegramChatId ?? undefined);
+  if (peerType !== "USER") return false;
+  return !input.accessHash || !String(input.accessHash).trim();
+}
+
+/**
+ * Merges identity fields preferring non-null incoming values without clobbering
+ * an existing non-null accessHash/peerType with null.
+ */
+export function coalescePeerPersistenceFields(
+  existing: {
+    readonly accessHash?: string | null;
+    readonly peerType?: string | null;
+    readonly firstName?: string | null;
+    readonly lastName?: string | null;
+    readonly username?: string | null;
+    readonly peerPhone?: string | null;
+    readonly chatType?: string | null;
+  },
+  incoming: {
+    readonly accessHash?: string | null;
+    readonly peerType?: string | null;
+    readonly firstName?: string | null;
+    readonly lastName?: string | null;
+    readonly username?: string | null;
+    readonly phone?: string | null;
+    readonly chatType?: string | null;
+  }
+): {
+  readonly accessHash: string | null;
+  readonly peerType: string | null;
+  readonly firstName: string | null;
+  readonly lastName: string | null;
+  readonly username: string | null;
+  readonly peerPhone: string | null;
+  readonly chatType: string;
+} {
+  return {
+    accessHash: incoming.accessHash?.trim() || existing.accessHash || null,
+    peerType: incoming.peerType || existing.peerType || null,
+    firstName: incoming.firstName || existing.firstName || null,
+    lastName: incoming.lastName || existing.lastName || null,
+    username: incoming.username || existing.username || null,
+    peerPhone: incoming.phone || existing.peerPhone || null,
+    chatType:
+      incoming.chatType && incoming.chatType !== "UNKNOWN"
+        ? incoming.chatType
+        : existing.chatType && existing.chatType !== "UNKNOWN"
+          ? existing.chatType
+          : incoming.chatType || existing.chatType || "PRIVATE"
+  };
 }
 
 function cleanUsername(username: string | null | undefined): string | null {

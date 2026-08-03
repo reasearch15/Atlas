@@ -230,6 +230,7 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
             sentAt: event.lastMessageAt ?? existing?.chat.lastMessageAt ?? new Date().toISOString(),
             direction: event.lastMessageDirection ?? existing?.chat.lastMessageDirection ?? "INBOUND",
             unreadCount: open ? 0 : event.unreadCount,
+            telegramAccountId: event.telegramAccountId,
             ...(event.title !== undefined ? { title: event.title } : {}),
             ...(event.firstName !== undefined ? { firstName: event.firstName } : {}),
             ...(event.lastName !== undefined ? { lastName: event.lastName } : {}),
@@ -241,7 +242,12 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
             ...(event.identityResolved !== undefined ? { identityResolved: event.identityResolved } : {}),
             ...(event.needsCrmAttention !== undefined ? { needsCrmAttention: event.needsCrmAttention } : {}),
             ...(event.telegramChatId !== undefined ? { telegramChatId: event.telegramChatId } : {}),
-            ...(existing ? { accountLabel: existing.accountLabel } : {})
+            ...(event.crmStatus !== undefined ? { crmStatus: event.crmStatus } : {}),
+            ...(event.assignedUserId !== undefined ? { assignedUserId: event.assignedUserId } : {}),
+            ...(event.assignedUserName !== undefined ? { assignedUserName: event.assignedUserName } : {}),
+            ...(event.assignedAt !== undefined ? { assignedAt: event.assignedAt } : {}),
+            ...(event.claimedAt !== undefined ? { claimedAt: event.claimedAt } : {}),
+            ...(existing ? { accountLabel: existing.accountLabel } : { accountLabel: "Telegram" })
           });
         });
         // Chat-list metadata only — message bodies arrive via WS message events.

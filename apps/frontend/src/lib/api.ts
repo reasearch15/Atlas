@@ -376,6 +376,8 @@ export const api = {
     apiRequest<{ unreadCount: 0; chatId: string }>(`/api/telegram/chats/${chatId}/read`, { method: "POST" }),
   telegramMediaAccess: (messageId: string, variant: "media" | "thumbnail" = "media") =>
     apiRequest<{ url: string }>(`/api/telegram/messages/${messageId}/media-access?variant=${variant}`),
+  retryFailedMessage: (messageId: string) =>
+    apiRequest<TelegramMessageDto>(`/api/telegram/messages/${messageId}/retry`, { method: "POST" }),
   sendChatText: (chatId: string, text: string, idempotencyKey: string, replyToTelegramMessageId?: string) =>
     apiRequest<TelegramMessageDto>(`/api/telegram/chats/${chatId}/messages`, {
       method: "POST",

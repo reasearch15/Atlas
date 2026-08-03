@@ -29,7 +29,7 @@ Nginx: dedicated `/api/telegram/messages/` location with `proxy_buffering off` a
 
 1. **Photos / all media blank** — Signed URLs pointed at private MinIO; also migrated DB keys without objects; UI lacked UNAVAILABLE handling; WS null `mediaUrl` wiped good URLs.
 2. **Unread returns after refresh** — `clearUnread` was UI-only; no `/read` API; `INITIAL_SYNC` overwrote `unreadCount` from `dialog.unreadCount`.
-3. **Unknown User live** — `telegram.chat.updated` omitted title/name/username; identity backfill did not broadcast.
+3. **Raw numeric / Unknown User live** — `buildCrmContactDisplayTitle` fell back to naked `telegramChatId`; NewMessage entity was unused before upsert; identity backfill updated DB without WS. Fixed: `"Telegram user <peerId>"` fallback, event-entity + resolve before emit, deferred improve + backfill publish `telegram.chat.updated`.
 4. **Order wrong until refresh** — WS omitted `needsCrmAttention` / identity; merge did not upgrade titles.
 5. **Service chats** — partially fixed earlier; cleanup script + safer “Telegram” name heuristic added.
 

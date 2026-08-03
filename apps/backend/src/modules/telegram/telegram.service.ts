@@ -344,7 +344,7 @@ export class TelegramService {
         chatType: updated.chatType,
         isBot: updated.isBot,
         isPinned: updated.isPinned,
-        identityResolved: Boolean(updated.title && !/^unknown(\s|$)/i.test(updated.title)),
+        identityResolved: isUsableHumanDisplayTitle(updated.title, updated.telegramChatId),
         needsCrmAttention: updated.needsCrmAttention,
         telegramChatId: updated.telegramChatId
       })
@@ -390,6 +390,105 @@ export class TelegramService {
     this.assertWorkspaceMember(user);
     const { chat, messages } = await this.repository.listMessagesByChatId(user, chatId);
     return Promise.all(messages.map((message) => this.toMessageDto(message, chat, user)));
+  }
+
+  /**
+   * Explicitly re-queues a FAILED_* outbound message after peer identity repair.
+   * Never auto-sends FAILED_PERMANENT — requires this user action. Idempotent per message.
+   */
+  public async retryFailedOutboundMessage(user: RequestUser, messageId: string): Promise<TelegramMessageDto> {
+    this.assertWorkspaceMember(user);
+    if (!user.workspaceId) {
+      throw forbidden();
+    }
+
+    const message = await this.app.prisma.telegramMessage.findFirst({
+      where: {
+        id: messageId,
+        workspaceId: user.workspaceId,
+        direction: "OUTBOUND",
+        sendStatus: { in: ["FAILED_RETRYABLE", "FAILED_PERMANENT"] }
+      }
+    });
+    if (!message) {
+      throw telegramNotFound("Failed outbound message was not found.");
+    }
+
+    const chat = await this.app.prisma.telegramChat.findFirst({
+      where: { id: message.telegramChatDbId, workspaceId: user.workspaceId }
+    });
+    if (!chat) {
+      throw telegramNotFound();
+    }
+
+    const peerType = (chat.peerType || "").toUpperCase();
+    const isUserPeer =
+      peerType === "USER" || chat.chatType === "PRIVATE" || (!chat.telegramChatId.startsWith("-") && !peerType);
+    if (isUserPeer && !chat.accessHash) {
+      throw new AppError(
+        409,
+        "PEER_IDENTITY_INCOMPLETE",
+        "This contact is missing a Telegram access hash. Wait for a new inbound message or run identity backfill, then retry."
+      );
+    }
+
+    const command = await this.app.prisma.telegramOutboundCommand.findFirst({
+      where: {
+        workspaceId: user.workspaceId,
+        telegramMessageId: message.id,
+        status: { in: ["FAILED_RETRYABLE", "FAILED_PERMANENT"] }
+      },
+      orderBy: { createdAt: "desc" }
+    });
+    if (!command) {
+      throw telegramNotFound("Outbound command for this failed message was not found.");
+    }
+
+    // Idempotency: if another retry already re-queued this command, return current message state.
+    if (command.status === "QUEUED" || command.status === "SENDING") {
+      return this.toMessageDto(message, chat, user);
+    }
+
+    await this.app.prisma.telegramOutboundCommand.update({
+      where: { id: command.id },
+      data: {
+        status: "QUEUED",
+        lastError: null,
+        processedAt: null
+      }
+    });
+    const updatedMessage = await this.app.prisma.telegramMessage.update({
+      where: { id: message.id },
+      data: { sendStatus: "QUEUED", updatedAt: new Date() }
+    });
+
+    try {
+      const existingJob = await this.app.queues.telegramOutbound.getJob(command.id);
+      if (existingJob) {
+        await existingJob.remove().catch(() => undefined);
+      }
+      await this.app.queues.telegramOutbound.add(
+        "telegram-outbound",
+        { commandId: command.id },
+        { jobId: `${command.id}:retry:${command.attempts + 1}` }
+      );
+    } catch {
+      throw telegramWorkerUnavailable();
+    }
+
+    await this.audit.record({
+      workspaceId: user.workspaceId,
+      actorId: user.id,
+      action: "telegram.message.retry",
+      metadata: {
+        messageId: message.id,
+        commandId: command.id,
+        telegramChatId: chat.telegramChatId,
+        sessionId: user.sessionId
+      }
+    });
+
+    return this.toMessageDto(updatedMessage, chat, user);
   }
 
   /**
@@ -798,7 +897,27 @@ export class TelegramService {
     preview: string,
     sentAt: Date
   ): Promise<void> {
-    const chat = await this.app.prisma.telegramChat.findUnique({ where: { id: chatId }, select: { unreadCount: true } });
+    const chat = await this.app.prisma.telegramChat.findUnique({
+      where: { id: chatId },
+      select: {
+        unreadCount: true,
+        title: true,
+        firstName: true,
+        lastName: true,
+        username: true,
+        peerPhone: true,
+        chatType: true,
+        isBot: true,
+        isPinned: true,
+        needsCrmAttention: true,
+        telegramChatId: true,
+        crmStatus: true,
+        assignedUserId: true,
+        assignedAt: true,
+        claimedAt: true,
+        assignedUser: { select: { name: true } }
+      }
+    });
     await this.app.redis.publish(
       "atlas.workspace-events",
       JSON.stringify({
@@ -822,7 +941,27 @@ export class TelegramService {
         lastMessagePreview: preview.slice(0, 500),
         lastMessageAt: sentAt.toISOString(),
         lastMessageDirection: "OUTBOUND",
-        unreadCount: chat?.unreadCount ?? 0
+        unreadCount: chat?.unreadCount ?? 0,
+        ...(chat
+          ? {
+              title: chat.title,
+              firstName: chat.firstName,
+              lastName: chat.lastName,
+              username: chat.username,
+              phone: chat.peerPhone,
+              chatType: chat.chatType,
+              isBot: chat.isBot,
+              isPinned: chat.isPinned,
+              identityResolved: isUsableHumanDisplayTitle(chat.title, chat.telegramChatId),
+              needsCrmAttention: chat.needsCrmAttention,
+              telegramChatId: chat.telegramChatId,
+              crmStatus: chat.crmStatus,
+              assignedUserId: chat.assignedUserId,
+              assignedUserName: chat.assignedUser?.name ?? null,
+              assignedAt: chat.assignedAt?.toISOString() ?? null,
+              claimedAt: chat.claimedAt?.toISOString() ?? null
+            }
+          : {})
       })
     );
   }

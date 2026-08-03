@@ -3,6 +3,7 @@ import {
   buildCrmContactDisplayTitle,
   contactDisplayTitleQuality,
   isOfficialTelegramServicePeer,
+  isTemporaryTelegramUserTitle,
   isUsableHumanDisplayTitle,
   shouldIgnoreTelegramDialog
 } from "./telegram-crm-identity";
@@ -116,28 +117,38 @@ describe("buildCrmContactDisplayTitle", () => {
     ).toBe("+15551234567");
   });
 
-  it("falls back to Telegram id before Unknown User", () => {
+  it("falls back to Telegram user <peerId>, never a naked numeric id", () => {
     expect(
       buildCrmContactDisplayTitle({
         chatType: "PRIVATE",
         telegramChatId: "7818896100"
       })
-    ).toBe("7818896100");
+    ).toBe("Telegram user 7818896100");
   });
 
-  it("returns Unknown User only when every field is missing", () => {
+  it("never returns Unknown User when peer id is known", () => {
+    expect(
+      buildCrmContactDisplayTitle({
+        chatType: "PRIVATE",
+        telegramChatId: "8291583373"
+      })
+    ).toBe("Telegram user 8291583373");
+  });
+
+  it("returns Unknown User only when every field including peer id is missing", () => {
     expect(buildCrmContactDisplayTitle({ chatType: "PRIVATE" })).toBe("Unknown User");
   });
 });
 
 describe("entity resolution title upgrade", () => {
-  it("upgrades Unknown User after entity fields become available", () => {
+  it("upgrades temporary Telegram user title after entity fields become available", () => {
     const before = buildCrmContactDisplayTitle({
       chatType: "PRIVATE",
       telegramChatId: "555"
     });
-    expect(before).toBe("555");
+    expect(before).toBe("Telegram user 555");
     expect(contactDisplayTitleQuality("Unknown User")).toBe(0);
+    expect(contactDisplayTitleQuality(before, "555")).toBe(1);
 
     const after = buildCrmContactDisplayTitle({
       chatType: "PRIVATE",
@@ -146,8 +157,9 @@ describe("entity resolution title upgrade", () => {
       telegramChatId: "555"
     });
     expect(after).toBe("Joemas020 Joemas060");
-    expect(contactDisplayTitleQuality(after)).toBeGreaterThan(contactDisplayTitleQuality("Unknown User"));
+    expect(contactDisplayTitleQuality(after)).toBeGreaterThan(contactDisplayTitleQuality(before, "555"));
     expect(isUsableHumanDisplayTitle(after, "555")).toBe(true);
+    expect(isUsableHumanDisplayTitle(before, "555")).toBe(false);
     expect(isUsableHumanDisplayTitle("Unknown User", "555")).toBe(false);
   });
 });

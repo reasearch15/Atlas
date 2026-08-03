@@ -496,6 +496,11 @@ export interface TelegramChatUpdatedEvent {
   readonly identityResolved?: boolean;
   readonly needsCrmAttention?: boolean;
   readonly telegramChatId?: string;
+  readonly crmStatus?: "NEW" | "OPEN" | "WAITING" | "RESOLVED" | "CLOSED";
+  readonly assignedUserId?: string | null;
+  readonly assignedUserName?: string | null;
+  readonly assignedAt?: string | null;
+  readonly claimedAt?: string | null;
 }
 
 export interface CrmConversationUpdatedEvent {

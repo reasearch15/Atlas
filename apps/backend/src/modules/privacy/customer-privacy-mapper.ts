@@ -9,6 +9,7 @@ import type {
 import {
   CUSTOMER_PRIVACY_NOTICE,
   customerPrivacyCapabilities,
+  formatTelegramUserFallbackTitle,
   looksLikeExternalIdentifier,
   neutralContactKindLabel,
   neutralCustomerTypeLabel,
@@ -40,6 +41,7 @@ export function composePrivacySafeTitle(input: {
     if (!trimmed) return null;
     if (trimmed === input.telegramChatId) return null;
     if (/^-?\d{5,}$/.test(trimmed)) return null;
+    if (/^telegram\s+user\s+-?\d+$/i.test(trimmed)) return null;
     if (/^unknown(\s|$)/i.test(trimmed)) return null;
     if (!input.caps.canViewCustomerPhone && looksLikeExternalIdentifier(trimmed)) return null;
     return trimmed;
@@ -52,7 +54,7 @@ export function composePrivacySafeTitle(input: {
     return input.chatType === "CHANNEL" ? "Unknown Channel" : "Unknown Group";
   }
 
-  // Private priority: first+last → first → last → username → phone → Telegram ID → Unknown
+  // Private priority: first+last → first → last → username → phone → Telegram user <id> → Unknown
   if (input.firstName && input.lastName) return `${input.firstName} ${input.lastName}`.trim();
   if (input.firstName) return input.firstName;
   if (input.lastName) return input.lastName;
@@ -60,7 +62,9 @@ export function composePrivacySafeTitle(input: {
   if (title) return title;
   if (input.caps.canViewTelegramUsername && input.username) return input.username;
   if (input.caps.canViewCustomerPhone && input.phone?.trim()) return input.phone.trim();
-  if (input.caps.canViewExternalContactIds && input.telegramChatId?.trim()) return input.telegramChatId.trim();
+  if (input.caps.canViewExternalContactIds && input.telegramChatId?.trim()) {
+    return formatTelegramUserFallbackTitle(input.telegramChatId);
+  }
   if (input.isBot) return "Unknown Bot";
   return "Unknown User";
 }
@@ -256,6 +260,28 @@ export function applyRealtimeEventPrivacy(
     return {
       ...event,
       message: applyMessagePrivacy(event.message, role)
+    };
+  }
+  if (event.type === "telegram.chat.updated") {
+    const caps = customerPrivacyCapabilities(role);
+    if (canViewAnyDirectContact(caps)) return event;
+    const { username: _u, phone: _p, telegramChatId: peerId, ...rest } = event;
+    return {
+      ...rest,
+      username: null,
+      phone: null,
+      ...(caps.canViewExternalContactIds && peerId ? { telegramChatId: peerId } : {}),
+      title: composePrivacySafeTitle({
+        title: event.title ?? "Unknown User",
+        username: event.username ?? null,
+        phone: event.phone ?? null,
+        telegramChatId: event.telegramChatId ?? "",
+        firstName: event.firstName ?? null,
+        lastName: event.lastName ?? null,
+        chatType: event.chatType ?? "PRIVATE",
+        isBot: event.isBot ?? false,
+        caps
+      })
     };
   }
   // Internal team messages contain operator names only — no customer identifiers.

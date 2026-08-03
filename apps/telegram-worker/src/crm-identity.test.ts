@@ -76,9 +76,9 @@ describe("CRM contact display titles (worker)", () => {
 });
 
 describe("identity fill after delayed entity resolution", () => {
-  it("updates an Unknown User conversation when the entity arrives later", () => {
+  it("updates a temporary Telegram user title when the entity arrives later", () => {
     const existing = {
-      title: "Unknown User",
+      title: "Telegram user 555001",
       telegramChatId: "555001",
       username: null as string | null,
       firstName: null as string | null,
@@ -111,5 +111,14 @@ describe("identity fill after delayed entity resolution", () => {
     expect(data.lastName).toBe("Joemas060");
     expect(data.username).toBe("joemas");
     expect(identityUpdateImproves(existing, data)).toBe("updated");
+  });
+
+  it("never persists a naked numeric title as create fallback", () => {
+    expect(
+      buildCrmContactDisplayTitle({
+        chatType: "PRIVATE",
+        telegramChatId: "8291583373"
+      })
+    ).toBe("Telegram user 8291583373");
   });
 });

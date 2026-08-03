@@ -196,7 +196,18 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
   }
 
   async function handleRetry(message: TelegramMessageDto): Promise<void> {
-    await handleSend(message.text);
+    if (message.sendStatus !== "FAILED_RETRYABLE" && message.sendStatus !== "FAILED_PERMANENT") {
+      return;
+    }
+    try {
+      const retried = await api.retryFailedMessage(message.id);
+      setMessages((current) => mergeAndDeduplicate(current, retried));
+      toast.message("Retry queued");
+    } catch (retryError) {
+      const text = retryError instanceof Error ? retryError.message : "Retry failed.";
+      toast.error(text);
+      setError(text);
+    }
   }
 
   function copyMessage(message: TelegramMessageDto): void {

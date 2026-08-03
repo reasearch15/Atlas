@@ -160,6 +160,37 @@ describe("Staff DTO privacy", () => {
     expect(findForbiddenCustomerIdentifierKeys(staffEvent)).toEqual([]);
   });
 
+  it("Staff chat.updated events redact username/phone and never expose naked peer ids", () => {
+    const event: TelegramWorkspaceRealtimeEvent = {
+      type: "telegram.chat.updated",
+      eventId: "evt-2",
+      workspaceId: "ws-1",
+      telegramAccountId: "acc-1",
+      chatId: "chat-db-1",
+      lastMessagePreview: "hi",
+      lastMessageAt: new Date().toISOString(),
+      lastMessageDirection: "INBOUND",
+      unreadCount: 1,
+      title: "Ada Lovelace",
+      firstName: "Ada",
+      lastName: "Lovelace",
+      username: "ada_lovelace",
+      phone: "+15551234567",
+      telegramChatId: "8291583373",
+      chatType: "PRIVATE",
+      isBot: false
+    };
+    const staffEvent = applyRealtimeEventPrivacy(event, "STAFF");
+    expect(staffEvent.type).toBe("telegram.chat.updated");
+    if (staffEvent.type !== "telegram.chat.updated") return;
+    expect(staffEvent.username).toBeNull();
+    expect(staffEvent.phone).toBeNull();
+    expect(staffEvent.telegramChatId).toBeUndefined();
+    expect(staffEvent.title).toBe("Ada Lovelace");
+    expect(JSON.stringify(staffEvent)).not.toContain("8291583373");
+    expect(JSON.stringify(staffEvent)).not.toContain("ada_lovelace");
+  });
+
   it("Staff export schema contains no contact identifier columns", () => {
     expect(staffExportContainsDirectContactColumns("STAFF")).toBe(false);
     const exported = buildCustomerExportRows({ role: "STAFF" }, [

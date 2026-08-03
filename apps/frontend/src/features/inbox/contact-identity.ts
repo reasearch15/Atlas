@@ -54,7 +54,7 @@ export function resolveContactIdentity(input: ContactIdentityInput): ContactIden
     title ||
     (username ? username.replace(/^@/, "") : null) ||
     phone ||
-    telegramChatId ||
+    (telegramChatId ? `Telegram user ${telegramChatId}` : null) ||
     unknownForKind(kind);
 
   const isUnknown = /^unknown(\s|$)/i.test(displayName);
@@ -131,6 +131,7 @@ function usableName(value: string | null | undefined, telegramChatId: string | n
   if (!text) return null;
   if (telegramChatId && text === telegramChatId) return null;
   if (/^-?\d{5,}$/.test(text)) return null;
+  if (/^telegram\s+user\s+-?\d+$/i.test(text)) return null;
   if (/^unknown(\s|$)/i.test(text)) return null;
   return text;
 }

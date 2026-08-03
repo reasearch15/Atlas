@@ -117,6 +117,11 @@ export async function telegramRoutes(app: FastifyInstance): Promise<void> {
     return mediaProxy.mintMediaAccessUrl(request.user!, params.messageId, query.variant);
   });
 
+  app.post("/messages/:messageId/retry", { preHandler: [telegramSendGuard(app)] }, async (request) => {
+    const params = telegramMessageIdParamsSchema.parse(request.params);
+    return service.retryFailedOutboundMessage(request.user!, params.messageId);
+  });
+
   app.post("/chats/:chatId/read", { preHandler: [telegramReadGuard(app)] }, async (request) => {
     const params = telegramChatIdParamsSchema.parse(request.params);
     return service.markChatRead(request.user!, params.chatId);

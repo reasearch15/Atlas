@@ -4,6 +4,7 @@ import type {
   TelegramMessageDto,
   TelegramMessageUpdatedEvent
 } from "@atlas/shared";
+import { isUsableHumanDisplayTitle } from "@atlas/shared";
 
 /**
  * Builds a workspace-scoped realtime event for a persisted message.
@@ -53,6 +54,11 @@ export type ChatUpdatedEventInput = {
   readonly identityResolved?: boolean;
   readonly needsCrmAttention?: boolean;
   readonly telegramChatId?: string;
+  readonly crmStatus?: "NEW" | "OPEN" | "WAITING" | "RESOLVED" | "CLOSED";
+  readonly assignedUserId?: string | null;
+  readonly assignedUserName?: string | null;
+  readonly assignedAt?: string | null;
+  readonly claimedAt?: string | null;
 };
 
 /**
@@ -79,7 +85,12 @@ export function chatUpdatedEvent(workspaceId: string, input: ChatUpdatedEventInp
     ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
     ...(input.identityResolved !== undefined ? { identityResolved: input.identityResolved } : {}),
     ...(input.needsCrmAttention !== undefined ? { needsCrmAttention: input.needsCrmAttention } : {}),
-    ...(input.telegramChatId !== undefined ? { telegramChatId: input.telegramChatId } : {})
+    ...(input.telegramChatId !== undefined ? { telegramChatId: input.telegramChatId } : {}),
+    ...(input.crmStatus !== undefined ? { crmStatus: input.crmStatus } : {}),
+    ...(input.assignedUserId !== undefined ? { assignedUserId: input.assignedUserId } : {}),
+    ...(input.assignedUserName !== undefined ? { assignedUserName: input.assignedUserName } : {}),
+    ...(input.assignedAt !== undefined ? { assignedAt: input.assignedAt } : {}),
+    ...(input.claimedAt !== undefined ? { claimedAt: input.claimedAt } : {})
   };
 }
 
@@ -103,8 +114,21 @@ export function chatUpdatedFieldsFromRow(chat: {
   readonly lastMessagePreview: string | null;
   readonly lastMessageAt: Date | null;
   readonly lastMessageDirection?: "INBOUND" | "OUTBOUND" | null;
+  readonly crmStatus?: "NEW" | "OPEN" | "WAITING" | "RESOLVED" | "CLOSED" | string;
+  readonly assignedUserId?: string | null;
+  readonly assignedUserName?: string | null;
+  readonly assignedAt?: Date | string | null;
+  readonly claimedAt?: Date | string | null;
 }): ChatUpdatedEventInput {
-  const identityResolved = Boolean(chat.title && !/^unknown(\s|$)/i.test(chat.title.trim()));
+  const identityResolved = isUsableHumanDisplayTitle(chat.title, chat.telegramChatId);
+  const crmStatus =
+    chat.crmStatus === "NEW" ||
+    chat.crmStatus === "OPEN" ||
+    chat.crmStatus === "WAITING" ||
+    chat.crmStatus === "RESOLVED" ||
+    chat.crmStatus === "CLOSED"
+      ? chat.crmStatus
+      : undefined;
   return {
     telegramAccountId: chat.telegramAccountId,
     chatId: chat.id,
@@ -122,6 +146,20 @@ export function chatUpdatedFieldsFromRow(chat: {
     isPinned: chat.isPinned,
     identityResolved,
     needsCrmAttention: chat.needsCrmAttention,
-    telegramChatId: chat.telegramChatId
+    telegramChatId: chat.telegramChatId,
+    ...(crmStatus ? { crmStatus } : {}),
+    ...(chat.assignedUserId !== undefined ? { assignedUserId: chat.assignedUserId } : {}),
+    ...(chat.assignedUserName !== undefined ? { assignedUserName: chat.assignedUserName } : {}),
+    ...(chat.assignedAt !== undefined
+      ? {
+          assignedAt:
+            chat.assignedAt instanceof Date ? chat.assignedAt.toISOString() : chat.assignedAt
+        }
+      : {}),
+    ...(chat.claimedAt !== undefined
+      ? {
+          claimedAt: chat.claimedAt instanceof Date ? chat.claimedAt.toISOString() : chat.claimedAt
+        }
+      : {})
   };
 }

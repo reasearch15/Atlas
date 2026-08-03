@@ -66,6 +66,56 @@ describe("inbox realtime merge", () => {
     expect(next[0]?.displayTitle).not.toMatch(/^unknown/i);
   });
 
+  it("upgrades temporary Telegram user title on the same row without duplicates", () => {
+    const rows = [
+      toInboxConversation(
+        chat({
+          id: "c2",
+          title: "Telegram user 8291583373",
+          telegramChatId: "8291583373",
+          identityResolved: false,
+          unreadCount: 2,
+          lastMessagePreview: "first"
+        }),
+        "acc"
+      )
+    ];
+    const next = applyChatActivity(rows, {
+      chatId: "c2",
+      previewText: "first",
+      sentAt: "2026-01-03T00:00:00.000Z",
+      direction: "INBOUND",
+      title: "John Smith",
+      firstName: "John",
+      lastName: "Smith",
+      identityResolved: true,
+      unreadCount: 2
+    });
+    expect(next).toHaveLength(1);
+    expect(next[0]?.chat.title).toBe("John Smith");
+    expect(next[0]?.chat.unreadCount).toBe(2);
+    expect(next[0]?.chat.lastMessagePreview).toBe("first");
+    expect(next[0]?.displayTitle).toBe("John Smith");
+  });
+
+  it("inserts a new conversation from chat.updated without naked numeric title", () => {
+    const next = applyChatActivity([], {
+      chatId: "new-1",
+      telegramAccountId: "acc",
+      telegramChatId: "8291583373",
+      previewText: "hello",
+      sentAt: "2026-01-03T00:00:00.000Z",
+      direction: "INBOUND",
+      title: "Telegram user 8291583373",
+      unreadCount: 1,
+      bumpUnread: false
+    });
+    expect(next).toHaveLength(1);
+    expect(next[0]?.chat.title).toBe("Telegram user 8291583373");
+    expect(next[0]?.displayTitle).not.toBe("8291583373");
+    expect(next[0]?.displayTitle).toMatch(/Telegram user/i);
+  });
+
   it("preserves mediaUrl when a status update arrives without urls", () => {
     const proxyUrl = "/api/telegram/messages/m1/media";
     const base: TelegramMessageDto = {

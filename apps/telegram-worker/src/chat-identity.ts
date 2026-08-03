@@ -76,6 +76,7 @@ export function buildIdentityFillUpdate(
   if (identity.accessHash) {
     data.accessHash = identity.accessHash;
   }
+  // Never clear peerType with null; only set when provided.
   if (identity.peerType) {
     data.peerType = identity.peerType;
   }

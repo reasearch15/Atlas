@@ -12,6 +12,7 @@ import { normalizeGramJsMedia } from "./media-normalize";
 import { resolveGramJsUploadFileName } from "./outgoing-media";
 import {
   extractPeerFields,
+  extractAccessHashFromPeerCandidate,
   accessHashAsString,
   normalizePeerType,
   resolveInputPeer,
@@ -530,19 +531,215 @@ export class TelegramClientAdapter {
 
   /**
    * Registers a handler for incoming text and media messages.
+   * Resolves chat + InputPeer from the live GramJS event before invoking the handler
+   * so access_hash / peer_type can be persisted on first inbound.
    */
-  public listenForTextMessages(runtime: TelegramRuntime, handler: (message: NormalizedTextMessage) => Promise<void>): void {
+  public listenForTextMessages(
+    runtime: TelegramRuntime,
+    handler: (
+      message: NormalizedTextMessage,
+      liveIdentity: NormalizedDialog | null,
+      liveMeta: { readonly hadLiveEntity: boolean; readonly hadInputPeerHash: boolean }
+    ) => Promise<void>
+  ): void {
     runtime.client.addEventHandler((event: unknown) => {
-      const value = event as { message?: unknown; chatId?: unknown; chat?: unknown };
-      if (!value.message) {
-        return;
-      }
-      const chatEntity = (value.chat ?? null) as Record<string, unknown> | null;
-      const chatType = chatEntity ? this.chatType(chatEntity) : "UNKNOWN";
-      const rawChatId = String(value.chatId ?? (value.message as Record<string, unknown>).chatId ?? chatEntity?.id ?? "");
-      const chatId = normalizeMarkedTelegramChatId(rawChatId, chatType);
-      void handler(this.normalizeMessage(chatId, value.message));
+      void (async () => {
+        const value = event as {
+          message?: unknown;
+          chatId?: unknown;
+          chat?: unknown;
+          getChat?: () => Promise<unknown>;
+          getInputChat?: () => Promise<unknown>;
+        };
+        if (!value.message) {
+          return;
+        }
+        try {
+          const resolved = await this.resolveIdentityFromLiveEvent(runtime, value);
+          const chatType = resolved.identity?.chatType ?? (value.chat ? this.chatType(value.chat as Record<string, unknown>) : "UNKNOWN");
+          const rawChatId = String(
+            value.chatId ?? (value.message as Record<string, unknown>).chatId ?? (value.chat as Record<string, unknown> | undefined)?.id ?? ""
+          );
+          const chatId = resolved.identity?.telegramChatId || normalizeMarkedTelegramChatId(rawChatId, chatType);
+          await handler(this.normalizeMessage(chatId, value.message), resolved.identity, {
+            hadLiveEntity: resolved.hadLiveEntity,
+            hadInputPeerHash: resolved.hadInputPeerHash
+          });
+        } catch (error) {
+          const safe = sanitizeTelegramError(error, false);
+          console.error(
+            JSON.stringify({
+              event: "telegram_live.inbound_handler_failed",
+              code: safe.code ?? safe.name,
+              message: safe.message
+            })
+          );
+        }
+      })();
     }, new runtime.NewMessage({}));
+  }
+
+  /**
+   * Builds durable peer identity from a live NewMessage event.
+   * Prefers getInputChat (accessHash) + getChat / sender entity (names).
+   */
+  public async resolveIdentityFromLiveEvent(
+    runtime: TelegramRuntime,
+    event: {
+      readonly chat?: unknown;
+      readonly message?: unknown;
+      readonly getChat?: () => Promise<unknown>;
+      readonly getInputChat?: () => Promise<unknown>;
+    }
+  ): Promise<{
+    readonly identity: NormalizedDialog | null;
+    readonly hadLiveEntity: boolean;
+    readonly hadInputPeerHash: boolean;
+  }> {
+    let chatEntity: Record<string, unknown> | null =
+      event.chat && typeof event.chat === "object" ? (event.chat as Record<string, unknown>) : null;
+    let inputPeer: unknown = null;
+    let inputPeerHash: string | null = null;
+
+    try {
+      if (typeof event.getInputChat === "function") {
+        inputPeer = await event.getInputChat();
+        inputPeerHash = extractAccessHashFromPeerCandidate(inputPeer);
+      }
+    } catch {
+      inputPeer = null;
+    }
+
+    try {
+      if (typeof event.getChat === "function") {
+        const loaded = await event.getChat();
+        if (loaded && typeof loaded === "object") {
+          chatEntity = loaded as Record<string, unknown>;
+        }
+      }
+    } catch {
+      // keep event.chat
+    }
+
+    // Private messages: sender entity often carries first/last/username + accessHash.
+    const message = event.message as
+      | {
+          getSender?: () => Promise<unknown>;
+          getInputSender?: () => Promise<unknown>;
+        }
+      | undefined;
+    try {
+      if ((!chatEntity || !extractAccessHashFromPeerCandidate(chatEntity)) && typeof message?.getSender === "function") {
+        const sender = await message.getSender();
+        if (sender && typeof sender === "object") {
+          chatEntity = sender as Record<string, unknown>;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (!inputPeerHash && typeof message?.getInputSender === "function") {
+        const inputSender = await message.getInputSender();
+        const hash = extractAccessHashFromPeerCandidate(inputSender);
+        if (hash) {
+          inputPeer = inputSender;
+          inputPeerHash = hash;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    const hadLiveEntity = Boolean(chatEntity && Object.keys(chatEntity).length > 0);
+    const hadInputPeerHash = Boolean(inputPeerHash);
+
+    if (!hadLiveEntity && !hadInputPeerHash) {
+      return { identity: null, hadLiveEntity: false, hadInputPeerHash: false };
+    }
+
+    const rawId = String(
+      chatEntity?.id ??
+        (inputPeer && typeof inputPeer === "object"
+          ? (inputPeer as Record<string, unknown>).userId ??
+            (inputPeer as Record<string, unknown>).channelId ??
+            (inputPeer as Record<string, unknown>).chatId
+          : "") ??
+        ""
+    );
+    const peerTypeHint =
+      normalizePeerType(
+        chatEntity ? extractPeerFields(chatEntity, rawId || "0").peerType : null,
+        chatEntity ? this.chatType(chatEntity) : null,
+        rawId || undefined
+      ) ?? "USER";
+    const chatType =
+      peerTypeHint === "CHANNEL"
+        ? chatEntity && (chatEntity as { megagroup?: unknown }).megagroup
+          ? "SUPERGROUP"
+          : "CHANNEL"
+        : peerTypeHint === "CHAT"
+          ? "GROUP"
+          : "PRIVATE";
+    const telegramChatId = normalizeMarkedTelegramChatId(rawId || "0", chatType);
+
+    let identity = chatEntity
+      ? this.identityFromChatEntity(telegramChatId, chatEntity)
+      : this.identityFromChatEntity(telegramChatId, {
+          className: peerTypeHint === "CHANNEL" ? "Channel" : peerTypeHint === "CHAT" ? "Chat" : "User",
+          id: telegramChatId
+        });
+
+    if (inputPeerHash && !identity.accessHash) {
+      identity = {
+        ...identity,
+        accessHash: inputPeerHash,
+        peerType: identity.peerType ?? peerTypeHint
+      };
+    } else if (inputPeerHash && identity.accessHash !== inputPeerHash) {
+      // Prefer InputPeer hash from getInputChat — it is what Telegram accepts for sends.
+      identity = { ...identity, accessHash: inputPeerHash };
+    }
+
+    if (!identity.peerType) {
+      identity = { ...identity, peerType: peerTypeHint };
+    }
+
+    // When we have InputPeer hash but thin entity, still try session entity cache for names.
+    if (inputPeerHash && !identity.firstName && !identity.lastName && !identity.username) {
+      try {
+        const resolved = await this.resolvePeer(runtime, {
+          telegramChatId: identity.telegramChatId,
+          chatType: identity.chatType,
+          accessHash: inputPeerHash,
+          peerType: identity.peerType ?? peerTypeHint,
+          username: identity.username,
+          phone: identity.phone,
+          firstName: identity.firstName,
+          lastName: identity.lastName
+        });
+        identity = this.normalizeDialog({
+          entity: resolved.entity,
+          id: resolved.telegramChatId,
+          unreadCount: 0,
+          pinned: false
+        });
+        if (!identity.accessHash) {
+          identity = { ...identity, accessHash: inputPeerHash };
+        }
+      } catch {
+        // Keep live identity with hash — enough for durable InputPeer reconstruction.
+      }
+    }
+
+    return { identity, hadLiveEntity, hadInputPeerHash };
+  }
+
+  /**
+   * Builds a NormalizedDialog from a GramJS chat/user/channel entity already present on the update.
+   */
+  public identityFromChatEntity(telegramChatId: string, entity: Record<string, unknown>): NormalizedDialog {
+    return this.normalizeDialog({ entity, id: telegramChatId, unreadCount: 0, pinned: false });
   }
 
   private normalizeDialog(dialog: unknown): NormalizedDialog {
