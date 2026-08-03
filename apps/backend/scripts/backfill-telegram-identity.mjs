@@ -45,6 +45,8 @@ async function main() {
       lastName: true,
       peerPhone: true,
       isBot: true,
+      accessHash: true,
+      peerType: true,
       crmContactId: true,
       rawMetadataJson: true
     },
@@ -57,6 +59,11 @@ async function main() {
   let upgradedFromFields = 0;
   let skippedService = 0;
   let skippedGroup = 0;
+  let incompleteAccessHash = 0;
+  let incompletePeerType = 0;
+
+  let incompleteAccessHash = 0;
+  let incompletePeerType = 0;
 
   for (const chat of chats) {
     scanned += 1;
@@ -79,6 +86,12 @@ async function main() {
       skippedService += 1;
       continue;
     }
+
+    const isPrivate =
+      String(chat.chatType ?? "").toUpperCase() === "PRIVATE" ||
+      !String(chat.telegramChatId).startsWith("-");
+    if (isPrivate && !chat.accessHash) incompleteAccessHash += 1;
+    if (isPrivate && !chat.peerType) incompletePeerType += 1;
 
     if (!isCandidateTitle(chat.title, chat.telegramChatId)) {
       continue;
@@ -158,11 +171,13 @@ async function main() {
         candidates,
         upgradedFromFields,
         normalizedFallback,
+        incompletePrivateMissingAccessHash: incompleteAccessHash,
+        incompletePrivateMissingPeerType: incompletePeerType,
         skippedService,
         skippedGroupHint: skippedGroup,
         hint: apply
-          ? "Applied DB title normalization. Trigger chat-metadata-backfill / INITIAL_SYNC for live Telegram entity resolve."
-          : "Dry-run only. Set CONFIRM_APPLY=YES to write. Entity resolve still requires worker backfill."
+          ? "Applied DB title normalization. Trigger chat-metadata-backfill / INITIAL_SYNC for live Telegram entity resolve. Access hashes only resolve from live inbound or worker entity backfill."
+          : "Dry-run only. Set CONFIRM_APPLY=YES to write titles. Entity/access_hash resolve still requires worker live inbound or metadata backfill."
       },
       null,
       2

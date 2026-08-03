@@ -14,9 +14,12 @@ import {
   classifyMessageOrigin,
   contentTypeToMediaType,
   formatTelegramMediaPreview,
+  isRemoteTelegramMessageId,
   isUsableHumanDisplayTitle,
+  resolveMarkReadMaxTelegramMessageId,
   shouldIgnoreTelegramDialog,
-  type TelegramContentType
+  type TelegramContentType,
+  type TelegramDeleteMessageInput
 } from "@atlas/shared";
 import { decryptSecret, encryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
 import {
@@ -39,7 +42,7 @@ import {
   applyChatPrivacy,
   applyMessagePrivacy
 } from "../privacy/customer-privacy-mapper";
-import type { Role, TelegramAccountPermanentDeleteResponse, TelegramDeleteMessageInput } from "@atlas/shared";
+import type { Role, TelegramAccountPermanentDeleteResponse } from "@atlas/shared";
 import { TelegramAccountPermanentDeleteService } from "./telegram-account-permanent-delete.service";
 import { signMediaAccessTicket, withMediaAccessTicket } from "./media-access-ticket";
 import {
@@ -294,6 +297,7 @@ export class TelegramService {
 
   /**
    * Persists conversation read state and enqueues Telegram readHistory acknowledgement.
+   * Never uses pending:/upload: Atlas placeholders as the Telegram max read id.
    */
   public async markChatRead(user: RequestUser, chatId: string): Promise<{ readonly unreadCount: 0; readonly chatId: string }> {
     this.assertWorkspaceMember(user);
@@ -305,7 +309,22 @@ export class TelegramService {
     }
 
     const previousUnread = chat.unreadCount;
-    const maxId = chat.lastMessageId;
+    const recent = await this.app.prisma.telegramMessage.findMany({
+      where: { telegramChatDbId: chat.id, deletedAt: null },
+      orderBy: { telegramCreatedAt: "desc" },
+      take: 100,
+      select: {
+        telegramMessageId: true,
+        direction: true,
+        sendStatus: true,
+        deletedAt: true
+      }
+    });
+    const maxId =
+      resolveMarkReadMaxTelegramMessageId(recent) ??
+      (isRemoteTelegramMessageId(chat.lastMessageId) ? chat.lastMessageId : null) ??
+      (isRemoteTelegramMessageId(chat.lastReadTelegramMessageId) ? chat.lastReadTelegramMessageId : null);
+
     const updated = await this.app.prisma.telegramChat.update({
       where: { id: chat.id },
       data: {
@@ -327,9 +346,10 @@ export class TelegramService {
         peerId: chat.telegramChatId,
         previousUnreadCount: previousUnread,
         newUnreadCount: 0,
-        readMaxMessageId: maxId
+        readMaxMessageId: maxId,
+        skippedTelegramRead: !maxId
       },
-      "chat marked read"
+      maxId ? "chat marked read" : "chat marked read locally; no remote Telegram id for ReadHistory"
     );
 
     await this.app.redis.publish(
@@ -359,21 +379,64 @@ export class TelegramService {
     );
 
     if (maxId) {
-      try {
-        await this.enqueue(
-          chat.workspaceId,
-          chat.telegramAccountId,
-          user,
-          "MARK_CHAT_READ",
-          { chatDbId: chat.id, maxTelegramMessageId: maxId },
-          `mark-read:${chat.id}:${maxId}`
-        );
-      } catch (error) {
-        this.app.log.warn({ err: error, chatId: chat.id }, "mark-read enqueue skipped");
-      }
+      await this.enqueueMarkChatReadIdempotent(chat.workspaceId, chat.telegramAccountId, user, chat.id, maxId);
     }
 
     return { unreadCount: 0, chatId: chat.id };
+  }
+
+  /**
+   * Idempotent MARK_CHAT_READ enqueue — repeated same chat+maxId reuses the command and never raises P2002 noise.
+   */
+  private async enqueueMarkChatReadIdempotent(
+    workspaceId: string,
+    accountId: string,
+    user: RequestUser,
+    chatDbId: string,
+    maxTelegramMessageId: string
+  ): Promise<void> {
+    const idempotencyKey = `mark-read:${chatDbId}:${maxTelegramMessageId}`.slice(0, 160);
+    try {
+      const existing = await this.app.prisma.telegramOutboundCommand.findUnique({
+        where: { idempotencyKey }
+      });
+      if (existing) {
+        if (existing.status === "QUEUED" || existing.status === "SENDING" || existing.status === "SENT") {
+          return;
+        }
+        await this.app.prisma.telegramOutboundCommand.update({
+          where: { id: existing.id },
+          data: { status: "QUEUED", lastError: null, processedAt: null }
+        });
+        await this.app.queues.telegramOutbound.add(
+          "telegram-outbound",
+          { commandId: existing.id },
+          { jobId: `${existing.id}:mark-read:${existing.attempts + 1}` }
+        );
+        return;
+      }
+
+      const command = await this.app.prisma.telegramOutboundCommand.create({
+        data: {
+          workspaceId,
+          telegramAccountId: accountId,
+          telegramChatDbId: chatDbId,
+          requestedByUserId: user.id,
+          requestedBySessionId: user.sessionId,
+          operation: "MARK_CHAT_READ",
+          payloadJson: { chatDbId, maxTelegramMessageId } as unknown as Prisma.InputJsonObject,
+          idempotencyKey
+        }
+      });
+      await this.app.queues.telegramOutbound.add("telegram-outbound", { commandId: command.id }, { jobId: command.id });
+    } catch (error) {
+      // Unique race: another request created the same idempotency key — treat as success.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        this.app.log.info({ chatDbId, maxTelegramMessageId }, "mark-read enqueue idempotent race");
+        return;
+      }
+      this.app.log.warn({ err: error, chatId: chatDbId }, "mark-read enqueue skipped");
+    }
   }
 
   /**

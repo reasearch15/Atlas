@@ -1,20 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
 import type Redis from "ioredis";
-import type { TelegramMessageDto } from "@atlas/shared";
+import { isRemoteTelegramMessageId, type TelegramMessageDto } from "@atlas/shared";
 import { messageUpdatedEvent } from "./update-normalizer";
 import { toTelegramMessageDto } from "./message-dto";
 
 const DELIVERY_CONFIRM_TIMEOUT_MS = 12_000;
 
-/**
- * Returns whether a Telegram message id is a real remote id (not a pending placeholder).
- */
-export function isRemoteTelegramMessageId(telegramMessageId: string | null | undefined): boolean {
-  if (!telegramMessageId) return false;
-  const value = telegramMessageId.trim();
-  if (!value || value.startsWith("pending:") || value.startsWith("upload:")) return false;
-  return /^-?\d+$/.test(value);
-}
+export { isRemoteTelegramMessageId };
 
 /**
  * After Telegram returns a final Message/Update with a remote id, advance SENT → DELIVERED.

@@ -2,7 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { Queue, Worker } from "bullmq";
 import Redis from "ioredis";
-import { classifyTelegramFailure, formatTelegramUserFallbackTitle, resolveSyncedUnreadCount, sanitizeTelegramError, shouldIgnoreTelegramDialog, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
+import { classifyTelegramFailure, formatTelegramUserFallbackTitle, isRemoteTelegramMessageId, resolveSyncedUnreadCount, sanitizeTelegramError, shouldIgnoreTelegramDialog, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
 import { decryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
 import type { WorkerEnv } from "./env";
 import { TelegramClientAdapter, type NormalizedTextMessage, type TelegramApiCredentials, isUsableDisplayTitle, TelegramAuthNetworkTimeoutError, SafeTelegramDeleteError } from "./telegram-client";
@@ -23,7 +23,7 @@ import { runMediaBackfill } from "./media-pipeline";
 import { toTelegramMessageDto } from "./message-dto";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { mediaPersistFields } from "./media-persist";
-import { confirmOutboundDelivery, isRemoteTelegramMessageId, publishMessageUpdated } from "./delivery-status";
+import { confirmOutboundDelivery, publishMessageUpdated } from "./delivery-status";
 import { resolveOutgoingMediaSendMode } from "./outgoing-media";
 import {
   TelegramPeerUnresolvedError,
@@ -722,6 +722,26 @@ async function processMarkChatReadJob(
   }
 
   try {
+    if (!isRemoteTelegramMessageId(payload.maxTelegramMessageId)) {
+      logPlain({
+        event: "telegram_chat.mark_read_skipped",
+        conversationId: chat.id,
+        telegramAccountId: command.telegramAccountId,
+        peerId: chat.telegramChatId,
+        reason: "invalid_or_pending_max_telegram_message_id",
+        previousUnreadCount: previousUnread
+      });
+      await prisma.telegramChat.update({
+        where: { id: chat.id },
+        data: { unreadCount: 0, lastReadAt: new Date() }
+      });
+      await prisma.telegramOutboundCommand.update({
+        where: { id: command.id },
+        data: { status: "SENT", processedAt: new Date(), lastError: null }
+      });
+      return commandResult(command.telegramAccountId, "CONNECTED");
+    }
+
     const ack = await adapter.markChatHistoryRead(
       runtime,
       {
