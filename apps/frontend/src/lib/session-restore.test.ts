@@ -189,5 +189,59 @@ describe("restoreTenantSession", () => {
     expect(restored?.role).toBe("STAFF");
     expect(resolveTenantLanding(restored!)).toBe("/staff/inbox");
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toEqual(expect.stringContaining("/api/staff-auth/refresh"));
+    expect(vi.mocked(fetch).mock.calls).toHaveLength(1);
+  });
+
+  it("does not clear an authenticated Staff session when Coadmin refresh returns 401", async () => {
+    const user = {
+      id: "33333333-3333-4333-8333-333333333333",
+      email: "north.staff",
+      name: "North Staff",
+      role: "STAFF" as const,
+      workspaceId: "22222222-2222-4222-8222-222222222222"
+    };
+    authState = { accessToken: "staff-access", user };
+    const { markRoleAuthenticated } = await import("./auth-bootstrap");
+    markRoleAuthenticated("STAFF");
+
+    vi.mocked(fetch).mockResolvedValue({ ok: false, status: 401, json: async () => ({}) } as Response);
+
+    const { restoreTenantSession, attemptRefresh } = await import("./session-restore");
+    expect(await attemptRefresh("/api/coadmin-auth/refresh")).toBeNull();
+    const restored = await restoreTenantSession({ expectedRole: "STAFF" });
+
+    expect(restored).toEqual(user);
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(authState.accessToken).toBe("staff-access");
+  });
+
+  it("dedupes concurrent refresh calls for the same path", async () => {
+    const user = {
+      id: "33333333-3333-4333-8333-333333333333",
+      email: "north.staff",
+      name: "North Staff",
+      role: "STAFF" as const,
+      workspaceId: "22222222-2222-4222-8222-222222222222"
+    };
+    let resolveFetch: ((value: Response) => void) | null = null;
+    vi.mocked(fetch).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+
+    const { attemptRefresh, resetTenantRefreshInflightForTests } = await import("./session-restore");
+    resetTenantRefreshInflightForTests();
+    const pendingA = attemptRefresh("/api/staff-auth/refresh");
+    const pendingB = attemptRefresh("/api/staff-auth/refresh");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    resolveFetch!({
+      ok: true,
+      json: async () => ({ accessToken: "shared-access", user })
+    } as Response);
+    const [a, b] = await Promise.all([pendingA, pendingB]);
+    expect(a?.accessToken).toBe("shared-access");
+    expect(b?.accessToken).toBe("shared-access");
   });
 });

@@ -100,7 +100,8 @@ describe("role-based post-refresh redirect", () => {
   });
 
   it("prefers the matching refresh endpoint for the last known role", () => {
-    expect(refreshPathsForRole("STAFF")[0]).toBe("/api/staff-auth/refresh");
-    expect(refreshPathsForRole("COADMIN")[0]).toBe("/api/coadmin-auth/refresh");
+    expect(refreshPathsForRole("STAFF")).toEqual(["/api/staff-auth/refresh"]);
+    expect(refreshPathsForRole("COADMIN")).toEqual(["/api/coadmin-auth/refresh"]);
+    expect(refreshPathsForRole(null)).toEqual(["/api/coadmin-auth/refresh", "/api/staff-auth/refresh"]);
   });
 });

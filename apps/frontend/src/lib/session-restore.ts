@@ -10,6 +10,15 @@ const REFRESH_TIMEOUT_MS = 10_000;
 
 export type TenantRefreshPath = "/api/coadmin-auth/refresh" | "/api/staff-auth/refresh";
 
+const refreshInflight = new Map<string, Promise<AuthResponse | null>>();
+
+/**
+ * Test helper: clears in-flight cookie refresh promises between cases.
+ */
+export function resetTenantRefreshInflightForTests(): void {
+  refreshInflight.clear();
+}
+
 /**
  * Waits until the zustand auth persist layer has rehydrated from localStorage.
  * Always resolves: missing persist, hydration errors, or a timeout must not block login.
@@ -47,9 +56,25 @@ export function waitForAuthHydration(): Promise<void> {
 
 /**
  * Attempts a single cookie-backed refresh against the given endpoint.
+ * Concurrent callers share one in-flight request per path (avoids refresh rotation races).
  * Network/CORS failures return null so callers can fall through to the login form.
  */
-export async function attemptRefresh(refreshPath: TenantRefreshPath | "/api/admin-auth/refresh" | "/api/auth/refresh"): Promise<AuthResponse | null> {
+export async function attemptRefresh(
+  refreshPath: TenantRefreshPath | "/api/admin-auth/refresh" | "/api/auth/refresh"
+): Promise<AuthResponse | null> {
+  const existing = refreshInflight.get(refreshPath);
+  if (existing) return existing;
+
+  const pending = performRefresh(refreshPath).finally(() => {
+    refreshInflight.delete(refreshPath);
+  });
+  refreshInflight.set(refreshPath, pending);
+  return pending;
+}
+
+async function performRefresh(
+  refreshPath: TenantRefreshPath | "/api/admin-auth/refresh" | "/api/auth/refresh"
+): Promise<AuthResponse | null> {
   try {
     // Cookie-only POST: never send Content-Type without a JSON body (Fastify rejects empty JSON).
     const response = await fetch(`${apiBaseUrl}${refreshPath}`, {
@@ -69,47 +94,69 @@ export async function attemptRefresh(refreshPath: TenantRefreshPath | "/api/admi
 }
 
 /**
- * Chooses refresh endpoints based on the last known role, then falls back.
+ * Chooses refresh endpoints for the known role.
+ * Known Staff/Coadmin roles never probe the other role's cookie (avoids cross-role races).
  */
 export function refreshPathsForRole(role: string | null | undefined): TenantRefreshPath[] {
-  if (role === "STAFF") {
-    return ["/api/staff-auth/refresh", "/api/coadmin-auth/refresh"];
-  }
+  if (role === "STAFF") return ["/api/staff-auth/refresh"];
+  if (role === "COADMIN") return ["/api/coadmin-auth/refresh"];
   return ["/api/coadmin-auth/refresh", "/api/staff-auth/refresh"];
+}
+
+function readReadyTenantUser(expectedRole?: "COADMIN" | "STAFF"): AuthUser | null {
+  const existing = useAuthStore.getState();
+  if (!existing.accessToken || !existing.user) return null;
+  if (existing.user.role !== "STAFF" && existing.user.role !== "COADMIN") return null;
+  if (expectedRole && existing.user.role !== expectedRole) return null;
+  if (!isRoleAuthReady(existing.user.role)) return null;
+  return existing.user;
 }
 
 /**
  * Restores a Coadmin/Staff session from the HttpOnly refresh cookie.
- * Preserves a freshly authenticated in-memory session (post-login handoff)
- * when role bootstrap was already marked ready.
+ * Preserves a freshly authenticated in-memory session (post-login handoff).
+ * A Coadmin refresh 401 never clears an authenticated Staff session.
  */
-export async function restoreTenantSession(): Promise<AuthUser | null> {
+export async function restoreTenantSession(options?: {
+  readonly expectedRole?: "COADMIN" | "STAFF";
+}): Promise<AuthUser | null> {
   await waitForAuthHydration();
-  const existing = useAuthStore.getState();
-  const preferredRole = existing.user?.role ?? null;
 
-  if (
-    existing.accessToken &&
-    existing.user &&
-    (existing.user.role === "STAFF" || existing.user.role === "COADMIN") &&
-    isRoleAuthReady(existing.user.role)
-  ) {
-    return existing.user;
-  }
+  const ready = readReadyTenantUser(options?.expectedRole);
+  if (ready) return ready;
 
-  for (const path of refreshPathsForRole(preferredRole)) {
+  const preferredRole = options?.expectedRole ?? useAuthStore.getState().user?.role ?? null;
+  const paths = options?.expectedRole
+    ? refreshPathsForRole(options.expectedRole)
+    : refreshPathsForRole(preferredRole);
+
+  for (const path of paths) {
+    const midFlight = readReadyTenantUser(options?.expectedRole);
+    if (midFlight) return midFlight;
+
     const restored = await attemptRefresh(path);
-    if (restored) return restored.user;
+    if (restored) {
+      if (options?.expectedRole && restored.user.role !== options.expectedRole) {
+        continue;
+      }
+      return restored.user;
+    }
   }
 
-  const again = useAuthStore.getState();
+  const again = readReadyTenantUser(options?.expectedRole);
+  if (again) return again;
+
+  // Do not wipe a live Staff session because an anonymous Coadmin probe failed.
+  const leftover = useAuthStore.getState();
   if (
-    again.accessToken &&
-    again.user &&
-    (again.user.role === "STAFF" || again.user.role === "COADMIN") &&
-    isRoleAuthReady(again.user.role)
+    leftover.accessToken &&
+    leftover.user &&
+    (leftover.user.role === "STAFF" || leftover.user.role === "COADMIN") &&
+    isRoleAuthReady(leftover.user.role)
   ) {
-    return again.user;
+    if (!options?.expectedRole || leftover.user.role === options.expectedRole) {
+      return leftover.user;
+    }
   }
 
   useAuthStore.getState().clearSession();

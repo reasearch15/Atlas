@@ -61,8 +61,14 @@ function redis(): Redis & {
       ttls.set(key, ttl);
       return 1;
     },
-    set: async (key: string, value: string) => {
+    set: async (key: string, value: string, ...args: unknown[]) => {
+      const nx = args.includes("NX");
+      if (nx && (values.has(key) || counters.has(key))) return null;
       values.set(key, value);
+      const exIndex = args.indexOf("EX");
+      if (exIndex >= 0 && typeof args[exIndex + 1] === "number") {
+        ttls.set(key, args[exIndex + 1] as number);
+      }
       return "OK";
     },
     get: async (key: string) => {
@@ -98,15 +104,22 @@ function request(
 
 function reply() {
   const cookies: Record<string, string> = {};
+  const cookieOptions: Record<string, unknown> = {};
   return {
     cookies,
-    setCookie: (name: string, value: string) => {
+    cookieOptions,
+    setCookie: (name: string, value: string, options?: unknown) => {
       cookies[name] = value;
+      cookieOptions[name] = options;
     },
     clearCookie: (name: string) => {
       delete cookies[name];
+      delete cookieOptions[name];
     }
-  } as unknown as FastifyReply & { cookies: Record<string, string> };
+  } as unknown as FastifyReply & {
+    cookies: Record<string, string>;
+    cookieOptions: Record<string, unknown>;
+  };
 }
 
 function prisma(store: TenantStore): PrismaClient {
@@ -424,5 +437,65 @@ describe("Staff login rate limiting", () => {
     await expect(
       service.login(request({ username: "alex", password: "PermanentPass123!" }, {}, "198.51.100.1"), reply())
     ).resolves.toMatchObject({ accessToken: expect.any(String) });
+  });
+
+  it("sets a host-only staff refresh cookie that refresh accepts", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const service = new CoadminAuthService(prisma(store), redis(), { ...env, COOKIE_DOMAIN: "platform.atlast.work", COOKIE_SECURE: true }, "STAFF");
+    const loginReply = reply();
+    const login = await service.login(
+      request({ username: "north-staff", password: "PermanentPass123!" }, {}, "203.0.113.20"),
+      loginReply
+    );
+    expect("accessToken" in login).toBe(true);
+    const cookie = loginReply.cookies.atlas_staff_refresh;
+    expect(cookie).toBeTruthy();
+    expect(loginReply.cookieOptions.atlas_staff_refresh).toMatchObject({
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      path: "/api/staff-auth"
+    });
+    expect(loginReply.cookieOptions.atlas_staff_refresh).not.toHaveProperty("domain");
+    expect(loginReply.cookies.atlas_coadmin_refresh).toBeUndefined();
+
+    const refreshed = await service.refresh(
+      request({}, { atlas_staff_refresh: cookie! }, "203.0.113.20"),
+      reply()
+    );
+    expect(refreshed.accessToken).toBeTruthy();
+    expect(refreshed.user.role).toBe("STAFF");
+  });
+
+  it("keeps the session alive across concurrent staff refresh calls", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const service = new CoadminAuthService(prisma(store), redis(), env, "STAFF");
+    const loginReply = reply();
+    await service.login(request({ username: "north-staff", password: "PermanentPass123!" }), loginReply);
+    const cookie = loginReply.cookies.atlas_staff_refresh!;
+
+    const [first, second] = await Promise.all([
+      service.refresh(request({}, { atlas_staff_refresh: cookie }), reply()),
+      service.refresh(request({}, { atlas_staff_refresh: cookie }), reply())
+    ]);
+    expect(first.accessToken).toBeTruthy();
+    expect(second.accessToken).toBeTruthy();
+    expect(first.user.role).toBe("STAFF");
+    expect(second.user.role).toBe("STAFF");
+  });
+
+  it("does not create a coadmin cookie during staff login", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const service = new CoadminAuthService(prisma(store), redis(), env, "STAFF");
+    const loginReply = reply();
+    await service.login(request({ username: "north-staff", password: "PermanentPass123!" }), loginReply);
+    expect(Object.keys(loginReply.cookies)).toEqual(expect.arrayContaining(["atlas_staff_refresh", "atlas_staff_device"]));
+    expect(loginReply.cookies).not.toHaveProperty("atlas_coadmin_refresh");
   });
 });

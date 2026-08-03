@@ -17,9 +17,18 @@ import {
   recordTenantLoginFailure,
   type TenantLoginRole
 } from "./login-rate-limit";
+import {
+  tenantAuthCookieOptions,
+  tenantAuthCookiePath,
+  tenantAuthLegacyDomainClearOptions,
+  tenantRefreshCookieName,
+  tenantTrustedDeviceCookieName
+} from "./tenant-auth-cookies";
 
 const passwordChangePrefix = "tenant-password-change:";
 const genericLoginMessage = "Invalid username or password.";
+const REFRESH_GRACE_TTL_SECONDS = 45;
+const REFRESH_LOCK_TTL_SECONDS = 10;
 const passwordChangeBodySchema = z
   .object({ changeToken: z.string().trim().min(32).max(512) })
   .and(tenantPasswordChangeSchema);
@@ -45,8 +54,8 @@ export class CoadminAuthService {
   ) {
     this.tokens = new TokenService(env);
     this.audit = new AuditService(prisma);
-    this.refreshCookieName = role === "COADMIN" ? "atlas_coadmin_refresh" : "atlas_staff_refresh";
-    this.trustedDeviceCookieName = role === "COADMIN" ? "atlas_coadmin_device" : "atlas_staff_device";
+    this.refreshCookieName = tenantRefreshCookieName(role);
+    this.trustedDeviceCookieName = tenantTrustedDeviceCookieName(role);
     this.auditPrefix = role === "COADMIN" ? "coadmin_auth" : "staff_auth";
   }
 
@@ -112,21 +121,61 @@ export class CoadminAuthService {
   }
 
   /**
-   * Rotates a Coadmin refresh token.
+   * Rotates a tenant refresh token with concurrent-refresh grace.
+   * Duplicate near-simultaneous refreshes share one rotation and re-align the cookie.
    */
   public async refresh(request: FastifyRequest, reply: FastifyReply): Promise<AuthResponse> {
     const refreshToken = request.cookies[this.refreshCookieName];
     if (!refreshToken) throw unauthorized();
     const verified = await this.tokens.verifyRefreshToken(refreshToken);
-    const session = await this.prisma.session.findUnique({ where: { id: verified.sessionId }, include: { user: { include: { workspace: true } } } });
-    if (!session || session.userId !== verified.userId || session.revokedAt || session.expiresAt <= new Date() || !this.canAccessDashboard(session.user)) throw unauthorized();
-    const tokenMatches = await bcrypt.compare(refreshToken, session.refreshHash);
-    if (!tokenMatches) throw unauthorized();
-    const requestUser = this.toRequestUser(session.user, session.id);
-    const nextRefresh = await this.tokens.signRefreshToken(requestUser);
-    await this.prisma.session.update({ where: { id: session.id }, data: { refreshHash: await bcrypt.hash(nextRefresh, 12), lastSeenAt: new Date() } });
-    this.setRefreshCookie(reply, nextRefresh);
-    return { user: this.toAuthUser(session.user), accessToken: await this.tokens.signAccessToken(requestUser) };
+    const lockKey = `tenant-refresh:lock:${verified.sessionId}`;
+    const graceKey = `tenant-refresh:grace:${verified.sessionId}`;
+
+    const acquired = await this.redis.set(lockKey, "1", "EX", REFRESH_LOCK_TTL_SECONDS, "NX");
+    if (acquired !== "OK") {
+      await waitMs(75);
+      return this.completeRefreshAfterPeer(verified.sessionId, verified.userId, refreshToken, graceKey, reply);
+    }
+
+    try {
+      const session = await this.prisma.session.findUnique({
+        where: { id: verified.sessionId },
+        include: { user: { include: { workspace: true } } }
+      });
+      if (
+        !session ||
+        session.userId !== verified.userId ||
+        session.revokedAt ||
+        session.expiresAt <= new Date() ||
+        session.user.role !== this.role ||
+        !this.canAccessDashboard(session.user)
+      ) {
+        throw unauthorized();
+      }
+
+      const tokenMatches = await bcrypt.compare(refreshToken, session.refreshHash);
+      if (!tokenMatches) {
+        return this.completeRefreshFromGrace(session.id, session.user, refreshToken, graceKey, reply);
+      }
+
+      const requestUser = this.toRequestUser(session.user, session.id);
+      const nextRefresh = await this.tokens.signRefreshToken(requestUser);
+      const nextHash = await bcrypt.hash(nextRefresh, 12);
+      await this.redis.set(
+        graceKey,
+        JSON.stringify({ oldHash: session.refreshHash, currentToken: nextRefresh }),
+        "EX",
+        REFRESH_GRACE_TTL_SECONDS
+      );
+      await this.prisma.session.update({
+        where: { id: session.id },
+        data: { refreshHash: nextHash, lastSeenAt: new Date() }
+      });
+      this.setRefreshCookie(reply, nextRefresh);
+      return { user: this.toAuthUser(session.user), accessToken: await this.tokens.signAccessToken(requestUser) };
+    } finally {
+      await this.redis.del(lockKey);
+    }
   }
 
   /**
@@ -138,6 +187,8 @@ export class CoadminAuthService {
       await this.audit.record({ workspaceId: request.user.workspaceId, actorId: request.user.id, action: `${this.auditPrefix}.logout`, metadata: { sessionId: request.user.sessionId } });
     }
     reply.clearCookie(this.refreshCookieName, this.refreshCookieOptions());
+    const legacyRefresh = tenantAuthLegacyDomainClearOptions(this.env, tenantAuthCookiePath(this.role));
+    if (legacyRefresh) reply.clearCookie(this.refreshCookieName, legacyRefresh);
     return { success: true };
   }
 
@@ -204,6 +255,12 @@ export class CoadminAuthService {
     await this.audit.record({ workspaceId: user.workspaceId, actorId: user.id, action: `${this.auditPrefix}.devices.revoked_all`, metadata: { sessionId: user.sessionId } });
     reply.clearCookie(this.refreshCookieName, this.refreshCookieOptions());
     reply.clearCookie(this.trustedDeviceCookieName, this.trustedDeviceCookieOptions());
+    const path = tenantAuthCookiePath(this.role);
+    const legacy = tenantAuthLegacyDomainClearOptions(this.env, path);
+    if (legacy) {
+      reply.clearCookie(this.refreshCookieName, legacy);
+      reply.clearCookie(this.trustedDeviceCookieName, legacy);
+    }
     return { success: true };
   }
 
@@ -273,30 +330,72 @@ export class CoadminAuthService {
     await this.audit.record({ workspaceId, actorId, action: `${this.auditPrefix}.password_login.failed`, metadata: {}, ipAddress: request.ip, userAgent: request.headers["user-agent"] });
   }
 
+  private async completeRefreshAfterPeer(
+    sessionId: string,
+    userId: string,
+    presentedToken: string,
+    graceKey: string,
+    reply: FastifyReply
+  ): Promise<AuthResponse> {
+    const session = await this.prisma.session.findUnique({
+      where: { id: sessionId },
+      include: { user: { include: { workspace: true } } }
+    });
+    if (
+      !session ||
+      session.userId !== userId ||
+      session.revokedAt ||
+      session.expiresAt <= new Date() ||
+      session.user.role !== this.role ||
+      !this.canAccessDashboard(session.user)
+    ) {
+      throw unauthorized();
+    }
+    if (await bcrypt.compare(presentedToken, session.refreshHash)) {
+      const requestUser = this.toRequestUser(session.user, session.id);
+      this.setRefreshCookie(reply, presentedToken);
+      return { user: this.toAuthUser(session.user), accessToken: await this.tokens.signAccessToken(requestUser) };
+    }
+    return this.completeRefreshFromGrace(session.id, session.user, presentedToken, graceKey, reply);
+  }
+
+  private async completeRefreshFromGrace(
+    sessionId: string,
+    user: TenantUser,
+    presentedToken: string,
+    graceKey: string,
+    reply: FastifyReply
+  ): Promise<AuthResponse> {
+    const raw = await this.redis.get(graceKey);
+    if (!raw) throw unauthorized();
+    let grace: { oldHash?: string; currentToken?: string };
+    try {
+      grace = JSON.parse(raw) as { oldHash?: string; currentToken?: string };
+    } catch {
+      throw unauthorized();
+    }
+    if (!grace.oldHash || !grace.currentToken) throw unauthorized();
+    if (!(await bcrypt.compare(presentedToken, grace.oldHash))) throw unauthorized();
+    const requestUser = this.toRequestUser(user, sessionId);
+    this.setRefreshCookie(reply, grace.currentToken);
+    return { user: this.toAuthUser(user), accessToken: await this.tokens.signAccessToken(requestUser) };
+  }
+
   private setRefreshCookie(reply: FastifyReply, token: string): void {
+    const path = tenantAuthCookiePath(this.role);
+    const legacy = tenantAuthLegacyDomainClearOptions(this.env, path);
+    if (legacy) {
+      reply.clearCookie(this.refreshCookieName, legacy);
+    }
     reply.setCookie(this.refreshCookieName, token, this.refreshCookieOptions());
   }
 
   private refreshCookieOptions() {
-    const options = {
-      httpOnly: true,
-      secure: this.env.COOKIE_SECURE,
-      sameSite: "lax" as const,
-      path: this.role === "COADMIN" ? "/api/coadmin-auth" : "/api/staff-auth",
-      maxAge: this.env.REFRESH_TOKEN_TTL_SECONDS
-    };
-    return this.env.COOKIE_DOMAIN === "localhost" ? options : { ...options, domain: this.env.COOKIE_DOMAIN };
+    return tenantAuthCookieOptions(this.env, tenantAuthCookiePath(this.role), this.env.REFRESH_TOKEN_TTL_SECONDS);
   }
 
   private trustedDeviceCookieOptions() {
-    const options = {
-      httpOnly: true,
-      secure: this.env.COOKIE_SECURE,
-      sameSite: "lax" as const,
-      path: this.role === "COADMIN" ? "/api/coadmin-auth" : "/api/staff-auth",
-      maxAge: this.env.ADMIN_TRUSTED_DEVICE_TTL_SECONDS
-    };
-    return this.env.COOKIE_DOMAIN === "localhost" ? options : { ...options, domain: this.env.COOKIE_DOMAIN };
+    return tenantAuthCookieOptions(this.env, tenantAuthCookiePath(this.role), this.env.ADMIN_TRUSTED_DEVICE_TTL_SECONDS);
   }
 
   private hashToken(token: string): string {
@@ -349,4 +448,10 @@ export class CoadminAuthService {
       isCurrent
     };
   }
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

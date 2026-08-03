@@ -116,13 +116,22 @@ async function runBootstrap(expectedRole: RoleGate): Promise<boolean> {
   }
 
   for (const path of refreshPathsForRole(expectedRole)) {
+    // Never let a wrong-role cookie probe clear the expected role's in-memory login.
+    if (useAuthStore.getState().accessToken && useAuthStore.getState().user?.role === expectedRole) {
+      try {
+        await validateMe(expectedRole);
+        return true;
+      } catch {
+        // Continue to cookie refresh.
+      }
+    }
     const restored = await attemptRefresh(path);
     if (restored?.user.role === expectedRole) {
       try {
         await validateMe(expectedRole);
         return true;
       } catch {
-        // Try next refresh path.
+        // Try next refresh path (none for known roles).
       }
     }
   }

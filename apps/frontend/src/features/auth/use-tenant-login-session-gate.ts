@@ -24,7 +24,9 @@ export function useTenantLoginSessionGate(options?: { readonly expectedRole?: "C
 
     void (async () => {
       try {
-        const user = await restoreTenantSession();
+        const user = await restoreTenantSession(
+          options?.expectedRole ? { expectedRole: options.expectedRole } : undefined
+        );
         if (cancelled) return;
         if (!user) {
           setState({ status: "anonymous" });
