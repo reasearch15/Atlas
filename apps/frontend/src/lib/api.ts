@@ -76,7 +76,9 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}, retryO
     headers
   });
 
-  if (response.status === 401 && retryOnUnauthorized) {
+  const isAuthChallengePath = path.endsWith("/login") || path.endsWith("/change-password") || path.endsWith("/verify-device") || path.endsWith("/resend-code");
+
+  if (response.status === 401 && retryOnUnauthorized && !isAuthChallengePath) {
     const errorBody = (await response.clone().json().catch(() => null)) as ApiErrorBody | null;
     const code = errorBody?.error?.code;
     const canRefresh =

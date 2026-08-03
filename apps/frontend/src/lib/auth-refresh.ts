@@ -27,6 +27,10 @@ export function resetAuthRefreshLocksForTests(): void {
  * Staff-capable route families refresh against Staff when the signed-in user is Staff.
  */
 export function refreshPathFor(path: string): RefreshPath | null {
+  // Login / password-change challenges must never enter the cookie-refresh / logout loop.
+  if (path.endsWith("/login") || path.endsWith("/change-password") || path.endsWith("/verify-device") || path.endsWith("/resend-code")) {
+    return null;
+  }
   if (path.startsWith("/api/admin")) return "/api/admin-auth/refresh";
   if (path.startsWith("/api/staff-auth")) return "/api/staff-auth/refresh";
   if (path.startsWith("/api/coadmin-auth")) return "/api/coadmin-auth/refresh";

@@ -59,7 +59,8 @@ export function TenantChangePasswordForm({ role }: { readonly role: "coadmin" | 
       clearTenantPasswordChangeChallenge(role);
       setPassword("");
       setConfirmPassword("");
-      router.replace(getPostLoginRoute(role === "coadmin" ? "COADMIN" : "STAFF") as Route);
+      // Hard navigate so Staff shell bootstraps from the fresh session cookie.
+      window.location.assign(getPostLoginRoute(role === "coadmin" ? "COADMIN" : "STAFF"));
     } catch (error) {
       const message =
         error instanceof ApiClientError

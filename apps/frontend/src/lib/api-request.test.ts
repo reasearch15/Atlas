@@ -323,4 +323,31 @@ describe("apiRequest expired access token refresh", () => {
     await apiRequest("/api/telegram/accounts", { method: "POST", body: createBody });
     expect(accountPosts).toBe(2);
   });
+
+  it("does not logout the browser when coadmin login returns 401", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      clone: () => ({
+        json: async () => ({
+          error: { code: "UNAUTHORIZED", message: "Invalid username or password.", requestId: "r1" }
+        })
+      }),
+      json: async () => ({
+        error: { code: "UNAUTHORIZED", message: "Invalid username or password.", requestId: "r1" }
+      }),
+      headers: { get: () => null }
+    } as unknown as Response);
+
+    const { apiRequest } = await import("./api");
+    await expect(
+      apiRequest("/api/coadmin-auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username: "bella", password: "x" })
+      })
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(window.location.assign).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 });

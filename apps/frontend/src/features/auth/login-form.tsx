@@ -54,7 +54,7 @@ export function LoginForm() {
           throw new Error("Password change is required, but no change token was returned.");
         }
         storeTenantPasswordChangeChallenge(result.role, { passwordChangeToken, username: normalized });
-        router.replace(changeRoute as Route);
+        window.location.assign(changeRoute);
         return;
       }
       const role = result.response.user.role;

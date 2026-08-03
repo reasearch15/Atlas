@@ -82,9 +82,9 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
         if (!passwordChangeToken) {
           throw new Error("Password change is required, but no change token was returned.");
         }
-        // Store before any navigation / restore race. Do not call refresh.
+        // Store before navigation. Hard navigate so soft-router races cannot remount login.
         storeTenantPasswordChangeChallenge(role, { passwordChangeToken, username: normalized });
-        router.replace(changeRoute as Route);
+        window.location.assign(changeRoute);
         return;
       }
       router.replace(getPostLoginRoute(response.user.role) as Route);
