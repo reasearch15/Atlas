@@ -31,9 +31,8 @@ Or use `scripts/backup-minio.sh` as a template for dump/restore.
 ## Verify after mirror
 
 ```bash
-# Counts only — see scripts/inbox-diagnostics.mjs
-DATABASE_URL=... S3_ENDPOINT=... S3_BUCKET=atlas S3_ACCESS_KEY_ID=... S3_SECRET_ACCESS_KEY=... \
-  node --import tsx scripts/inbox-diagnostics.mjs
+# Counts only — apps/backend/scripts/inbox-diagnostics.mjs
+pnpm --filter @atlas/backend inbox:diagnostics
 ```
 
 Expect `mediaKeysMissingInMinioSample` to drop toward 0 for recently checked keys.

@@ -3,10 +3,10 @@
  * Soft-archives matching chats (does not delete message history).
  *
  * Dry-run (default):
- *   node --import tsx scripts/cleanup-telegram-service-chats.mjs
+ *   pnpm --filter @atlas/backend cleanup:telegram
  *
  * Apply:
- *   CONFIRM_CLEANUP=YES node --import tsx scripts/cleanup-telegram-service-chats.mjs
+ *   CONFIRM_CLEANUP=YES pnpm --filter @atlas/backend cleanup:telegram
  *
  * Match tiers:
  *   A (safe): peer ids 777000/42777, meta.self, meta.support
@@ -18,7 +18,7 @@ import {
   isOfficialTelegramServicePeer,
   looksLikeTelegramServiceDialogLabel,
   shouldIgnoreTelegramDialog
-} from "../packages/shared/src/telegram-crm-identity.ts";
+} from "@atlas/shared";
 
 const prisma = new PrismaClient();
 const apply = process.env.CONFIRM_CLEANUP === "YES";

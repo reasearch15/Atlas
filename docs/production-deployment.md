@@ -110,6 +110,21 @@ Templates: `deploy/systemd/*.service`, `deploy/nginx/atlas.conf.template`.
 
 - Local disk uploads are not used
 - Migrate object storage; DB keys without objects break media
+- MinIO migration notes: `docs/minio-media-migration.md`
+- Inbox / media diagnostics (counts only, no secrets):
+
+```bash
+pnpm --filter @atlas/backend inbox:diagnostics
+```
+
+- Soft-archive official Telegram service / Saved Messages chats (dry-run by default):
+
+```bash
+pnpm --filter @atlas/backend cleanup:telegram
+CONFIRM_CLEANUP=YES pnpm --filter @atlas/backend cleanup:telegram
+```
+
+These scripts live under `apps/backend/scripts/` and resolve `@prisma/client`, `@aws-sdk/client-s3`, and `@atlas/shared` via the backend package — no `NODE_PATH` or `node_modules` symlinks.
 
 ## Rollback
 

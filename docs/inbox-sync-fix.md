@@ -23,8 +23,8 @@ Production: https://platform.atlast.work
 
 1. `pnpm db:migrate:deploy` (adds `MARK_CHAT_READ`, `UNAVAILABLE`, read columns)
 2. Deploy backend, worker, frontend
-3. Dry-run `scripts/cleanup-telegram-service-chats.mjs` then `CONFIRM_CLEANUP=YES`
-4. Run `scripts/inbox-diagnostics.mjs` against prod (counts only)
+3. Dry-run `pnpm --filter @atlas/backend cleanup:telegram` then `CONFIRM_CLEANUP=YES pnpm --filter @atlas/backend cleanup:telegram`
+4. Run `pnpm --filter @atlas/backend inbox:diagnostics` against prod (counts only)
 5. Mirror MinIO if needed — see `docs/minio-media-migration.md`
 6. Trigger media backfill for accounts with missing objects
 

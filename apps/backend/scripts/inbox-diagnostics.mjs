@@ -2,17 +2,13 @@
  * Production-safe diagnostics for inbox sync / media / identity issues.
  * Reports counts only — never secrets or object bytes.
  *
- * Usage:
- *   DATABASE_URL=... S3_ENDPOINT=... S3_BUCKET=... S3_ACCESS_KEY_ID=... S3_SECRET_ACCESS_KEY=... \
- *     node --import tsx scripts/inbox-diagnostics.mjs
+ * Usage (from repo root after pnpm install):
+ *   pnpm --filter @atlas/backend inbox:diagnostics
  */
 
 import { PrismaClient } from "@prisma/client";
 import { HeadObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
-import {
-  isOfficialTelegramServicePeer,
-  shouldIgnoreTelegramDialog
-} from "../packages/shared/src/telegram-crm-identity.ts";
+import { isOfficialTelegramServicePeer, shouldIgnoreTelegramDialog } from "@atlas/shared";
 
 const prisma = new PrismaClient();
 

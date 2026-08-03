@@ -22,7 +22,9 @@
     "admin:reset": "dotenv -e ../../.env -- tsx src/scripts/admin-reset.ts",
     "admin:show": "dotenv -e ../../.env -- tsx src/scripts/admin-show.ts",
     "admin:cleanup-orphans": "dotenv -e ../../.env -- tsx src/scripts/admin-cleanup-orphans.ts",
-    "fixtures:clean": "dotenv -e ../../.env -- tsx src/scripts/fixtures-clean.ts"
+    "fixtures:clean": "dotenv -e ../../.env -- tsx src/scripts/fixtures-clean.ts",
+    "inbox:diagnostics": "dotenv -e ../../.env -- node scripts/inbox-diagnostics.mjs",
+    "cleanup:telegram": "dotenv -e ../../.env -- node scripts/cleanup-telegram-service-chats.mjs"
   },
   "dependencies": {
     "@atlas/shared": "workspace:*",
