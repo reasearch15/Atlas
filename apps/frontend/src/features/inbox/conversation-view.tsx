@@ -11,6 +11,7 @@ import { api } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth-store";
 import type { InboxConversation } from "./inbox-utils";
 import { avatarColor, avatarInitials, mergeAndDeduplicate } from "./inbox-utils";
+import { shouldAutoScrollMessagePane } from "./message-pane-scroll";
 import { identityFromChatAndContact } from "./contact-identity";
 import { useInbox, useRegisterChatCatchUp } from "./inbox-provider";
 import { rememberChatMessages, refreshChatMessagesIfStale } from "./message-cache";
@@ -82,6 +83,8 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
     stickToBottomRef.current = true;
     setNewMessageCount(0);
   }, []);
+  const scrollToBottomRef = useRef(scrollToBottom);
+  scrollToBottomRef.current = scrollToBottom;
 
   const applyIncomingMessage = useCallback(
     (incoming: TelegramMessageDto) => {
@@ -100,7 +103,18 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
         return;
       }
       const nearBottom = isNearBottom();
-      stickToBottomRef.current = nearBottom;
+      const ownOutbound =
+        incoming.direction === "OUTBOUND" &&
+        (incoming.id === pendingMessageIdRef.current ||
+          (Boolean(currentUserId) && incoming.internalSenderUserId === currentUserId));
+      // Only auto-scroll for this chat’s messages when near bottom or we sent them.
+      // Inbox-list reorder / other-chat activity never reaches this handler.
+      const autoScroll = shouldAutoScrollMessagePane({
+        isForSelectedChat: true,
+        nearBottom,
+        userSentMessage: ownOutbound
+      });
+      stickToBottomRef.current = autoScroll;
       setMessages((current) => {
         const next = mergeAndDeduplicate(current, incoming);
         rememberChatMessages(chatIdRef.current, next);
@@ -117,13 +131,13 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
           pendingMessageIdRef.current = null;
         }
       }
-      if (nearBottom) {
+      if (autoScroll) {
         requestAnimationFrame(() => scrollToBottom("smooth"));
       } else if (incoming.direction === "INBOUND") {
         setNewMessageCount((count) => count + 1);
       }
     },
-    [isNearBottom, replyTo?.id, scrollToBottom, setMessages]
+    [currentUserId, isNearBottom, replyTo?.id, scrollToBottom, setMessages]
   );
 
   const applyIncomingRef = useRef(applyIncomingMessage);
@@ -173,12 +187,13 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
     return () => clearTimeout(timer);
   }, [chat.id, realtimeConnected]);
 
+  // Initial / chat-switch scroll only — isolated from inbox list / conversation metadata updates.
   useLayoutEffect(() => {
     if (loading) return;
     if (stickToBottomRef.current) {
-      scrollToBottom("auto");
+      scrollToBottomRef.current("auto");
     }
-  }, [loading, chat.id, scrollToBottom]);
+  }, [loading, chat.id]);
 
   function watchPendingMessage(messageId: string): void {
     pendingMessageIdRef.current = messageId;

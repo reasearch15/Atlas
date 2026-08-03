@@ -18,11 +18,16 @@ export const errorPlugin = fp(async (app) => {
     }
 
     if (error instanceof AppError) {
+      const retryAfterSeconds = error.details?.retryAfterSeconds;
+      if (error.statusCode === 429 && typeof retryAfterSeconds === "number" && retryAfterSeconds > 0) {
+        reply.header("Retry-After", String(Math.ceil(retryAfterSeconds)));
+      }
       return reply.status(error.statusCode).send({
         error: {
           code: error.code,
           message: error.message,
-          requestId: request.id
+          requestId: request.id,
+          ...(typeof retryAfterSeconds === "number" ? { retryAfterSeconds } : {})
         }
       });
     }

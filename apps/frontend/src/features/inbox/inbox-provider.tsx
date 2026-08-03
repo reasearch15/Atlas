@@ -8,6 +8,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import {
   applyChatActivity,
   needsIdentityBackfill,
+  sortConversations,
   toInboxConversation,
   type InboxConversation
 } from "./inbox-utils";
@@ -554,10 +555,12 @@ async function fetchConversationsWithAccounts(): Promise<{
 function flattenConversations(
   accounts: ReadonlyArray<{ readonly account: TelegramAccountDto; readonly chats: TelegramChatDto[] }>
 ): InboxConversation[] {
-  return accounts.flatMap(({ account, chats }) => {
-    const accountLabel = account.displayName || "Workspace account";
-    return chats.map((chat) => toInboxConversation(chat, accountLabel));
-  });
+  return sortConversations(
+    accounts.flatMap(({ account, chats }) => {
+      const accountLabel = account.displayName || "Workspace account";
+      return chats.map((chat) => toInboxConversation(chat, accountLabel));
+    })
+  );
 }
 
 function parseSelectedChatId(pathname: string): string | null {

@@ -47,6 +47,9 @@ export async function buildApp(env: Env) {
     logger: {
       level: env.NODE_ENV === "production" ? "info" : "debug"
     },
+    // Nginx terminates TLS and forwards X-Forwarded-For / X-Real-IP; without this,
+    // request.ip collapses to 127.0.0.1 and staff login rate limits share one bucket.
+    trustProxy: true,
     genReqId: () => crypto.randomUUID(),
     bodyLimit: MEDIA_UPLOAD_BODY_LIMIT
   });

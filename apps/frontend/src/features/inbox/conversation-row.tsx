@@ -35,6 +35,7 @@ export const ConversationRow = memo(function ConversationRow({
   return (
     <button
       type="button"
+      data-chat-id={chat.id}
       onClick={onSelect}
       onMouseEnter={onPrefetch}
       onFocus={onPrefetch}

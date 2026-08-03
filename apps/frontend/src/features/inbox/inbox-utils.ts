@@ -283,31 +283,35 @@ export function filterConversations(
 }
 
 /**
- * Pins first, then conversations needing attention (needs-CRM-attention or assigned+unread),
- * then lastMessageAt descending, then id ascending for deterministic ties.
+ * Shared inbox comparator (REST flatten + WebSocket merge must agree):
+ * pinned first → lastMessageAt desc → updatedAt proxy desc → stable chat id.
+ * TelegramChatDto has no updatedAt; claimedAt/assignedAt act as the proxy.
  */
-export function sortConversations(conversations: readonly InboxConversation[]): InboxConversation[] {
-  return conversations.slice().sort((left, right) => {
-    const tierDelta = urgencyTier(left) - urgencyTier(right);
-    if (tierDelta !== 0) return tierDelta;
-    const leftAt = left.chat.lastMessageAt ? Date.parse(left.chat.lastMessageAt) : 0;
-    const rightAt = right.chat.lastMessageAt ? Date.parse(right.chat.lastMessageAt) : 0;
-    if (rightAt !== leftAt) return rightAt - leftAt;
-    const leftUpdated = left.chat.assignedAt ? Date.parse(left.chat.assignedAt) : 0;
-    const rightUpdated = right.chat.assignedAt ? Date.parse(right.chat.assignedAt) : 0;
-    if (rightUpdated !== leftUpdated) return rightUpdated - leftUpdated;
-    return left.chat.id.localeCompare(right.chat.id);
-  });
+export function compareInboxConversations(left: InboxConversation, right: InboxConversation): number {
+  if (left.chat.isPinned !== right.chat.isPinned) {
+    return left.chat.isPinned ? -1 : 1;
+  }
+  const leftAt = left.chat.lastMessageAt ? Date.parse(left.chat.lastMessageAt) : 0;
+  const rightAt = right.chat.lastMessageAt ? Date.parse(right.chat.lastMessageAt) : 0;
+  if (rightAt !== leftAt) return rightAt - leftAt;
+  const leftUpdated = conversationUpdatedAtMs(left);
+  const rightUpdated = conversationUpdatedAtMs(right);
+  if (rightUpdated !== leftUpdated) return rightUpdated - leftUpdated;
+  return left.chat.id.localeCompare(right.chat.id);
 }
 
 /**
- * Ranks a conversation for sort priority: pinned, then needing attention, then the rest.
+ * Pins first, then lastMessageAt descending, then updatedAt proxy, then stable id.
  */
-function urgencyTier(item: InboxConversation): number {
-  if (item.chat.isPinned) return 0;
-  const assignedUnread = item.chat.assignedUserId !== null && item.chat.unreadCount > 0;
-  if (item.chat.needsCrmAttention || assignedUnread) return 1;
-  return 2;
+export function sortConversations(conversations: readonly InboxConversation[]): InboxConversation[] {
+  return conversations.slice().sort(compareInboxConversations);
+}
+
+/** Best-effort conversation “updatedAt” when the DTO omits a dedicated field. */
+function conversationUpdatedAtMs(item: InboxConversation): number {
+  const claimed = item.chat.claimedAt ? Date.parse(item.chat.claimedAt) : 0;
+  const assigned = item.chat.assignedAt ? Date.parse(item.chat.assignedAt) : 0;
+  return Math.max(claimed, assigned);
 }
 
 /**

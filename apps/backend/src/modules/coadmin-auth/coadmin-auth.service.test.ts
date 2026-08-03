@@ -42,11 +42,56 @@ interface TenantStore {
   auditLogs: Array<Record<string, any>>;
 }
 
-function request(body: unknown, cookies: Record<string, string> = {}): FastifyRequest {
+function redis(): Redis & {
+  readonly counters: Map<string, number>;
+  readonly ttls: Map<string, number>;
+} {
+  const counters = new Map<string, number>();
+  const values = new Map<string, string>();
+  const ttls = new Map<string, number>();
+  return {
+    counters,
+    ttls,
+    incr: async (key: string) => {
+      const next = (counters.get(key) ?? 0) + 1;
+      counters.set(key, next);
+      return next;
+    },
+    expire: async (key: string, ttl: number) => {
+      ttls.set(key, ttl);
+      return 1;
+    },
+    set: async (key: string, value: string) => {
+      values.set(key, value);
+      return "OK";
+    },
+    get: async (key: string) => {
+      if (counters.has(key)) return String(counters.get(key));
+      return values.get(key) ?? null;
+    },
+    ttl: async (key: string) => ttls.get(key) ?? (counters.has(key) || values.has(key) ? -1 : -2),
+    del: async (...keys: string[]) => {
+      let removed = 0;
+      for (const key of keys) {
+        const hadCounter = counters.delete(key);
+        const hadValue = values.delete(key);
+        ttls.delete(key);
+        if (hadCounter || hadValue) removed += 1;
+      }
+      return removed;
+    }
+  } as unknown as Redis & { readonly counters: Map<string, number>; readonly ttls: Map<string, number> };
+}
+
+function request(
+  body: unknown,
+  cookies: Record<string, string> = {},
+  ip = "127.0.0.1"
+): FastifyRequest {
   return {
     body,
     cookies,
-    ip: "127.0.0.1",
+    ip,
     headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0) AppleWebKit Chrome/126.0 Safari/537.36" }
   } as FastifyRequest;
 }
@@ -62,28 +107,6 @@ function reply() {
       delete cookies[name];
     }
   } as unknown as FastifyReply & { cookies: Record<string, string> };
-}
-
-function redis(): Redis {
-  const counters = new Map<string, number>();
-  const values = new Map<string, string>();
-  return {
-    incr: async (key: string) => {
-      const next = (counters.get(key) ?? 0) + 1;
-      counters.set(key, next);
-      return next;
-    },
-    expire: async () => 1,
-    set: async (key: string, value: string) => {
-      values.set(key, value);
-      return "OK";
-    },
-    get: async (key: string) => values.get(key) ?? null,
-    del: async (key: string) => {
-      const existed = values.delete(key);
-      return existed ? 1 : 0;
-    }
-  } as unknown as Redis;
 }
 
 function prisma(store: TenantStore): PrismaClient {
@@ -273,5 +296,133 @@ describe("CoadminAuthService refresh session continuity", () => {
     const { service, refreshToken, cookieName } = await establishSession("STAFF");
     const refreshed = await service.refresh(request({}, { [cookieName]: refreshToken }), reply());
     expect(refreshed.user.role).toBe("STAFF");
+  });
+});
+
+describe("Staff login rate limiting", () => {
+  it("accepts a valid staff login without leaving failure counters", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const fakeRedis = redis();
+    const service = new CoadminAuthService(prisma(store), fakeRedis, env, "STAFF");
+    const response = await service.login(
+      request({ username: "north-staff", password: "PermanentPass123!" }, {}, "203.0.113.5"),
+      reply()
+    );
+    expect("accessToken" in response).toBe(true);
+    expect([...fakeRedis.counters.keys()].some((key) => key.includes("fail"))).toBe(false);
+  });
+
+  it("returns 429 after repeated invalid passwords and includes retryAfterSeconds", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const fakeRedis = redis();
+    fakeRedis.ttls.set("staff-login:fail:user:north-staff:ip:203.0.113.8", 420);
+    const service = new CoadminAuthService(prisma(store), fakeRedis, env, "STAFF");
+    for (let i = 0; i < 7; i += 1) {
+      await expect(
+        service.login(request({ username: "north-staff", password: "WrongPassword!!!1" }, {}, "203.0.113.8"), reply())
+      ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    }
+    await expect(
+      service.login(request({ username: "north-staff", password: "WrongPassword!!!1" }, {}, "203.0.113.8"), reply())
+    ).rejects.toMatchObject({
+      statusCode: 429,
+      code: "RATE_LIMITED",
+      details: { retryAfterSeconds: expect.any(Number) }
+    });
+  });
+
+  it("clears prior failures after a successful login", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const fakeRedis = redis();
+    const service = new CoadminAuthService(prisma(store), fakeRedis, env, "STAFF");
+    for (let i = 0; i < 3; i += 1) {
+      await expect(
+        service.login(request({ username: "north-staff", password: "WrongPassword!!!1" }, {}, "203.0.113.9"), reply())
+      ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    }
+    expect(fakeRedis.counters.get("staff-login:fail:user:north-staff:ip:203.0.113.9")).toBe(3);
+    await service.login(request({ username: "north-staff", password: "PermanentPass123!" }, {}, "203.0.113.9"), reply());
+    expect(fakeRedis.counters.has("staff-login:fail:user:north-staff:ip:203.0.113.9")).toBe(false);
+  });
+
+  it("does not increment login failure counters from refresh", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = false;
+    store.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+    const fakeRedis = redis();
+    const service = new CoadminAuthService(prisma(store), fakeRedis, env, "STAFF");
+    const loginReply = reply();
+    const login = await service.login(
+      request({ username: "north-staff", password: "PermanentPass123!" }, {}, "203.0.113.11"),
+      loginReply
+    );
+    if ("requiresPasswordChange" in login) throw new Error("expected session");
+    const staffCookie = loginReply.cookies["atlas_staff_refresh"]!;
+    const before = fakeRedis.counters.size;
+    await service.refresh(request({}, { atlas_staff_refresh: staffCookie }, "203.0.113.11"), reply());
+    expect(fakeRedis.counters.size).toBe(before);
+    expect([...fakeRedis.counters.keys()].some((key) => key.includes(":fail:"))).toBe(false);
+  });
+
+  it("does not lock a second staff user behind the same IP via the primary key", async () => {
+    const bella = await storeFor("STAFF");
+    bella.user.username = "bella";
+    bella.user.mustChangePassword = false;
+    bella.user.passwordHash = await bcrypt.hash("PermanentPass123!", 12);
+
+    const alexStore: TenantStore = {
+      user: {
+        ...bella.user,
+        id: randomUUID(),
+        username: "alex",
+        name: "Alex"
+      },
+      sessions: [],
+      trustedDevices: [],
+      auditLogs: []
+    };
+
+    const users = new Map([
+      ["bella", bella.user],
+      ["alex", alexStore.user]
+    ]);
+    const sharedPrisma = {
+      user: {
+        findUnique: async ({ where }: any) => {
+          if (where.username) return users.get(where.username) ?? null;
+          if (where.id) return [...users.values()].find((row) => row.id === where.id) ?? null;
+          return null;
+        },
+        findUniqueOrThrow: async ({ where }: any) => {
+          const found = [...users.values()].find((row) => row.id === where.id);
+          if (!found) throw new Error("missing");
+          return found;
+        }
+      },
+      session: prisma(bella).session,
+      userTrustedDevice: prisma(bella).userTrustedDevice,
+      auditLog: prisma(bella).auditLog,
+      $transaction: prisma(bella).$transaction
+    } as unknown as PrismaClient;
+
+    const fakeRedis = redis();
+    const service = new CoadminAuthService(sharedPrisma, fakeRedis, env, "STAFF");
+    for (let i = 0; i < 7; i += 1) {
+      await expect(
+        service.login(request({ username: "bella", password: "WrongPassword!!!1" }, {}, "198.51.100.1"), reply())
+      ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    }
+    await expect(
+      service.login(request({ username: "bella", password: "WrongPassword!!!1" }, {}, "198.51.100.1"), reply())
+    ).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    await expect(
+      service.login(request({ username: "alex", password: "PermanentPass123!" }, {}, "198.51.100.1"), reply())
+    ).resolves.toMatchObject({ accessToken: expect.any(String) });
   });
 });

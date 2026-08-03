@@ -3,13 +3,14 @@
 import { LogIn } from "lucide-react";
 import type { FormEvent } from "react";
 import type { Route } from "next";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useTenantLoginSessionGate } from "@/features/auth/use-tenant-login-session-gate";
 import { loginPasswordInputProps, loginUsernameInputProps } from "@/lib/auth-form-fields";
+import { ApiClientError } from "@/lib/api-client-error";
 import { coadminLogin, staffLogin } from "@/lib/api";
 import { getPostLoginRoute } from "@/lib/post-login-route";
 import {
@@ -17,6 +18,11 @@ import {
   getRememberedUsername,
   normalizeUsername
 } from "@/lib/remembered-username";
+import {
+  formatLoginRetryCountdown,
+  loginErrorMessage,
+  shouldAcceptLoginSubmit
+} from "./login-error";
 
 export const tenantPasswordChangeStorageKey = (role: "coadmin" | "staff") => `atlas:${role}:password-change`;
 
@@ -30,6 +36,9 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
   const [password, setPassword] = useState("");
   const [rememberUsername, setRememberUsername] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState(0);
+  const [formError, setFormError] = useState<string | null>(null);
+  const pendingRef = useRef(false);
   const title = role === "coadmin" ? "Coadmin Login" : "Staff Login";
   const changeRoute = role === "coadmin" ? "/coadmin/change-password" : "/staff/change-password";
 
@@ -40,15 +49,29 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
     setRememberUsername(true);
   }, []);
 
+  useEffect(() => {
+    if (retryAfterSeconds <= 0) return;
+    const timer = window.setInterval(() => {
+      setRetryAfterSeconds((current) => Math.max(0, current - 1));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+    // Restart only when entering/leaving lockout, not every tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- boolean lock gate
+  }, [retryAfterSeconds > 0]);
+
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    if (!shouldAcceptLoginSubmit(pendingRef.current) || retryAfterSeconds > 0) return;
+    pendingRef.current = true;
     setLoading(true);
+    setFormError(null);
     try {
       const normalized = normalizeUsername(username);
       const login = role === "coadmin" ? coadminLogin : staffLogin;
       const response = await login({ username: normalized, password });
       applyRememberUsernamePreference(normalized, rememberUsername);
       setPassword("");
+      setRetryAfterSeconds(0);
       if ("requiresPasswordChange" in response) {
         sessionStorage.setItem(tenantPasswordChangeStorageKey(role), JSON.stringify({ changeToken: response.changeToken, username: normalized }));
         router.replace(changeRoute as Route);
@@ -56,8 +79,19 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
       }
       router.replace(getPostLoginRoute(response.user.role) as Route);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Sign in failed.");
+      if (error instanceof ApiClientError && error.isRateLimited) {
+        const seconds = error.retryAfterSeconds && error.retryAfterSeconds > 0 ? error.retryAfterSeconds : 60;
+        setRetryAfterSeconds(seconds);
+        const message = loginErrorMessage(error, seconds);
+        setFormError(message);
+        toast.error(message);
+      } else {
+        const message = loginErrorMessage(error);
+        setFormError(message);
+        toast.error(message);
+      }
     } finally {
+      pendingRef.current = false;
       setLoading(false);
     }
   }
@@ -69,6 +103,9 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
       </main>
     );
   }
+
+  const lockedOut = retryAfterSeconds > 0;
+  const signInDisabled = loading || lockedOut;
 
   return (
     <main className="min-h-screen bg-[linear-gradient(135deg,#f8fbfa,#eef4f2)] px-4 py-10">
@@ -90,6 +127,7 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
               placeholder="Username"
               {...loginUsernameInputProps}
               required
+              disabled={loading}
             />
           </label>
           <label className="mt-3 grid gap-2 text-sm font-medium">
@@ -100,6 +138,7 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
               placeholder="Password"
               {...loginPasswordInputProps}
               required
+              disabled={loading}
             />
           </label>
 
@@ -109,12 +148,24 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
               className="size-4 rounded border"
               checked={rememberUsername}
               onChange={(event) => setRememberUsername(event.target.checked)}
+              disabled={loading}
             />
             Remember username
           </label>
 
-          <Button className="mt-5 w-full" disabled={loading}>
-            {loading ? "Please wait..." : "Sign in"}
+          {formError ? (
+            <p className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+              {formError}
+              {lockedOut ? ` (${formatLoginRetryCountdown(retryAfterSeconds)} remaining)` : null}
+            </p>
+          ) : null}
+
+          <Button className="mt-5 w-full" disabled={signInDisabled}>
+            {loading
+              ? "Please wait..."
+              : lockedOut
+                ? `Try again in ${formatLoginRetryCountdown(retryAfterSeconds)}`
+                : "Sign in"}
           </Button>
         </form>
       </section>

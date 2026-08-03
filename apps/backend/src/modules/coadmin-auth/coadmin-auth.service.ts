@@ -7,10 +7,16 @@ import { coadminLoginSchema, tenantPasswordChangeSchema } from "@atlas/shared";
 import { z } from "zod";
 import type Redis from "ioredis";
 import type { Env } from "../../config/env";
-import { AppError, unauthorized } from "../../utils/errors";
+import { unauthorized } from "../../utils/errors";
 import { AuditService } from "../audit/audit.service";
 import { TokenService } from "../auth/token.service";
 import type { RequestUser } from "../auth/auth.types";
+import {
+  assertTenantLoginNotRateLimited,
+  clearTenantLoginFailures,
+  recordTenantLoginFailure,
+  type TenantLoginRole
+} from "./login-rate-limit";
 
 const passwordChangePrefix = "tenant-password-change:";
 const genericLoginMessage = "Invalid username or password.";
@@ -46,25 +52,30 @@ export class CoadminAuthService {
 
   /**
    * Verifies username and password, then either requires password change or creates a session.
+   * Rate limits count only failed credential checks (not refresh/me/page loads/success).
    */
   public async login(request: FastifyRequest, reply: FastifyReply): Promise<TenantLoginResponse> {
     const input = coadminLoginSchema.parse(request.body);
-    await this.enforceRateLimit(`${this.role.toLowerCase()}-login:ip:${request.ip}`, 10, 900);
-    await this.enforceRateLimit(`${this.role.toLowerCase()}-login:account:${input.username}`, 8, 900);
+    const roleKey = this.loginRoleKey();
+    await assertTenantLoginNotRateLimited(this.redis, roleKey, input.username, request.ip);
     const user = await this.prisma.user.findUnique({ where: { username: input.username }, include: { workspace: true } });
     if (!user || user.role !== this.role) {
       await this.auditLoginFailure(null, null, request);
+      await this.recordFailedLogin(input.username, request);
       throw unauthorized(genericLoginMessage);
     }
     if (!this.isLoginAllowed(user)) {
       await this.auditLoginFailure(user.workspaceId, user.id, request);
+      await this.recordFailedLogin(input.username, request);
       throw unauthorized("Account is not active.");
     }
     const passwordValid = await bcrypt.compare(input.password, user.passwordHash);
     if (!passwordValid) {
       await this.auditLoginFailure(user.workspaceId, user.id, request);
+      await this.recordFailedLogin(input.username, request);
       throw unauthorized(genericLoginMessage);
     }
+    await clearTenantLoginFailures(this.redis, roleKey, input.username, request.ip);
     if (user.mustChangePassword) {
       const changeToken = randomBytes(32).toString("base64url");
       await this.redis.set(`${passwordChangePrefix}${this.hashToken(changeToken)}`, user.id, "EX", 900);
@@ -250,10 +261,12 @@ export class CoadminAuthService {
     return user.role === this.role && user.status === "ACTIVE" && !user.mustChangePassword && user.workspace?.status === "ACTIVE";
   }
 
-  private async enforceRateLimit(key: string, max: number, ttlSeconds: number): Promise<void> {
-    const count = await this.redis.incr(key);
-    if (count === 1) await this.redis.expire(key, ttlSeconds);
-    if (count > max) throw new AppError(429, "RATE_LIMITED", "Too many attempts. Please wait and try again.");
+  private loginRoleKey(): TenantLoginRole {
+    return this.role === "COADMIN" ? "coadmin" : "staff";
+  }
+
+  private async recordFailedLogin(username: string, request: FastifyRequest): Promise<void> {
+    await recordTenantLoginFailure(this.redis, this.loginRoleKey(), username, request.ip);
   }
 
   private async auditLoginFailure(workspaceId: string | null, actorId: string | null, request: FastifyRequest): Promise<void> {

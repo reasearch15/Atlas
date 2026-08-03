@@ -4,10 +4,25 @@ import type { CrmInboxCountsDto } from "@atlas/shared";
 import type { Route } from "next";
 import { Inbox, RefreshCw, Search } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
-import { useDeferredValue, useEffect, useMemo, useRef, useState, useTransition, type ReactNode } from "react";
+import {
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+  type ReactNode
+} from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAtlasBreakpoint } from "@/hooks/use-atlas-breakpoint";
+import {
+  captureSelectedRowAnchor,
+  ensureSelectedRowNearestVisible,
+  restoreSelectedRowAnchor,
+  type SelectedRowAnchor
+} from "./inbox-list-anchor";
 import { ConversationRow } from "./conversation-row";
 import { useInbox } from "./inbox-provider";
 import { computeInboxCounts, filterConversations, type InboxFilter } from "./inbox-utils";
@@ -40,6 +55,8 @@ export function InboxShell({ children }: { readonly children: ReactNode }) {
   const [pendingChatId, setPendingChatId] = useState<string | null>(null);
   const listScrollRef = useRef<HTMLDivElement | null>(null);
   const savedScrollTop = useRef(0);
+  const visibleOrderKeyRef = useRef("");
+  const pendingListAnchorRef = useRef<SelectedRowAnchor | null>(null);
 
   useEffect(() => {
     setPendingChatId(null);
@@ -58,6 +75,31 @@ export function InboxShell({ children }: { readonly children: ReactNode }) {
     () => filterConversations(conversations, filter, deferredQuery, currentUserId),
     [conversations, currentUserId, deferredQuery, filter]
   );
+  // Selection is URL/id based — never pick another row when the selected chat
+  // leaves the active filter (row simply disappears from the filtered list).
+  const selectedVisibleInFilter = Boolean(
+    selectedChatId && visible.some((row) => row.chat.id === selectedChatId)
+  );
+
+  const visibleOrderKey = visible.map((row) => row.chat.id).join("\0");
+  // Capture selected-row viewport offset before React commits the reordered DOM.
+  if (visibleOrderKey !== visibleOrderKeyRef.current) {
+    if (selectedChatId && selectedVisibleInFilter && listScrollRef.current) {
+      pendingListAnchorRef.current = captureSelectedRowAnchor(listScrollRef.current, selectedChatId);
+    } else {
+      pendingListAnchorRef.current = null;
+    }
+    visibleOrderKeyRef.current = visibleOrderKey;
+  }
+
+  useLayoutEffect(() => {
+    const anchor = pendingListAnchorRef.current;
+    pendingListAnchorRef.current = null;
+    const container = listScrollRef.current;
+    if (!anchor || !container || !selectedChatId) return;
+    restoreSelectedRowAnchor(container, anchor);
+    ensureSelectedRowNearestVisible(container, selectedChatId);
+  }, [visibleOrderKey, selectedChatId]);
 
   const isMobile = breakpoint === "mobile";
   const showList = !isMobile || !selectedFromUrl;

@@ -5,6 +5,8 @@ export interface ApiErrorBody {
     readonly code: string;
     readonly message: string;
     readonly requestId: string;
+    /** Present on RATE_LIMITED responses — safe client countdown seconds. */
+    readonly retryAfterSeconds?: number;
   };
 }
 

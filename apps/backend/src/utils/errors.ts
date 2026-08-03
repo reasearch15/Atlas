@@ -1,14 +1,20 @@
+export interface AppErrorDetails {
+  readonly retryAfterSeconds?: number;
+}
+
 export class AppError extends Error {
   public readonly statusCode: number;
   public readonly code: string;
+  public readonly details: AppErrorDetails | undefined;
 
   /**
    * Creates a typed application error suitable for API serialization.
    */
-  public constructor(statusCode: number, code: string, message: string) {
+  public constructor(statusCode: number, code: string, message: string, details?: AppErrorDetails) {
     super(message);
     this.statusCode = statusCode;
     this.code = code;
+    this.details = details;
   }
 }
 

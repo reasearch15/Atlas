@@ -35,6 +35,7 @@ import type {
 import { useAuthStore } from "@/stores/auth-store";
 import { clearRoleAuthBootstrap, markRoleAuthenticated } from "@/lib/auth-bootstrap";
 import { handleFailedSessionRefresh, refreshPathFor, refreshSessionForPath } from "@/lib/auth-refresh";
+import { ApiClientError } from "@/lib/api-client-error";
 import { publicApiUrl } from "@/lib/public-api-url";
 import { clearRoleSensitiveClientCaches } from "@/lib/sensitive-cache";
 
@@ -89,9 +90,17 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}, retryO
 
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
-    const code = body?.error.code;
+    const code = body?.error.code ?? "";
     const message = body?.error.message ?? "Request failed";
-    throw new Error(code ? `${code}: ${message}` : message);
+    const retryAfterHeader = response.headers?.get?.("Retry-After") ?? null;
+    const retryAfterFromHeader = retryAfterHeader ? Number.parseInt(retryAfterHeader, 10) : NaN;
+    const retryAfterSeconds =
+      typeof body?.error.retryAfterSeconds === "number"
+        ? body.error.retryAfterSeconds
+        : Number.isFinite(retryAfterFromHeader)
+          ? retryAfterFromHeader
+          : undefined;
+    throw new ApiClientError(code, message, response.status, retryAfterSeconds);
   }
 
   return (await response.json()) as T;
