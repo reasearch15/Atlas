@@ -21,6 +21,7 @@ import { CrmPanel, useCrmConversationPanel } from "./crm-panel";
 import { MediaMessageBody } from "./media-message-body";
 import { MessageComposer } from "./message-composer";
 import { MessageHoverActions } from "./message-hover-actions";
+import { DeleteMessageDialog, type DeleteMessageScope } from "./delete-message-dialog";
 import { OutgoingDeliveryStatus } from "./outgoing-delivery-status";
 import { OutgoingAttribution } from "./outgoing-attribution";
 
@@ -53,6 +54,8 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [panelOpen, setPanelOpen] = useState(false);
   const [replyTo, setReplyTo] = useState<TelegramMessageDto | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<TelegramMessageDto | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const crm = useCrmConversationPanel(chat.id);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -83,6 +86,19 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
   const applyIncomingMessage = useCallback(
     (incoming: TelegramMessageDto) => {
       if (incoming.chatId !== chatIdRef.current) return;
+      if (incoming.isDeleted) {
+        setMessages((current) => {
+          const next = current.filter(
+            (row) => row.id !== incoming.id && row.telegramMessageId !== incoming.telegramMessageId
+          );
+          rememberChatMessages(chatIdRef.current, next);
+          return next;
+        });
+        if (replyTo?.id === incoming.id) {
+          setReplyTo(null);
+        }
+        return;
+      }
       const nearBottom = isNearBottom();
       stickToBottomRef.current = nearBottom;
       setMessages((current) => {
@@ -107,7 +123,7 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
         setNewMessageCount((count) => count + 1);
       }
     },
-    [isNearBottom, scrollToBottom, setMessages]
+    [isNearBottom, replyTo?.id, scrollToBottom, setMessages]
   );
 
   const applyIncomingRef = useRef(applyIncomingMessage);
@@ -207,6 +223,33 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
       const text = retryError instanceof Error ? retryError.message : "Retry failed.";
       toast.error(text);
       setError(text);
+    }
+  }
+
+  async function handleDeleteConfirm(scope: DeleteMessageScope): Promise<void> {
+    if (!deleteTarget) return;
+    const target = deleteTarget;
+    setDeleting(true);
+    try {
+      const idempotencyKey = `delete:${target.id}:${scope}:${crypto.randomUUID()}`;
+      const result = await api.deleteMessage(target.id, scope, idempotencyKey);
+      if (result.status === "DELETED") {
+        setMessages((current) => {
+          const next = current.filter((row) => row.id !== target.id);
+          rememberChatMessages(chat.id, next);
+          return next;
+        });
+        toast.success(scope === "ATLAS_ONLY" ? "Removed from Atlas" : "Message deleted");
+      } else {
+        toast.message("Delete queued — waiting for Telegram…");
+      }
+      setDeleteTarget(null);
+    } catch (deleteError) {
+      const text = deleteError instanceof Error ? deleteError.message : "Delete failed.";
+      toast.error(text);
+      setError(text);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -333,7 +376,9 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
                 );
               }
               const message = item.message;
+              if (message.isDeleted) return null;
               const outgoing = message.direction === "OUTBOUND";
+              const canDelete = role === "COADMIN" || role === "PLATFORM_ADMIN";
               return (
                 <article
                   key={message.id}
@@ -342,16 +387,16 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
                   <div className={`relative max-w-[85%] sm:max-w-[65%] ${outgoing ? "ml-auto" : "mr-auto"}`}>
                     <MessageHoverActions
                       outgoing={outgoing}
-                      canDelete={outgoing}
+                      canDelete={canDelete}
                       onReply={() => setReplyTo(message)}
                       onCopy={() => copyMessage(message)}
                       onForward={() => {
                         toast.message("Forward stays in the CRM roadmap — copy or reply for now.");
                       }}
-                      {...(outgoing
+                      {...(canDelete
                         ? {
                             onDelete: () => {
-                              toast.message("Delete is reserved for operator moderation tooling.");
+                              setDeleteTarget(message);
                             }
                           }
                         : {})}
@@ -456,6 +501,15 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
           <CrmPanel state={crm} identity={identity} avatarColor={color} onClose={() => setPanelOpen(false)} embedded />
         </BottomSheet>
       ) : null}
+
+      <DeleteMessageDialog
+        open={deleteTarget !== null}
+        loading={deleting}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+        onConfirm={(scope) => void handleDeleteConfirm(scope)}
+      />
     </div>
   );
 }

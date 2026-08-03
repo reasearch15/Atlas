@@ -13,3 +13,4 @@ export * from "./telegram-media";
 export * from "./telegram-media-url";
 export * from "./telegram-account-deletion";
 export * from "./telegram-account-actions";
+export * from "./telegram-message-deletion";

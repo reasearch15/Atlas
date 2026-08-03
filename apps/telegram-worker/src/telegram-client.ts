@@ -109,6 +109,19 @@ export class TelegramAuthNetworkTimeoutError extends Error {
   }
 }
 
+/**
+ * Raised when Telegram rejects a delete-for-everyone request (permissions / policy).
+ */
+export class SafeTelegramDeleteError extends Error {
+  public readonly code: string;
+
+  public constructor(code: string, message: string) {
+    super(message);
+    this.name = "SafeTelegramDeleteError";
+    this.code = code;
+  }
+}
+
 export type TelegramRuntime = {
   readonly mode: TelegramClientMode;
   readonly client: {
@@ -136,12 +149,17 @@ export type TelegramRuntime = {
       }
     ) => Promise<unknown>;
     downloadMedia?: (message: unknown, options?: Record<string, unknown>) => Promise<Buffer | string | null>;
+    deleteMessages?: (
+      entity: unknown,
+      messageIds: number[],
+      params?: { revoke?: boolean }
+    ) => Promise<unknown>;
     sendCode: (credentials: { apiId: number; apiHash: string }, phoneNumber: string) => Promise<unknown>;
     signInWithPassword: (
       credentials: { apiId: number; apiHash: string },
       authParams: { password: () => Promise<string>; onError: (error: Error) => Promise<boolean> }
     ) => Promise<unknown>;
-    addEventHandler: (handler: (event: unknown) => void, eventBuilder: unknown) => void;
+    addEventHandler: (handler: (event: unknown) => void, eventBuilder?: unknown) => void;
     invoke: (request: unknown) => Promise<unknown>;
   };
   readonly Api: Record<string, unknown>;
@@ -455,6 +473,88 @@ export class TelegramClientAdapter {
     };
     await runtime.client.invoke(new Api.messages.ReadHistory({ peer: resolved.inputPeer, maxId }));
     return { ok: true, maxId };
+  }
+
+  /**
+   * Deletes messages for a peer via GramJS.
+   * Uses client.deleteMessages with revoke=true for private/basic chats;
+   * channels/supergroups use the same client API which maps to channels.DeleteMessages.
+   */
+  public async deleteMessages(
+    runtime: TelegramRuntime,
+    hints: PeerResolutionHints,
+    telegramMessageIds: readonly string[],
+    options?: { readonly revoke?: boolean }
+  ): Promise<{ readonly deletedIds: readonly string[] }> {
+    const ids = telegramMessageIds
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    if (ids.length === 0) {
+      throw new Error("TELEGRAM_DELETE_MESSAGE_ID_INVALID");
+    }
+    const resolved = await this.resolvePeer(runtime, hints);
+    const revoke = options?.revoke !== false;
+    if (typeof runtime.client.deleteMessages !== "function") {
+      throw new Error("TELEGRAM_DELETE_UNSUPPORTED");
+    }
+    try {
+      await runtime.client.deleteMessages(resolved.entity ?? resolved.inputPeer, ids, { revoke });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/MESSAGE_DELETE_FORBIDDEN|CHAT_ADMIN_REQUIRED|MESSAGE_ID_INVALID/i.test(message)) {
+        throw new SafeTelegramDeleteError(
+          /CHAT_ADMIN_REQUIRED/i.test(message) ? "TELEGRAM_DELETE_ADMIN_REQUIRED" : "TELEGRAM_DELETE_FORBIDDEN",
+          /CHAT_ADMIN_REQUIRED/i.test(message)
+            ? "Telegram does not allow this account to delete that message for everyone."
+            : "Telegram rejected deleting this message for everyone."
+        );
+      }
+      throw error;
+    }
+    return { deletedIds: ids.map(String) };
+  }
+
+  /**
+   * Registers handlers for native Telegram message deletion updates.
+   */
+  public listenForDeletedMessages(
+    runtime: TelegramRuntime,
+    handler: (input: {
+      readonly telegramMessageIds: readonly string[];
+      readonly channelId?: string | null;
+    }) => Promise<void>
+  ): void {
+    runtime.client.addEventHandler((update: unknown) => {
+      void (async () => {
+        const value = (update ?? {}) as Record<string, unknown>;
+        const className = String(value.className ?? value._ ?? "");
+        try {
+          if (className === "UpdateDeleteMessages" || className.includes("UpdateDeleteMessages")) {
+            const messages = Array.isArray(value.messages) ? value.messages.map(String) : [];
+            if (messages.length > 0) {
+              await handler({ telegramMessageIds: messages, channelId: null });
+            }
+            return;
+          }
+          if (className === "UpdateDeleteChannelMessages" || className.includes("UpdateDeleteChannelMessages")) {
+            const messages = Array.isArray(value.messages) ? value.messages.map(String) : [];
+            const channelId = value.channelId != null ? String(value.channelId) : null;
+            if (messages.length > 0) {
+              await handler({ telegramMessageIds: messages, channelId });
+            }
+          }
+        } catch (error) {
+          const safe = sanitizeTelegramError(error, false);
+          console.error(
+            JSON.stringify({
+              event: "telegram_live.delete_handler_failed",
+              code: safe.code ?? safe.name,
+              message: safe.message
+            })
+          );
+        }
+      })();
+    });
   }
 
   /**

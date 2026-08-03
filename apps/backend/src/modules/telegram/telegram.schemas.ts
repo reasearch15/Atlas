@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   createTelegramAccountSchema,
   telegramCodeSchema,
+  telegramDeleteMessageSchema,
   telegramMediaPresignSchema,
   telegramPasswordSchema,
   telegramPhoneSchema,
@@ -36,5 +37,6 @@ export const phoneBodySchema = telegramPhoneSchema;
 export const codeBodySchema = telegramCodeSchema;
 export const passwordBodySchema = telegramPasswordSchema;
 export const sendMessageBodySchema = telegramSendMessageSchema;
+export const deleteMessageBodySchema = telegramDeleteMessageSchema;
 export const sendMediaBodySchema = telegramSendMediaSchema;
 export const mediaPresignBodySchema = telegramMediaPresignSchema;

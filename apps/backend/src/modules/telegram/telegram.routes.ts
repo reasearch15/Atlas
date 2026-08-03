@@ -1,12 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import {
+  deleteMessageBodySchema,
   telegramAccountParamsSchema,
   telegramChatIdParamsSchema,
   telegramChatParamsSchema,
   telegramMediaVariantQuerySchema,
   telegramMessageIdParamsSchema
 } from "./telegram.schemas";
-import { telegramManageGuard, telegramReadGuard, telegramSendGuard } from "./telegram.permissions";
+import { telegramManageGuard, telegramReadGuard, telegramSendGuard, telegramDeleteGuard } from "./telegram.permissions";
 import { TelegramService } from "./telegram.service";
 import { TelegramMediaProxyService } from "./telegram-media-proxy.service";
 
@@ -120,6 +121,13 @@ export async function telegramRoutes(app: FastifyInstance): Promise<void> {
   app.post("/messages/:messageId/retry", { preHandler: [telegramSendGuard(app)] }, async (request) => {
     const params = telegramMessageIdParamsSchema.parse(request.params);
     return service.retryFailedOutboundMessage(request.user!, params.messageId);
+  });
+
+  app.delete("/messages/:messageId", { preHandler: [telegramDeleteGuard(app)] }, async (request, reply) => {
+    const params = telegramMessageIdParamsSchema.parse(request.params);
+    const body = deleteMessageBodySchema.parse(request.body ?? {});
+    const result = await service.deleteMessage(request.user!, params.messageId, body);
+    return reply.status(result.statusCode).send(result.body);
   });
 
   app.post("/chats/:chatId/read", { preHandler: [telegramReadGuard(app)] }, async (request) => {

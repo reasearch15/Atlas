@@ -11,6 +11,7 @@ import type {
 import {
   buildCrmContactDisplayTitle,
   buildTelegramMessageMediaPath,
+  classifyMessageOrigin,
   contentTypeToMediaType,
   formatTelegramMediaPreview,
   isUsableHumanDisplayTitle,
@@ -21,6 +22,7 @@ import { decryptSecret, encryptSecret, type EncryptedSecret } from "@atlas/share
 import {
   createAccountBodySchema,
   codeBodySchema,
+  deleteMessageBodySchema,
   mediaPresignBodySchema,
   passwordBodySchema,
   phoneBodySchema,
@@ -37,10 +39,16 @@ import {
   applyChatPrivacy,
   applyMessagePrivacy
 } from "../privacy/customer-privacy-mapper";
-import type { Role, TelegramAccountPermanentDeleteResponse } from "@atlas/shared";
+import type { Role, TelegramAccountPermanentDeleteResponse, TelegramDeleteMessageInput } from "@atlas/shared";
 import { TelegramAccountPermanentDeleteService } from "./telegram-account-permanent-delete.service";
 import { signMediaAccessTicket, withMediaAccessTicket } from "./media-access-ticket";
-
+import {
+  assertDeletableTelegramMessage,
+  buildMessageDeletedEvent,
+  deleteUnreferencedMediaKeys,
+  refreshChatPreviewAfterDeletion,
+  softDeleteMessageRow
+} from "./telegram-message-delete";
 const manageableStates: readonly TelegramAccountStatus[] = [
   "PENDING",
   "AUTHORIZING",
@@ -421,16 +429,9 @@ export class TelegramService {
       throw telegramNotFound();
     }
 
-    const peerType = (chat.peerType || "").toUpperCase();
-    const isUserPeer =
-      peerType === "USER" || chat.chatType === "PRIVATE" || (!chat.telegramChatId.startsWith("-") && !peerType);
-    if (isUserPeer && !chat.accessHash) {
-      throw new AppError(
-        409,
-        "PEER_IDENTITY_INCOMPLETE",
-        "This contact is missing a Telegram access hash. Wait for a new inbound message or run identity backfill, then retry."
-      );
-    }
+    // Always allow explicit Retry for FAILED_* Atlas messages. The worker resolves InputPeer from
+    // stored access_hash / live entity cache / dialogs; unresolved peers stay FAILED_RETRYABLE
+    // (TELEGRAM_PEER_UNRESOLVED) so a later inbound identity repair can make Retry succeed.
 
     const command = await this.app.prisma.telegramOutboundCommand.findFirst({
       where: {
@@ -489,6 +490,235 @@ export class TelegramService {
     });
 
     return this.toMessageDto(updatedMessage, chat, user);
+  }
+
+  /**
+   * Deletes a Telegram message for Coadmin / Platform Admin.
+   * EVERYONE enqueues a durable worker command; ATLAS_ONLY soft-deletes locally without calling Telegram.
+   */
+  public async deleteMessage(
+    user: RequestUser,
+    messageId: string,
+    body: unknown
+  ): Promise<{
+    readonly statusCode: number;
+    readonly body:
+      | TelegramMessageDto
+      | {
+          readonly messageId: string;
+          readonly status: "QUEUED" | "DELETED";
+          readonly scope: "EVERYONE" | "ATLAS_ONLY";
+        };
+  }> {
+    this.assertMessageDeleteAllowed(user);
+    const input = deleteMessageBodySchema.parse(body ?? {}) as TelegramDeleteMessageInput;
+    const workspaceId = user.workspaceId!;
+
+    const message = await this.app.prisma.telegramMessage.findFirst({
+      where: { id: messageId, workspaceId }
+    });
+    if (!message) {
+      throw telegramNotFound("Message was not found.");
+    }
+
+    const chat = await this.app.prisma.telegramChat.findFirst({
+      where: { id: message.telegramChatDbId, workspaceId }
+    });
+    if (!chat) {
+      throw telegramNotFound();
+    }
+
+    try {
+      assertDeletableTelegramMessage({
+        isDevelopmentFixture: message.isDevelopmentFixture,
+        telegramChatId: message.telegramChatId,
+        telegramMessageId: message.telegramMessageId
+      });
+    } catch (error) {
+      const err = error as { statusCode?: number; code?: string; message?: string };
+      throw new AppError(err.statusCode ?? 400, err.code ?? "TELEGRAM_DELETE_REJECTED", err.message ?? "Cannot delete this message.");
+    }
+
+    // Idempotent: already soft-deleted.
+    if (message.deletedAt) {
+      await this.audit.record({
+        workspaceId,
+        actorId: user.id,
+        action: "telegram.message.delete",
+        metadata: {
+          messageId: message.id,
+          telegramMessageId: message.telegramMessageId,
+          chatId: chat.id,
+          scope: message.deletionScope ?? input.scope,
+          result: "ALREADY_DELETED",
+          actorRole: user.role
+        }
+      });
+      return {
+        statusCode: 200,
+        body: {
+          messageId: message.id,
+          status: "DELETED",
+          scope: (message.deletionScope as "EVERYONE" | "ATLAS_ONLY") ?? input.scope
+        }
+      };
+    }
+
+    const idempotencyKey = (input.idempotencyKey?.trim() || `delete:${message.id}:${input.scope}`).slice(0, 160);
+
+    if (input.scope === "ATLAS_ONLY") {
+      const deletedAt = new Date();
+      const mediaKeys = (
+        await softDeleteMessageRow(this.app.prisma, {
+          messageId: message.id,
+          deletedAt,
+          deletedByUserId: user.id,
+          deletionScope: "ATLAS_ONLY",
+          originalContentType: message.contentType,
+          priorMediaStorageKey: message.mediaStorageKey,
+          priorThumbnailStorageKey: message.thumbnailStorageKey
+        })
+      ).mediaKeys;
+
+      const preview = await refreshChatPreviewAfterDeletion(this.app.prisma, chat.id);
+      await deleteUnreferencedMediaKeys(this.app.prisma, (key) => this.app.storage.deleteObject(key), mediaKeys);
+
+      const event = buildMessageDeletedEvent({
+        workspaceId,
+        telegramAccountId: message.telegramAccountId,
+        chatId: chat.id,
+        messageId: message.id,
+        telegramMessageId: message.telegramMessageId,
+        scope: "ATLAS_ONLY",
+        deletedAt,
+        deletedBy: { id: user.id, name: user.name },
+        lastMessagePreview: preview.lastMessagePreview,
+        lastMessageAt: preview.lastMessageAt,
+        lastMessageDirection: preview.lastMessageDirection
+      });
+      await this.app.redis.publish("atlas.workspace-events", JSON.stringify(event));
+
+      await this.audit.record({
+        workspaceId,
+        actorId: user.id,
+        action: "telegram.message.delete",
+        metadata: {
+          messageId: message.id,
+          telegramMessageId: message.telegramMessageId,
+          chatId: chat.id,
+          scope: "ATLAS_ONLY",
+          result: "DELETED",
+          actorRole: user.role
+        }
+      });
+
+      return { statusCode: 200, body: { messageId: message.id, status: "DELETED", scope: "ATLAS_ONLY" } };
+    }
+
+    // EVERYONE — require a real Telegram message id (not pending local placeholders).
+    const remoteId = message.telegramMessageId;
+    if (remoteId.startsWith("pending:") || remoteId.startsWith("upload:")) {
+      throw new AppError(
+        409,
+        "TELEGRAM_DELETE_NOT_ON_TELEGRAM",
+        "This message was never delivered to Telegram. Use Remove from Atlas only."
+      );
+    }
+
+    const existingCommand = await this.app.prisma.telegramOutboundCommand.findUnique({
+      where: { idempotencyKey }
+    });
+    if (existingCommand && (existingCommand.status === "QUEUED" || existingCommand.status === "SENDING" || existingCommand.status === "SENT")) {
+      await this.audit.record({
+        workspaceId,
+        actorId: user.id,
+        action: "telegram.message.delete",
+        metadata: {
+          messageId: message.id,
+          telegramMessageId: message.telegramMessageId,
+          chatId: chat.id,
+          scope: "EVERYONE",
+          result: existingCommand.status === "SENT" ? "ALREADY_DELETED" : "ALREADY_QUEUED",
+          actorRole: user.role,
+          commandId: existingCommand.id
+        }
+      });
+      return {
+        statusCode: existingCommand.status === "SENT" ? 200 : 202,
+        body: {
+          messageId: message.id,
+          status: existingCommand.status === "SENT" ? "DELETED" : "QUEUED",
+          scope: "EVERYONE"
+        }
+      };
+    }
+
+    await this.app.prisma.telegramMessage.update({
+      where: { id: message.id },
+      data: {
+        telegramDeleteStatus: "QUEUED",
+        telegramDeleteError: null,
+        deletionScope: "EVERYONE",
+        deletedByUserId: user.id
+      }
+    });
+
+    const command = await this.app.prisma.telegramOutboundCommand.upsert({
+      where: { idempotencyKey },
+      update: {
+        status: "QUEUED",
+        lastError: null,
+        processedAt: null
+      },
+      create: {
+        workspaceId,
+        telegramAccountId: message.telegramAccountId,
+        telegramChatDbId: chat.id,
+        telegramChatId: chat.telegramChatId,
+        telegramMessageId: message.id,
+        requestedByUserId: user.id,
+        requestedBySessionId: user.sessionId,
+        operation: "DELETE_MESSAGE",
+        payloadJson: {
+          messageDbId: message.id,
+          telegramMessageId: message.telegramMessageId,
+          scope: "EVERYONE",
+          revoke: true
+        } as unknown as Prisma.InputJsonObject,
+        idempotencyKey
+      }
+    });
+
+    try {
+      const existingJob = await this.app.queues.telegramOutbound.getJob(command.id);
+      if (existingJob) {
+        await existingJob.remove().catch(() => undefined);
+      }
+      await this.app.queues.telegramOutbound.add(
+        "telegram-outbound",
+        { commandId: command.id },
+        { jobId: `${command.id}:delete:${command.attempts + 1}` }
+      );
+    } catch {
+      throw telegramWorkerUnavailable();
+    }
+
+    await this.audit.record({
+      workspaceId,
+      actorId: user.id,
+      action: "telegram.message.delete",
+      metadata: {
+        messageId: message.id,
+        telegramMessageId: message.telegramMessageId,
+        chatId: chat.id,
+        scope: "EVERYONE",
+        result: "QUEUED",
+        actorRole: user.role,
+        commandId: command.id
+      }
+    });
+
+    return { statusCode: 202, body: { messageId: message.id, status: "QUEUED", scope: "EVERYONE" } };
   }
 
   /**
@@ -1050,6 +1280,15 @@ export class TelegramService {
   }
 
   /**
+   * Coadmin and Platform Admin may delete messages. Staff is never allowed.
+   */
+  private assertMessageDeleteAllowed(user: RequestUser): void {
+    if (!user.workspaceId || (user.role !== "COADMIN" && user.role !== "PLATFORM_ADMIN")) {
+      throw forbidden();
+    }
+  }
+
+  /**
    * Allows Coadmin and Staff to read/send within their own workspace. Staff need
    * inbox read/send access to work conversations they claim or are assigned via CRM.
    */
@@ -1268,6 +1507,9 @@ export class TelegramService {
       internalSenderName?: string | null;
       sendStatus: string;
       workspaceId?: string;
+      deletedAt?: Date | null;
+      deletionScope?: string | null;
+      telegramDeleteStatus?: string | null;
     },
     chat: {
       title: string;
@@ -1371,7 +1613,10 @@ export class TelegramService {
         sentAt: message.telegramCreatedAt.toISOString(),
         editedAt: message.telegramEditedAt?.toISOString() ?? null,
         isEdited: Boolean(message.telegramEditedAt),
-        isDeleted: false,
+        isDeleted: Boolean(message.deletedAt),
+        deletedAt: message.deletedAt?.toISOString() ?? null,
+        deletionScope: (message.deletionScope as TelegramMessageDto["deletionScope"]) ?? null,
+        telegramDeleteStatus: (message.telegramDeleteStatus as TelegramMessageDto["telegramDeleteStatus"]) ?? "NONE",
         senderTelegramUserId: message.senderTelegramUserId,
         senderDisplayName: resolveSenderDisplayName(message.direction, chat),
         replyToTelegramMessageId: message.replyToTelegramMessageId,
@@ -1382,6 +1627,11 @@ export class TelegramService {
         internalSenderRole: (message.internalSenderRole as TelegramMessageDto["internalSenderRole"]) ?? null,
         internalSenderName: message.internalSenderName ?? null,
         attributionSource: message.internalSenderUserId ? "ATLAS" : message.direction === "OUTBOUND" ? "TELEGRAM_EXTERNAL" : null,
+        originKind: classifyMessageOrigin({
+          direction: message.direction,
+          internalSenderUserId: message.internalSenderUserId,
+          telegramMessageId: message.telegramMessageId
+        }),
         sendStatus: message.sendStatus
       },
       user.role as Role

@@ -147,6 +147,20 @@ enum TelegramOutboundOperation {
   MEDIA_BACKFILL
   PERMANENT_DELETE
   MARK_CHAT_READ
+  DELETE_MESSAGE
+}
+
+enum TelegramDeletionScope {
+  EVERYONE
+  ATLAS_ONLY
+}
+
+enum TelegramDeleteStatus {
+  NONE
+  QUEUED
+  DELETING
+  DELETED
+  FAILED
 }
 
 enum TelegramAccountDeletionStage {
@@ -252,6 +266,7 @@ model User {
   createdTelegramAccounts TelegramAccount[]         @relation("CreatedTelegramAccounts")
   createdDeveloperApps    DeveloperApp[]            @relation("CreatedDeveloperApps")
   sentTelegramMessages    TelegramMessage[]         @relation("InternalTelegramMessages")
+  deletedTelegramMessages TelegramMessage[]         @relation("DeletedTelegramMessages")
   telegramCommands        TelegramOutboundCommand[] @relation("RequestedTelegramCommands")
   ownedWorkspace           Workspace?                @relation("PrimaryWorkspaceCoadmin")
   platformAdmin           PlatformAdmin?
@@ -613,6 +628,11 @@ model TelegramMessage {
   internalSenderRole       UserRole?                  @map("internal_sender_role")
   internalSenderName       String?                    @map("internal_sender_name") @db.VarChar(120)
   sendStatus               TelegramSendStatus         @default(RECEIVED) @map("send_status")
+  deletedAt                DateTime?                  @map("deleted_at")
+  deletedByUserId          String?                    @map("deleted_by_user_id") @db.Uuid
+  deletionScope            TelegramDeletionScope?     @map("deletion_scope")
+  telegramDeleteStatus     TelegramDeleteStatus       @default(NONE) @map("telegram_delete_status")
+  telegramDeleteError      String?                    @map("telegram_delete_error") @db.VarChar(500)
   isDevelopmentFixture     Boolean                    @default(false) @map("is_development_fixture")
   fixtureKey               String?                    @unique @map("fixture_key") @db.VarChar(120)
   createdAt                DateTime                   @default(now()) @map("created_at")
@@ -621,11 +641,13 @@ model TelegramMessage {
   telegramAccount          TelegramAccount            @relation(fields: [telegramAccountId], references: [id], onDelete: Cascade)
   telegramChat             TelegramChat               @relation(fields: [telegramChatDbId], references: [id], onDelete: Cascade)
   internalSender           User?                      @relation("InternalTelegramMessages", fields: [internalSenderUserId], references: [id], onDelete: SetNull)
+  deletedBy                User?                      @relation("DeletedTelegramMessages", fields: [deletedByUserId], references: [id], onDelete: SetNull)
 
   @@unique([telegramAccountId, telegramChatId, telegramMessageId])
   @@index([workspaceId, telegramChatDbId, telegramCreatedAt])
   @@index([internalSenderUserId])
   @@index([mediaDownloadState])
+  @@index([deletedAt])
   @@map("telegram_messages")
 }
 

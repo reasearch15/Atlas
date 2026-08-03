@@ -165,6 +165,12 @@ export const telegramSendMessageSchema = z.object({
   replyToTelegramMessageId: z.string().trim().max(80).optional()
 });
 
+export const telegramDeleteMessageSchema = z.object({
+  scope: z.enum(["EVERYONE", "ATLAS_ONLY"]),
+  /** Client-generated key so repeated clicks do not enqueue duplicate DELETE_MESSAGE commands. */
+  idempotencyKey: z.string().trim().min(16).max(160).optional()
+});
+
 export const telegramSendMediaSchema = z.object({
   contentType: z.enum(["PHOTO", "VIDEO", "VOICE", "AUDIO", "DOCUMENT", "ANIMATION", "STICKER", "LOCATION", "CONTACT"]),
   caption: z.string().trim().max(1024).optional(),
@@ -215,5 +221,6 @@ export type UpdateDeveloperAppInput = z.infer<typeof updateDeveloperAppSchema>;
 export type CreateTelegramAccountInput = z.infer<typeof createTelegramAccountSchema>;
 export type TelegramAccountStatus = z.infer<typeof telegramAccountStatusSchema>;
 export type TelegramSendMessageInput = z.infer<typeof telegramSendMessageSchema>;
+export type TelegramDeleteMessageInput = z.infer<typeof telegramDeleteMessageSchema>;
 export type TelegramSendMediaInput = z.infer<typeof telegramSendMediaSchema>;
 export type TelegramMediaPresignInput = z.infer<typeof telegramMediaPresignSchema>;

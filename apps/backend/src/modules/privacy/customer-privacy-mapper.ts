@@ -8,6 +8,7 @@ import type {
 } from "@atlas/shared";
 import {
   CUSTOMER_PRIVACY_NOTICE,
+  classifyMessageOrigin,
   customerPrivacyCapabilities,
   formatTelegramUserFallbackTitle,
   looksLikeExternalIdentifier,
@@ -156,6 +157,9 @@ export function applyMessagePrivacy(dto: TelegramMessageDto, role: Role): Telegr
     editedAt: dto.editedAt,
     isEdited: dto.isEdited,
     isDeleted: dto.isDeleted,
+    deletedAt: dto.deletedAt ?? null,
+    deletionScope: dto.deletionScope ?? null,
+    telegramDeleteStatus: dto.telegramDeleteStatus ?? null,
     ...(caps.canViewExternalContactIds ? { senderTelegramUserId: dto.senderTelegramUserId ?? null } : {}),
     senderDisplayName: dto.senderDisplayName,
     replyToTelegramMessageId: dto.replyToTelegramMessageId,
@@ -168,6 +172,14 @@ export function applyMessagePrivacy(dto: TelegramMessageDto, role: Role): Telegr
     attributionSource:
       dto.attributionSource ??
       (dto.direction === "OUTBOUND" ? (dto.internalSenderUserId ? "ATLAS" : "TELEGRAM_EXTERNAL") : null),
+    originKind:
+      dto.originKind ??
+      classifyMessageOrigin({
+        direction: dto.direction,
+        internalSenderUserId: dto.internalSenderUserId,
+        ...(dto.attributionSource !== undefined ? { attributionSource: dto.attributionSource } : {}),
+        telegramMessageId: dto.telegramMessageId
+      }),
     sendStatus: dto.sendStatus
   };
 }
@@ -255,6 +267,10 @@ export function applyRealtimeEventPrivacy(
       ...event,
       message: applyMessagePrivacy(event.message, role)
     };
+  }
+  if (event.type === "telegram.message.deleted") {
+    // Deletion payloads carry no message body — pass through as-is.
+    return event;
   }
   if (event.type === "telegram_message.attribution_updated") {
     return {

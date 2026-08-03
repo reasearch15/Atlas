@@ -34,3 +34,14 @@ export function telegramSendGuard(app: FastifyInstance) {
     await app.requirePermission("telegram:message:send")(request, reply);
   };
 }
+
+/**
+ * Coadmin and Platform Admin may delete Telegram messages. Staff is never allowed.
+ */
+export function telegramDeleteGuard(app: FastifyInstance) {
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    await app.authenticate(request, reply);
+    await app.requireRole(["COADMIN", "PLATFORM_ADMIN"])(request, reply);
+    await app.requirePermission("telegram:message:delete")(request, reply);
+  };
+}

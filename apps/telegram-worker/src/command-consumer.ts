@@ -5,7 +5,7 @@ import Redis from "ioredis";
 import { classifyTelegramFailure, formatTelegramUserFallbackTitle, resolveSyncedUnreadCount, sanitizeTelegramError, shouldIgnoreTelegramDialog, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
 import { decryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
 import type { WorkerEnv } from "./env";
-import { TelegramClientAdapter, type NormalizedTextMessage, type TelegramApiCredentials, isUsableDisplayTitle, TelegramAuthNetworkTimeoutError } from "./telegram-client";
+import { TelegramClientAdapter, type NormalizedTextMessage, type TelegramApiCredentials, isUsableDisplayTitle, TelegramAuthNetworkTimeoutError, SafeTelegramDeleteError } from "./telegram-client";
 import { AccountLease } from "./heartbeat";
 import { messageCreatedEvent, chatUpdatedEvent, chatUpdatedFieldsFromRow } from "./update-normalizer";
 import { TelegramAuthorizationAttemptStore } from "./auth-attempt";
@@ -18,7 +18,7 @@ import {
   needsIdentityBackfillRow,
   type IdentityBackfillCounts
 } from "./chat-identity";
-import { createMediaObjectStore } from "./media-storage";
+import { createMediaObjectStore, type MediaObjectStore } from "./media-storage";
 import { runMediaBackfill } from "./media-pipeline";
 import { toTelegramMessageDto } from "./message-dto";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -32,6 +32,7 @@ import {
   type PeerResolutionHints,
   type ResolvedTelegramPeer
 } from "./entity-resolution";
+import { applySoftDeletedMessage } from "./message-deletion";
 
 const LEASE_ACQUIRE_TIMEOUT_MS = 3_000;
 
@@ -89,6 +90,10 @@ export function createCommandConsumer(prisma: PrismaClient, redis: Redis, env: W
       }
       if (command.operation === "MARK_CHAT_READ") {
         return processMarkChatReadJob(prisma, redis, adapter, lease, env, command);
+      }
+
+      if (command.operation === "DELETE_MESSAGE") {
+        return processDeleteMessageJob(prisma, redis, adapter, lease, env, store, command);
       }
 
       if (command.operation === "MEDIA_BACKFILL") {
@@ -626,7 +631,8 @@ async function markAccountFailure(
         error instanceof Error
           ? error.message
           : "This Telegram chat cannot be reached right now. Atlas has no access hash for this peer yet.",
-      retryable: false
+      // Keep retryable: another inbound Telegram update may repair peer_type/access_hash.
+      retryable: true
     };
   }
 
@@ -764,6 +770,140 @@ async function processMarkChatReadJob(
   }
 }
 
+async function processDeleteMessageJob(
+  prisma: PrismaClient,
+  redis: Redis,
+  adapter: TelegramClientAdapter,
+  lease: AccountLease,
+  _env: WorkerEnv,
+  store: MediaObjectStore,
+  command: CommandWithAccount
+): Promise<WorkerCommandResult> {
+  await prisma.telegramOutboundCommand.update({
+    where: { id: command.id },
+    data: { status: "SENDING", attempts: { increment: 1 } }
+  });
+
+  const payload = (command.payloadJson ?? {}) as {
+    messageDbId?: string;
+    telegramMessageId?: string;
+    scope?: "EVERYONE" | "ATLAS_ONLY";
+    revoke?: boolean;
+  };
+
+  const messageDbId = payload.messageDbId ?? command.telegramMessageId;
+  if (!messageDbId || !command.telegramChatDbId || !command.telegramChatId) {
+    throw new SafeTelegramWorkerError("TELEGRAM_DELETE_PAYLOAD_INVALID", "Delete command payload is incomplete.");
+  }
+
+  const message = await prisma.telegramMessage.findFirst({
+    where: { id: messageDbId, workspaceId: command.workspaceId, telegramAccountId: command.telegramAccountId }
+  });
+  if (!message) {
+    throw new SafeTelegramWorkerError("TELEGRAM_MESSAGE_NOT_FOUND", "Message to delete was not found.");
+  }
+
+  if (message.deletedAt) {
+    await prisma.telegramOutboundCommand.update({
+      where: { id: command.id },
+      data: { status: "SENT", processedAt: new Date(), lastError: null }
+    });
+    return { ok: true, accountId: command.telegramAccountId, occurredAt: new Date().toISOString(), authorizationState: "CONNECTED" };
+  }
+
+  const chat = await prisma.telegramChat.findUnique({ where: { id: command.telegramChatDbId } });
+  if (!chat) {
+    throw new SafeTelegramWorkerError("TELEGRAM_CHAT_NOT_FOUND", "Chat for delete was not found.");
+  }
+
+  try {
+    await prisma.telegramMessage.update({
+      where: { id: message.id },
+      data: { telegramDeleteStatus: "DELETING", telegramDeleteError: null }
+    });
+
+    const liveRuntime = getLiveSyncRuntime(command.telegramAccountId);
+    if (!liveRuntime) {
+      throw new SafeTelegramWorkerError(
+        "TELEGRAM_LIVE_RUNTIME_UNAVAILABLE",
+        "Telegram live session is not connected for this account."
+      );
+    }
+    if (!(await lease.isOwnedByThisWorker(command.telegramAccountId))) {
+      const acquired = await lease.acquireWithTimeout(command.telegramAccountId, 3_000);
+      if (!acquired) {
+        throw new SafeTelegramWorkerError("TELEGRAM_ACCOUNT_LEASE_BUSY", "Telegram account lease is busy.");
+      }
+    }
+    await lease.renew(command.telegramAccountId);
+
+    const hints = peerHintsFromChat(chat);
+    try {
+      await adapter.deleteMessages(liveRuntime, hints, [message.telegramMessageId], {
+        revoke: payload.revoke !== false
+      });
+    } catch (error) {
+      if (error instanceof SafeTelegramDeleteError) {
+        throw new SafeTelegramWorkerError(error.code, error.message);
+      }
+      throwAsSafePeerError(error);
+    }
+
+    const deletedBy = await prisma.user.findUnique({
+      where: { id: command.requestedByUserId },
+      select: { id: true, name: true }
+    });
+
+    await applySoftDeletedMessage(prisma, redis, store, {
+      messageId: message.id,
+      workspaceId: command.workspaceId,
+      telegramAccountId: command.telegramAccountId,
+      chatDbId: chat.id,
+      telegramMessageId: message.telegramMessageId,
+      scope: "EVERYONE",
+      deletedByUserId: command.requestedByUserId,
+      deletedByName: deletedBy?.name ?? null,
+      originalContentType: message.contentType,
+      priorMediaStorageKey: message.mediaStorageKey,
+      priorThumbnailStorageKey: message.thumbnailStorageKey
+    });
+
+    await prisma.telegramOutboundCommand.update({
+      where: { id: command.id },
+      data: { status: "SENT", processedAt: new Date(), lastError: null, telegramMessageId: message.id }
+    });
+    await clearAccountOperationalErrors(prisma, command.telegramAccountId);
+    return { ok: true, accountId: command.telegramAccountId, occurredAt: new Date().toISOString(), authorizationState: "CONNECTED" };
+  } catch (error) {
+    const failure =
+      error instanceof SafeTelegramWorkerError
+        ? {
+            safeErrorCode: error.code,
+            safeUserMessage: error.message,
+            retryable: isSafeWorkerErrorRetryable(error.code)
+          }
+        : await markAccountFailure(prisma, command, error);
+
+    // Never convert a failed Telegram deletion into a local soft-delete.
+    await prisma.telegramMessage.updateMany({
+      where: { id: message.id, deletedAt: null },
+      data: {
+        telegramDeleteStatus: "FAILED",
+        telegramDeleteError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage)
+      }
+    });
+    await prisma.telegramOutboundCommand.update({
+      where: { id: command.id },
+      data: {
+        status: failure.retryable && command.attempts < 4 ? "FAILED_RETRYABLE" : "FAILED_PERMANENT",
+        lastError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage),
+        processedAt: new Date()
+      }
+    });
+    throw new SafeTelegramWorkerError(failure.safeErrorCode, failure.safeUserMessage);
+  }
+}
+
 async function processSendMediaJob(
   prisma: PrismaClient,
   redis: Redis,
@@ -837,7 +977,14 @@ async function processSendMediaJob(
     }
 
     const chatRow = await prisma.telegramChat.findUnique({ where: { id: command.telegramChatDbId } });
-    const hints = peerHintsFromChat(chatRow ?? { telegramChatId: command.telegramChatId, chatType: "UNKNOWN", username: null, accessHash: null, peerType: null, peerPhone: null });
+    const hints = await resolveAndPersistPeerBeforeSend(
+      prisma,
+      adapter,
+      liveRuntime,
+      command.telegramChatDbId,
+      command.telegramChatId,
+      chatRow
+    );
 
     let sent;
     try {
@@ -947,7 +1094,7 @@ async function processSendMediaJob(
         ? {
             safeErrorCode: error.code,
             safeUserMessage: error.message,
-            retryable: error.code === "TELEGRAM_ACCOUNT_LEASE_BUSY" || error.code === "TELEGRAM_LIVE_RUNTIME_UNAVAILABLE"
+            retryable: isSafeWorkerErrorRetryable(error.code)
           }
         : await markAccountFailure(prisma, command, error);
     if (pendingMessageId) {
@@ -956,14 +1103,32 @@ async function processSendMediaJob(
         data: {
           sendStatus: failure.retryable ? "FAILED_RETRYABLE" : "FAILED_PERMANENT",
           mediaUploadState: "FAILED",
+          mediaError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage),
           updatedAt: new Date()
         }
       });
+      const failedRow = await prisma.telegramMessage.findUnique({ where: { id: pendingMessageId } });
+      if (failedRow) {
+        await publishMessageUpdated(
+          redis,
+          command.workspaceId,
+          toTelegramMessageDto(failedRow, {
+            direction: "OUTBOUND",
+            chatTitle: null,
+            chatType: "UNKNOWN",
+            chatUsername: null
+          })
+        );
+      }
     }
     await prisma.telegramOutboundCommand.update({
       where: { id: command.id },
       data: {
-        status: failure.retryable && command.attempts < 4 ? "FAILED_RETRYABLE" : "FAILED_PERMANENT",
+        // Peer unresolved stays FAILED_RETRYABLE even after attempt budget — needs explicit Retry after repair.
+        status:
+          failure.safeErrorCode === "TELEGRAM_PEER_UNRESOLVED" || (failure.retryable && command.attempts < 4)
+            ? "FAILED_RETRYABLE"
+            : "FAILED_PERMANENT",
         lastError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage),
         processedAt: new Date()
       }
@@ -1103,15 +1268,13 @@ async function processSendTextJob(
     }
 
     const chatRow = await prisma.telegramChat.findUnique({ where: { id: command.telegramChatDbId } });
-    const hints = peerHintsFromChat(
-      chatRow ?? {
-        telegramChatId: command.telegramChatId,
-        chatType: "UNKNOWN",
-        username: null,
-        accessHash: null,
-        peerType: null,
-        peerPhone: null
-      }
+    const hints = await resolveAndPersistPeerBeforeSend(
+      prisma,
+      adapter,
+      liveRuntime,
+      command.telegramChatDbId,
+      command.telegramChatId,
+      chatRow
     );
 
     let sent;
@@ -1158,7 +1321,7 @@ async function processSendTextJob(
         ? {
             safeErrorCode: error.code,
             safeUserMessage: error.message,
-            retryable: error.code === "TELEGRAM_ACCOUNT_LEASE_BUSY" || error.code === "TELEGRAM_LIVE_RUNTIME_UNAVAILABLE"
+            retryable: isSafeWorkerErrorRetryable(error.code)
           }
         : await markAccountFailure(prisma, command, error);
 
@@ -1167,14 +1330,31 @@ async function processSendTextJob(
         where: { id: pendingMessageId },
         data: {
           sendStatus: failure.retryable ? "FAILED_RETRYABLE" : "FAILED_PERMANENT",
+          mediaError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage),
           updatedAt: new Date()
         }
       });
+      const failedRow = await prisma.telegramMessage.findUnique({ where: { id: pendingMessageId } });
+      if (failedRow) {
+        await publishMessageUpdated(
+          redis,
+          command.workspaceId,
+          toTelegramMessageDto(failedRow, {
+            direction: "OUTBOUND",
+            chatTitle: null,
+            chatType: "UNKNOWN",
+            chatUsername: null
+          })
+        );
+      }
     }
     await prisma.telegramOutboundCommand.update({
       where: { id: command.id },
       data: {
-        status: failure.retryable && command.attempts < 4 ? "FAILED_RETRYABLE" : "FAILED_PERMANENT",
+        status:
+          failure.safeErrorCode === "TELEGRAM_PEER_UNRESOLVED" || (failure.retryable && command.attempts < 4)
+            ? "FAILED_RETRYABLE"
+            : "FAILED_PERMANENT",
         lastError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage),
         processedAt: new Date()
       }
@@ -1204,6 +1384,7 @@ async function persistOutboundDelivery(
           telegramCreatedAt: sent.sentAt,
           telegramEditedAt: sent.editedAt,
           sendStatus: "SENT",
+          mediaError: null,
           updatedAt: new Date()
         }
       });
@@ -1232,6 +1413,7 @@ async function persistOutboundDelivery(
     update: {
       direction: "OUTBOUND",
       sendStatus: "SENT",
+      mediaError: null,
       contentType: sent.contentType,
       textContent: sent.text,
       caption: sent.caption,
@@ -1786,6 +1968,15 @@ function formatSafeCommandError(code: string, message: string): string {
   return `${code}: ${message}`.slice(0, 500);
 }
 
+/** Safe worker errors that should leave the Atlas message FAILED_RETRYABLE (never stuck pending). */
+function isSafeWorkerErrorRetryable(code: string): boolean {
+  return (
+    code === "TELEGRAM_ACCOUNT_LEASE_BUSY" ||
+    code === "TELEGRAM_LIVE_RUNTIME_UNAVAILABLE" ||
+    code === "TELEGRAM_PEER_UNRESOLVED"
+  );
+}
+
 function peerHintsFromChat(chat: {
   telegramChatId: string;
   chatType: string;
@@ -1805,6 +1996,57 @@ function peerHintsFromChat(chat: {
     phone: chat.peerPhone,
     firstName: chat.firstName ?? null,
     lastName: chat.lastName ?? null
+  };
+}
+
+/**
+ * Resolve InputPeer before GramJS send: stored peer_type/access_hash → live cache/dialogs → persist repair.
+ * Throws TELEGRAM_PEER_UNRESOLVED (retryable) when the peer still cannot be built.
+ */
+async function resolveAndPersistPeerBeforeSend(
+  prisma: PrismaClient,
+  adapter: TelegramClientAdapter,
+  runtime: Parameters<TelegramClientAdapter["resolvePeer"]>[0],
+  chatDbId: string,
+  telegramChatId: string,
+  chatRow: {
+    telegramChatId: string;
+    chatType: string;
+    username: string | null;
+    accessHash: string | null;
+    peerType: string | null;
+    peerPhone: string | null;
+    firstName?: string | null;
+    lastName?: string | null;
+  } | null
+): Promise<Omit<PeerResolutionHints, "telegramChatId">> {
+  const baseHints = peerHintsFromChat(
+    chatRow ?? {
+      telegramChatId,
+      chatType: "UNKNOWN",
+      username: null,
+      accessHash: null,
+      peerType: null,
+      peerPhone: null
+    }
+  );
+
+  let resolved;
+  try {
+    resolved = await adapter.resolvePeer(runtime, baseHints);
+  } catch (error) {
+    throwAsSafePeerError(error);
+  }
+
+  await persistResolvedPeer(prisma, chatDbId, resolved);
+  return {
+    chatType: chatRow?.chatType ?? baseHints.chatType ?? null,
+    username: resolved.username ?? baseHints.username ?? null,
+    accessHash: resolved.accessHash ?? baseHints.accessHash ?? null,
+    peerType: resolved.peerType ?? baseHints.peerType ?? null,
+    phone: resolved.phone ?? baseHints.phone ?? null,
+    firstName: resolved.firstName ?? baseHints.firstName ?? null,
+    lastName: resolved.lastName ?? baseHints.lastName ?? null
   };
 }
 

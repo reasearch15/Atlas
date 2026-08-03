@@ -470,7 +470,13 @@ export function mergeAndDeduplicate(
       attributionSource:
         incoming.internalSenderUserId || existing.internalSenderUserId
           ? "ATLAS"
-          : incoming.attributionSource ?? existing.attributionSource ?? (incoming.direction === "OUTBOUND" ? "TELEGRAM_EXTERNAL" : null)
+          : incoming.attributionSource ?? existing.attributionSource ?? (incoming.direction === "OUTBOUND" ? "TELEGRAM_EXTERNAL" : null),
+      originKind:
+        incoming.internalSenderUserId || existing.internalSenderUserId || incoming.originKind === "OUTBOUND_ATLAS" || existing.originKind === "OUTBOUND_ATLAS"
+          ? "OUTBOUND_ATLAS"
+          : incoming.originKind ??
+            existing.originKind ??
+            (incoming.direction === "INBOUND" ? "INBOUND_TELEGRAM" : "OUTBOUND_TELEGRAM_SYNCED")
     };
     return sortMessagesChronologically(copy);
   }

@@ -123,7 +123,12 @@ export class TelegramRepository {
   public async listMessages(user: RequestUser, accountId: string, chatDbId: string) {
     const account = await this.getAccountForUser(user, accountId);
     const messages = await this.prisma.telegramMessage.findMany({
-      where: { workspaceId: account.workspaceId, telegramAccountId: account.id, telegramChatDbId: chatDbId },
+      where: {
+        workspaceId: account.workspaceId,
+        telegramAccountId: account.id,
+        telegramChatDbId: chatDbId,
+        deletedAt: null
+      },
       orderBy: { telegramCreatedAt: "desc" },
       take: 100
     });
@@ -139,7 +144,8 @@ export class TelegramRepository {
       where: {
         workspaceId: chat.workspaceId,
         telegramAccountId: chat.telegramAccountId,
-        telegramChatDbId: chat.id
+        telegramChatDbId: chat.id,
+        deletedAt: null
       },
       orderBy: { telegramCreatedAt: "desc" },
       take: 100

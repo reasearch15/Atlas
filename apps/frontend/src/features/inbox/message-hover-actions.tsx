@@ -73,6 +73,18 @@ export function MessageHoverActions({
             >
               Reply
             </button>
+            {canDelete && onDelete ? (
+              <button
+                type="button"
+                className="block w-full px-3 py-1.5 text-left text-red-600 hover:bg-red-50"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDelete();
+                }}
+              >
+                Delete
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>

@@ -378,6 +378,17 @@ export const api = {
     apiRequest<{ url: string }>(`/api/telegram/messages/${messageId}/media-access?variant=${variant}`),
   retryFailedMessage: (messageId: string) =>
     apiRequest<TelegramMessageDto>(`/api/telegram/messages/${messageId}/retry`, { method: "POST" }),
+  deleteMessage: (messageId: string, scope: "EVERYONE" | "ATLAS_ONLY", idempotencyKey?: string) =>
+    apiRequest<{ messageId: string; status: "QUEUED" | "DELETED"; scope: "EVERYONE" | "ATLAS_ONLY" }>(
+      `/api/telegram/messages/${messageId}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          scope,
+          ...(idempotencyKey ? { idempotencyKey } : {})
+        })
+      }
+    ),
   sendChatText: (chatId: string, text: string, idempotencyKey: string, replyToTelegramMessageId?: string) =>
     apiRequest<TelegramMessageDto>(`/api/telegram/chats/${chatId}/messages`, {
       method: "POST",

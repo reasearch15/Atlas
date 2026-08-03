@@ -438,6 +438,9 @@ export interface TelegramMessageDto {
   readonly editedAt: string | null;
   readonly isEdited: boolean;
   readonly isDeleted: boolean;
+  readonly deletedAt?: string | null;
+  readonly deletionScope?: "EVERYONE" | "ATLAS_ONLY" | null;
+  readonly telegramDeleteStatus?: "NONE" | "QUEUED" | "DELETING" | "DELETED" | "FAILED" | null;
   readonly senderTelegramUserId?: string | null;
   readonly senderDisplayName: string | null;
   readonly replyToTelegramMessageId: string | null;
@@ -449,6 +452,11 @@ export interface TelegramMessageDto {
   readonly internalSenderName?: string | null;
   /** ATLAS = sent through Atlas; TELEGRAM_EXTERNAL = outbound with no Atlas sender. */
   readonly attributionSource?: "ATLAS" | "TELEGRAM_EXTERNAL" | null;
+  /**
+   * Durable origin kind derived from direction + Atlas sender / pending id.
+   * Never treat OUTBOUND_TELEGRAM_SYNCED as Atlas send success.
+   */
+  readonly originKind?: "OUTBOUND_ATLAS" | "OUTBOUND_TELEGRAM_SYNCED" | "INBOUND_TELEGRAM";
   readonly sendStatus: string;
 }
 
@@ -472,6 +480,27 @@ export interface TelegramMessageUpdatedEvent {
   readonly chatId: string;
   readonly chatDbId: string;
   readonly message: TelegramMessageDto;
+}
+
+export interface TelegramMessageDeletedEvent {
+  readonly type: "telegram.message.deleted";
+  readonly eventId: string;
+  readonly workspaceId: string;
+  readonly telegramAccountId: string;
+  readonly chatId: string;
+  readonly chatDbId: string;
+  readonly messageId: string;
+  readonly telegramMessageId: string;
+  readonly scope: "EVERYONE" | "ATLAS_ONLY";
+  readonly deletedAt: string;
+  readonly deletedBy: {
+    readonly id: string | null;
+    readonly name: string | null;
+  };
+  /** Optional chat list preview refresh after deleting the latest message. */
+  readonly lastMessagePreview?: string | null;
+  readonly lastMessageAt?: string | null;
+  readonly lastMessageDirection?: "INBOUND" | "OUTBOUND" | null;
 }
 
 export interface TelegramChatUpdatedEvent {
@@ -521,6 +550,7 @@ export interface CrmConversationUpdatedEvent {
 export type TelegramWorkspaceRealtimeEvent =
   | TelegramMessageCreatedEvent
   | TelegramMessageUpdatedEvent
+  | TelegramMessageDeletedEvent
   | TelegramChatUpdatedEvent
   | CrmConversationUpdatedEvent
   | InternalMessageCreatedEvent

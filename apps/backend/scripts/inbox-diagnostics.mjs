@@ -36,6 +36,43 @@ async function main() {
   const failedOutbound = await prisma.telegramOutboundCommand.count({
     where: { operation: "SEND_MEDIA_MESSAGE", status: { in: ["FAILED_RETRYABLE", "FAILED_PERMANENT"] } }
   });
+
+  // Atlas-originated vs Telegram-app-synced outbound — never mix these in "send success" stats.
+  const recentOutbound = await prisma.telegramMessage.findMany({
+    where: { direction: "OUTBOUND" },
+    select: {
+      telegramMessageId: true,
+      internalSenderUserId: true,
+      sendStatus: true,
+      mediaError: true
+    },
+    take: 5000,
+    orderBy: { updatedAt: "desc" }
+  });
+  let atlasSendAttempts = 0;
+  let atlasSendsDelivered = 0;
+  let atlasSendsFailed = 0;
+  let atlasPeerUnresolvedFailed = 0;
+  let telegramAppOutboundSynced = 0;
+  for (const row of recentOutbound) {
+    const pending =
+      row.telegramMessageId.startsWith("pending:") || row.telegramMessageId.startsWith("upload:");
+    const isAtlas = Boolean(row.internalSenderUserId) || pending;
+    if (!isAtlas) {
+      telegramAppOutboundSynced += 1;
+      continue;
+    }
+    atlasSendAttempts += 1;
+    if (row.sendStatus === "SENT" || row.sendStatus === "DELIVERED" || row.sendStatus === "READ") {
+      atlasSendsDelivered += 1;
+    } else if (row.sendStatus === "FAILED_RETRYABLE" || row.sendStatus === "FAILED_PERMANENT") {
+      atlasSendsFailed += 1;
+      if (row.mediaError?.includes("TELEGRAM_PEER_UNRESOLVED")) {
+        atlasPeerUnresolvedFailed += 1;
+      }
+    }
+  }
+
   const unknownTitle = await prisma.telegramChat.count({
     where: { isArchived: false, title: { startsWith: "Unknown", mode: "insensitive" } }
   });
@@ -141,6 +178,13 @@ async function main() {
         mediaKeysMissingInMinioSample: keysMissing,
         unavailableMediaRows: unavailable,
         outgoingMediaJobsFailed: failedOutbound,
+        atlasSendAttempts,
+        atlasSendsDelivered,
+        atlasSendsFailed,
+        atlasPeerUnresolvedFailed,
+        telegramAppOutboundSynced,
+        note:
+          "atlasSends* count only Atlas-composer messages (internal_sender_user_id or pending:/upload: ids). telegramAppOutboundSynced are native Telegram-app outbound rows mirrored into Atlas — not Atlas send success.",
         duplicateConversationsByAccountPeer: Array.isArray(duplicateGroups) ? duplicateGroups.length : 0,
         contactsOrChatsTitledUnknown: unknownTitle,
         conversationsWithUnread: unread,

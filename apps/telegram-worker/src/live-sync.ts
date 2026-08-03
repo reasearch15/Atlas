@@ -5,6 +5,7 @@ import {
   contactDisplayTitleQuality,
   isOfficialTelegramServicePeer,
   isTemporaryTelegramUserTitle,
+  normalizeMarkedTelegramChatId,
   reopenStatusOnInbound,
   shouldIgnoreTelegramDialog,
   type CrmConversationStatus,
@@ -32,7 +33,7 @@ import {
   isIncompletePrivatePeer,
   normalizePeerType
 } from "./entity-resolution";
-
+import { applySoftDeletedMessage } from "./message-deletion";
 const activeAccounts = new Map<string, TelegramRuntime>();
 
 /**
@@ -175,6 +176,46 @@ async function attachConnectedAccounts(
           lastErrorMessage: null
         }
       });
+    });
+
+    adapter.listenForDeletedMessages(runtime, async ({ telegramMessageIds, channelId }) => {
+      const where =
+        channelId != null
+          ? {
+              telegramAccountId: account.id,
+              telegramMessageId: { in: [...telegramMessageIds] },
+              telegramChatId: {
+                in: [
+                  channelId,
+                  normalizeMarkedTelegramChatId(channelId, "CHANNEL"),
+                  `-100${channelId}`,
+                  channelId.startsWith("-100") ? channelId.slice(4) : channelId
+                ]
+              },
+              deletedAt: null
+            }
+          : {
+              telegramAccountId: account.id,
+              telegramMessageId: { in: [...telegramMessageIds] },
+              deletedAt: null
+            };
+
+      const rows = await prisma.telegramMessage.findMany({ where, take: 50 });
+      for (const row of rows) {
+        await applySoftDeletedMessage(prisma, redis, store, {
+          messageId: row.id,
+          workspaceId: account.workspaceId,
+          telegramAccountId: account.id,
+          chatDbId: row.telegramChatDbId,
+          telegramMessageId: row.telegramMessageId,
+          scope: "EVERYONE",
+          deletedByUserId: null,
+          deletedByName: null,
+          originalContentType: row.contentType,
+          priorMediaStorageKey: row.mediaStorageKey,
+          priorThumbnailStorageKey: row.thumbnailStorageKey
+        });
+      }
     });
   }
 }

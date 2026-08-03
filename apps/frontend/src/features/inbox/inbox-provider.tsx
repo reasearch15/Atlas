@@ -137,6 +137,24 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
   }, []);
 
   const deliverMessageToChat = useCallback((chatId: string, message: TelegramMessageDto) => {
+    if (message.isDeleted) {
+      const buffer = messageBufferRef.current.get(chatId) ?? [];
+      messageBufferRef.current.set(
+        chatId,
+        buffer.filter((row) => row.id !== message.id && row.telegramMessageId !== message.telegramMessageId)
+      );
+      const listeners = messageListenersRef.current.get(chatId);
+      if (listeners) {
+        for (const listener of listeners) {
+          try {
+            listener({ ...message, isDeleted: true });
+          } catch {
+            // Keep delivering.
+          }
+        }
+      }
+      return;
+    }
     rememberChatMessage(chatId, message);
     const buffer = messageBufferRef.current.get(chatId) ?? [];
     const deduped = buffer.filter(
@@ -156,6 +174,58 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
     }
   }, []);
 
+  const deliverMessageDeleted = useCallback(
+    (event: Extract<TelegramWorkspaceRealtimeEvent, { type: "telegram.message.deleted" }>) => {
+      const chatDbId = event.chatDbId || event.chatId;
+      deliverMessageToChat(chatDbId, {
+        id: event.messageId,
+        telegramAccountId: event.telegramAccountId,
+        chatId: chatDbId,
+        telegramMessageId: event.telegramMessageId,
+        direction: "OUTBOUND",
+        contentType: "TEXT",
+        mediaType: "TEXT",
+        text: "",
+        caption: null,
+        mimeType: null,
+        fileName: null,
+        fileSizeBytes: null,
+        width: null,
+        height: null,
+        durationSeconds: null,
+        waveform: null,
+        mediaMetadata: null,
+        mediaUrl: null,
+        thumbnailUrl: null,
+        mediaDownloadState: "NONE",
+        mediaUploadState: "NONE",
+        mediaError: null,
+        sentAt: event.deletedAt,
+        editedAt: null,
+        isEdited: false,
+        isDeleted: true,
+        deletedAt: event.deletedAt,
+        deletionScope: event.scope,
+        senderDisplayName: null,
+        replyToTelegramMessageId: null,
+        replyPreview: null,
+        webPreview: null,
+        internalSenderUserId: null,
+        sendStatus: "SENT"
+      });
+
+      setConversations((current) =>
+        applyChatActivity(current, {
+          chatId: chatDbId,
+          previewText: event.lastMessagePreview ?? "",
+          sentAt: event.lastMessageAt ?? event.deletedAt,
+          direction: event.lastMessageDirection ?? "INBOUND",
+          unreadCount: current.find((row) => row.chat.id === chatDbId)?.chat.unreadCount ?? 0
+        })
+      );
+    },
+    [deliverMessageToChat]
+  );
   const subscribeMessages = useCallback((chatId: string, handler: (message: TelegramMessageDto) => void) => {
     const bucket = messageListenersRef.current.get(chatId) ?? new Set();
     bucket.add(handler);
@@ -216,6 +286,11 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
             })
           );
         }
+        return;
+      }
+
+      if (event.type === "telegram.message.deleted") {
+        deliverMessageDeleted(event);
         return;
       }
 
@@ -304,7 +379,7 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
         }
       }
     },
-    [deliverMessageToChat]
+    [deliverMessageToChat, deliverMessageDeleted]
   );
 
   const handleRealtimeEventRef = useRef(handleRealtimeEvent);
@@ -341,6 +416,7 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
           if (
             payload.type === "telegram.message.created" ||
             payload.type === "telegram.message.updated" ||
+            payload.type === "telegram.message.deleted" ||
             payload.type === "telegram.chat.updated" ||
             payload.type === "crm.conversation.updated" ||
             payload.type === "conversations.deleted" ||

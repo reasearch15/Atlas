@@ -1,5 +1,6 @@
 import {
   buildTelegramMessageMediaPath,
+  classifyMessageOrigin,
   contentTypeToMediaType,
   type TelegramContentType,
   type TelegramMediaDownloadState,
@@ -38,6 +39,9 @@ type MessageRow = {
   readonly internalSenderRole?: string | null;
   readonly internalSenderName?: string | null;
   readonly sendStatus: string;
+  readonly deletedAt?: Date | null;
+  readonly deletionScope?: string | null;
+  readonly telegramDeleteStatus?: string | null;
 };
 
 type ChatIdentityHint = {
@@ -114,7 +118,10 @@ export function toTelegramMessageDto(
     sentAt: message.telegramCreatedAt.toISOString(),
     editedAt: message.telegramEditedAt?.toISOString() ?? null,
     isEdited: Boolean(message.telegramEditedAt),
-    isDeleted: false,
+    isDeleted: Boolean(message.deletedAt),
+    deletedAt: message.deletedAt?.toISOString() ?? null,
+    deletionScope: (message.deletionScope as TelegramMessageDto["deletionScope"]) ?? null,
+    telegramDeleteStatus: (message.telegramDeleteStatus as TelegramMessageDto["telegramDeleteStatus"]) ?? "NONE",
     senderTelegramUserId: message.senderTelegramUserId,
     senderDisplayName: resolveSenderDisplayName(direction, chat),
     replyToTelegramMessageId: message.replyToTelegramMessageId,
@@ -129,6 +136,11 @@ export function toTelegramMessageDto(
       : direction === "OUTBOUND"
         ? "TELEGRAM_EXTERNAL"
         : null,
+    originKind: classifyMessageOrigin({
+      direction,
+      internalSenderUserId: message.internalSenderUserId,
+      telegramMessageId: message.telegramMessageId
+    }),
     sendStatus: message.sendStatus
   };
 }
