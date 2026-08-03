@@ -21,7 +21,7 @@ import {
 const prisma = new PrismaClient();
 const apply = process.env.CONFIRM_APPLY === "YES";
 
-function isCandidateTitle(title: string, telegramChatId: string): boolean {
+function isCandidateTitle(title, telegramChatId) {
   const trimmed = title.trim();
   if (!trimmed) return true;
   if (/^unknown(\s|$)/i.test(trimmed)) return true;
@@ -59,9 +59,6 @@ async function main() {
   let upgradedFromFields = 0;
   let skippedService = 0;
   let skippedGroup = 0;
-  let incompleteAccessHash = 0;
-  let incompletePeerType = 0;
-
   let incompleteAccessHash = 0;
   let incompletePeerType = 0;
 

@@ -25,7 +25,8 @@
     "fixtures:clean": "dotenv -e ../../.env -- tsx src/scripts/fixtures-clean.ts",
     "inbox:diagnostics": "dotenv -e ../../.env -- node scripts/inbox-diagnostics.mjs",
     "cleanup:telegram": "dotenv -e ../../.env -- node scripts/cleanup-telegram-service-chats.mjs",
-    "identity:backfill": "dotenv -e ../../.env -- node scripts/backfill-telegram-identity.mjs"
+    "identity:backfill": "dotenv -e ../../.env -- node scripts/backfill-telegram-identity.mjs",
+    "scripts:syntax-check": "node --check scripts/backfill-telegram-identity.mjs && node --check scripts/inbox-diagnostics.mjs && node --check scripts/cleanup-telegram-service-chats.mjs"
   },
   "dependencies": {
     "@atlas/shared": "workspace:*",
