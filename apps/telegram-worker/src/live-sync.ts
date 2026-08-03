@@ -31,6 +31,7 @@ import { confirmOutboundDelivery, isRemoteTelegramMessageId } from "./delivery-s
 import {
   coalescePeerPersistenceFields,
   isIncompletePrivatePeer,
+  isPrivatePeerMetadataComplete,
   normalizePeerType
 } from "./entity-resolution";
 import { applySoftDeletedMessage } from "./message-deletion";
@@ -229,9 +230,14 @@ async function upsertChat(
   message: NormalizedTextMessage,
   selfTelegramUserId: string | null,
   liveIdentity: NormalizedDialog | null = null,
-  liveMeta: { readonly hadLiveEntity: boolean; readonly hadInputPeerHash: boolean } = {
+  liveMeta: {
+    readonly hadLiveEntity: boolean;
+    readonly hadInputPeerHash: boolean;
+    readonly entitySource?: string | null;
+  } = {
     hadLiveEntity: false,
-    hadInputPeerHash: false
+    hadInputPeerHash: false,
+    entitySource: null
   }
 ) {
   const existing = await prisma.telegramChat.findUnique({
@@ -242,60 +248,87 @@ async function upsertChat(
     return null;
   }
 
+  const metadataCompleteBefore = Boolean(
+    existing &&
+      isPrivatePeerMetadataComplete({
+        chatType: existing.chatType,
+        peerType: existing.peerType,
+        accessHash: existing.accessHash,
+        telegramChatId: existing.telegramChatId,
+        title: existing.title,
+        firstName: existing.firstName,
+        lastName: existing.lastName,
+        username: existing.username
+      })
+  );
+
   let identity = liveIdentity;
+  let entitySource: string | null = liveMeta.entitySource ?? (liveIdentity ? "live_event" : null);
 
-  const needsResolve =
-    !identity ||
-    !identity.accessHash ||
-    !isUsableDisplayTitle(identity.title, identity.telegramChatId) ||
-    !existing ||
-    !existing.accessHash ||
-    existing.chatType === "UNKNOWN" ||
-    !isUsableDisplayTitle(existing.title, existing.telegramChatId) ||
-    (!existing.firstName && !existing.lastName && !existing.username);
-
-  if (needsResolve) {
-    try {
-      const resolved = await adapter.resolveChatIdentity(runtime, message.telegramChatId, {
-        ...(identity?.chatType && identity.chatType !== "UNKNOWN"
-          ? { chatType: identity.chatType }
-          : existing?.chatType
-            ? { chatType: existing.chatType }
-            : { chatType: "PRIVATE" }),
-        ...(identity?.username ?? existing?.username ? { username: identity?.username ?? existing?.username ?? null } : {}),
-        ...(identity?.accessHash ?? existing?.accessHash
-          ? { accessHash: identity?.accessHash ?? existing?.accessHash ?? null }
-          : {}),
-        ...(identity?.peerType ?? existing?.peerType ? { peerType: identity?.peerType ?? existing?.peerType ?? null } : {}),
-        ...(identity?.phone ?? existing?.peerPhone ? { phone: identity?.phone ?? existing?.peerPhone ?? null } : {}),
-        ...(identity?.firstName ?? existing?.firstName
-          ? { firstName: identity?.firstName ?? existing?.firstName ?? null }
-          : {}),
-        ...(identity?.lastName ?? existing?.lastName ? { lastName: identity?.lastName ?? existing?.lastName ?? null } : {})
+  // Complete private peers: preserve existing metadata, skip expensive resolveChatIdentity.
+  // Incomplete: repair from live update first; only then fall back to entity resolve.
+  if (!metadataCompleteBefore) {
+    const liveStillIncomplete =
+      !identity ||
+      isIncompletePrivatePeer({
+        chatType: identity.chatType,
+        peerType: identity.peerType,
+        accessHash: identity.accessHash,
+        telegramChatId: identity.telegramChatId || message.telegramChatId,
+        title: identity.title,
+        firstName: identity.firstName,
+        lastName: identity.lastName,
+        username: identity.username
       });
-      if (!identity) {
-        identity = resolved;
-      } else {
-        // Merge: never drop a live accessHash; prefer richer titles/names.
-        identity = {
-          ...resolved,
-          accessHash: resolved.accessHash || identity.accessHash,
-          peerType: resolved.peerType || identity.peerType,
-          firstName: resolved.firstName || identity.firstName,
-          lastName: resolved.lastName || identity.lastName,
-          username: resolved.username || identity.username,
-          phone: resolved.phone || identity.phone,
-          title:
-            contactDisplayTitleQuality(resolved.title, resolved.telegramChatId) >=
-            contactDisplayTitleQuality(identity.title, identity.telegramChatId)
-              ? resolved.title
-              : identity.title,
-          chatType:
-            resolved.chatType !== "UNKNOWN" ? resolved.chatType : identity.chatType !== "UNKNOWN" ? identity.chatType : "PRIVATE"
-        };
+
+    if (liveStillIncomplete) {
+      try {
+        const resolved = await adapter.resolveChatIdentity(runtime, message.telegramChatId, {
+          ...(identity?.chatType && identity.chatType !== "UNKNOWN"
+            ? { chatType: identity.chatType }
+            : existing?.chatType
+              ? { chatType: existing.chatType }
+              : { chatType: "PRIVATE" }),
+          ...(identity?.username ?? existing?.username ? { username: identity?.username ?? existing?.username ?? null } : {}),
+          ...(identity?.accessHash ?? existing?.accessHash
+            ? { accessHash: identity?.accessHash ?? existing?.accessHash ?? null }
+            : {}),
+          ...(identity?.peerType ?? existing?.peerType ? { peerType: identity?.peerType ?? existing?.peerType ?? null } : {}),
+          ...(identity?.phone ?? existing?.peerPhone ? { phone: identity?.phone ?? existing?.peerPhone ?? null } : {}),
+          ...(identity?.firstName ?? existing?.firstName
+            ? { firstName: identity?.firstName ?? existing?.firstName ?? null }
+            : {}),
+          ...(identity?.lastName ?? existing?.lastName ? { lastName: identity?.lastName ?? existing?.lastName ?? null } : {})
+        });
+        entitySource = entitySource ? `${entitySource}+resolveChatIdentity` : "resolveChatIdentity";
+        if (!identity) {
+          identity = resolved;
+        } else {
+          // Merge: never drop a live accessHash; prefer richer titles/names.
+          identity = {
+            ...resolved,
+            accessHash: resolved.accessHash || identity.accessHash,
+            peerType: resolved.peerType || identity.peerType,
+            firstName: resolved.firstName || identity.firstName,
+            lastName: resolved.lastName || identity.lastName,
+            username: resolved.username || identity.username,
+            phone: resolved.phone || identity.phone,
+            title:
+              contactDisplayTitleQuality(resolved.title, resolved.telegramChatId) >=
+              contactDisplayTitleQuality(identity.title, identity.telegramChatId)
+                ? resolved.title
+                : identity.title,
+            chatType:
+              resolved.chatType !== "UNKNOWN"
+                ? resolved.chatType
+                : identity.chatType !== "UNKNOWN"
+                  ? identity.chatType
+                  : "PRIVATE"
+          };
+        }
+      } catch {
+        // Keep live identity when full resolve fails.
       }
-    } catch {
-      // Keep live identity when full resolve fails.
     }
   }
 
@@ -349,9 +382,20 @@ async function upsertChat(
       lastName: identity?.lastName ?? null,
       username: identity?.username ?? null,
       phone: identity?.phone ?? null,
-      chatType: identity?.chatType ?? "PRIVATE"
+      chatType: identity?.chatType ?? existing?.chatType ?? "PRIVATE"
     }
   );
+
+  const createTitle = buildCrmContactDisplayTitle({
+    firstName: peerFields.firstName,
+    lastName: peerFields.lastName,
+    username: peerFields.username,
+    phone: peerFields.peerPhone,
+    telegramChatId: message.telegramChatId,
+    groupTitle: identity?.title ?? existing?.title ?? null,
+    chatType: peerFields.chatType,
+    isBot: identity?.isBot ?? existing?.isBot ?? false
+  });
 
   // Live event produced durable peer material — refuse silent incomplete creates.
   if (
@@ -361,18 +405,23 @@ async function upsertChat(
       chatType: peerFields.chatType,
       peerType: peerFields.peerType,
       accessHash: peerFields.accessHash,
-      telegramChatId: message.telegramChatId
+      telegramChatId: message.telegramChatId,
+      title: createTitle,
+      firstName: peerFields.firstName,
+      lastName: peerFields.lastName,
+      username: peerFields.username
     })
   ) {
     console.error(
       JSON.stringify({
         event: "telegram_live.incomplete_peer_refused",
-        telegramAccountId,
-        telegramChatId: message.telegramChatId,
+        accountId: telegramAccountId,
+        peerId: message.telegramChatId,
         hadLiveEntity: liveMeta.hadLiveEntity,
         hadInputPeerHash: liveMeta.hadInputPeerHash,
         accessHashPresent: Boolean(peerFields.accessHash),
-        peerType: peerFields.peerType
+        peerTypeResolved: peerFields.peerType,
+        entitySource
       })
     );
     throw new Error(
@@ -381,21 +430,31 @@ async function upsertChat(
   }
 
   if (
+    !metadataCompleteBefore &&
     isIncompletePrivatePeer({
       chatType: peerFields.chatType,
       peerType: peerFields.peerType,
       accessHash: peerFields.accessHash,
-      telegramChatId: message.telegramChatId
+      telegramChatId: message.telegramChatId,
+      title: createTitle,
+      firstName: peerFields.firstName,
+      lastName: peerFields.lastName,
+      username: peerFields.username
     })
   ) {
     console.warn(
       JSON.stringify({
         event: "telegram_live.incomplete_private_peer",
-        telegramAccountId,
-        telegramChatId: message.telegramChatId,
+        accountId: telegramAccountId,
+        peerId: message.telegramChatId,
+        chatDbId: existing?.id ?? null,
+        metadataCompleteBefore,
         existing: Boolean(existing),
         hadLiveEntity: liveMeta.hadLiveEntity,
-        hadInputPeerHash: liveMeta.hadInputPeerHash
+        hadInputPeerHash: liveMeta.hadInputPeerHash,
+        entitySource,
+        peerTypeResolved: peerFields.peerType,
+        accessHashPresent: Boolean(peerFields.accessHash)
       })
     );
   }
@@ -404,17 +463,6 @@ async function upsertChat(
   const reopenedStatus =
     existing && !message.isOutgoing ? reopenStatusOnInbound(existing.crmStatus as CrmConversationStatus) : null;
   const attentionAt = new Date();
-
-  const createTitle = buildCrmContactDisplayTitle({
-    firstName: peerFields.firstName,
-    lastName: peerFields.lastName,
-    username: peerFields.username,
-    phone: peerFields.peerPhone,
-    telegramChatId: message.telegramChatId,
-    groupTitle: identity?.title ?? null,
-    chatType: peerFields.chatType,
-    isBot: identity?.isBot ?? existing?.isBot ?? false
-  });
 
   const updateData: Prisma.TelegramChatUncheckedUpdateInput = {
     lastMessageId: message.telegramMessageId,
@@ -531,12 +579,38 @@ async function upsertChat(
     console.error(
       JSON.stringify({
         event: "telegram_live.access_hash_persist_failed",
-        chatId: chat.id,
-        telegramChatId: message.telegramChatId
+        accountId: telegramAccountId,
+        chatDbId: chat.id,
+        peerId: message.telegramChatId
       })
     );
     throw new Error(`access_hash failed to persist for chat ${chat.id}`);
   }
+
+  const identityUpdated =
+    !metadataCompleteBefore &&
+    Boolean(
+      (peerFields.accessHash && peerFields.accessHash !== existing?.accessHash) ||
+        (peerFields.peerType && peerFields.peerType !== existing?.peerType) ||
+        (updateData.title && updateData.title !== existing?.title) ||
+        (peerFields.firstName && peerFields.firstName !== existing?.firstName) ||
+        (peerFields.lastName && peerFields.lastName !== existing?.lastName) ||
+        (peerFields.username && peerFields.username !== existing?.username)
+    );
+
+  console.info(
+    JSON.stringify({
+      event: "telegram_live.peer_metadata_repair",
+      accountId: telegramAccountId,
+      chatDbId: chat.id,
+      peerId: message.telegramChatId,
+      metadataCompleteBefore,
+      entitySource,
+      peerTypeResolved: chat.peerType ?? peerFields.peerType,
+      accessHashPresent: Boolean(chat.accessHash),
+      identityUpdated
+    })
+  );
 
   if (existing && reopenedStatus) {
     await prisma.crmStatusHistory.create({

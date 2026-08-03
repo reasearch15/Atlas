@@ -639,7 +639,11 @@ export class TelegramClientAdapter {
     handler: (
       message: NormalizedTextMessage,
       liveIdentity: NormalizedDialog | null,
-      liveMeta: { readonly hadLiveEntity: boolean; readonly hadInputPeerHash: boolean }
+      liveMeta: {
+        readonly hadLiveEntity: boolean;
+        readonly hadInputPeerHash: boolean;
+        readonly entitySource: string | null;
+      }
     ) => Promise<void>
   ): void {
     runtime.client.addEventHandler((event: unknown) => {
@@ -650,6 +654,7 @@ export class TelegramClientAdapter {
           chat?: unknown;
           getChat?: () => Promise<unknown>;
           getInputChat?: () => Promise<unknown>;
+          getSender?: () => Promise<unknown>;
         };
         if (!value.message) {
           return;
@@ -663,7 +668,8 @@ export class TelegramClientAdapter {
           const chatId = resolved.identity?.telegramChatId || normalizeMarkedTelegramChatId(rawChatId, chatType);
           await handler(this.normalizeMessage(chatId, value.message), resolved.identity, {
             hadLiveEntity: resolved.hadLiveEntity,
-            hadInputPeerHash: resolved.hadInputPeerHash
+            hadInputPeerHash: resolved.hadInputPeerHash,
+            entitySource: resolved.entitySource
           });
         } catch (error) {
           const safe = sanitizeTelegramError(error, false);
@@ -681,7 +687,9 @@ export class TelegramClientAdapter {
 
   /**
    * Builds durable peer identity from a live NewMessage event.
-   * Prefers getInputChat (accessHash) + getChat / sender entity (names).
+   * Entity source priority:
+   * message.getSender → event.getSender → message.sender → getChat/event.chat →
+   * message.senderId / peerId entity cache → getInputChat / getInputSender → resolvePeer.
    */
   public async resolveIdentityFromLiveEvent(
     runtime: TelegramRuntime,
@@ -690,53 +698,108 @@ export class TelegramClientAdapter {
       readonly message?: unknown;
       readonly getChat?: () => Promise<unknown>;
       readonly getInputChat?: () => Promise<unknown>;
+      readonly getSender?: () => Promise<unknown>;
     }
   ): Promise<{
     readonly identity: NormalizedDialog | null;
     readonly hadLiveEntity: boolean;
     readonly hadInputPeerHash: boolean;
+    readonly entitySource: string | null;
   }> {
-    let chatEntity: Record<string, unknown> | null =
-      event.chat && typeof event.chat === "object" ? (event.chat as Record<string, unknown>) : null;
+    let chatEntity: Record<string, unknown> | null = null;
+    let entitySource: string | null = null;
     let inputPeer: unknown = null;
     let inputPeerHash: string | null = null;
 
-    try {
-      if (typeof event.getInputChat === "function") {
-        inputPeer = await event.getInputChat();
-        inputPeerHash = extractAccessHashFromPeerCandidate(inputPeer);
-      }
-    } catch {
-      inputPeer = null;
-    }
-
-    try {
-      if (typeof event.getChat === "function") {
-        const loaded = await event.getChat();
-        if (loaded && typeof loaded === "object") {
-          chatEntity = loaded as Record<string, unknown>;
-        }
-      }
-    } catch {
-      // keep event.chat
-    }
-
-    // Private messages: sender entity often carries first/last/username + accessHash.
     const message = event.message as
       | {
           getSender?: () => Promise<unknown>;
           getInputSender?: () => Promise<unknown>;
+          sender?: unknown;
+          senderId?: unknown;
+          peerId?: unknown;
         }
       | undefined;
+
+    // 1) message.getSender()
     try {
-      if ((!chatEntity || !extractAccessHashFromPeerCandidate(chatEntity)) && typeof message?.getSender === "function") {
+      if (typeof message?.getSender === "function") {
         const sender = await message.getSender();
         if (sender && typeof sender === "object") {
           chatEntity = sender as Record<string, unknown>;
+          entitySource = "message.getSender";
         }
       }
     } catch {
-      // ignore
+      // continue
+    }
+
+    // 2) event.getSender()
+    try {
+      if (!chatEntity && typeof event.getSender === "function") {
+        const sender = await event.getSender();
+        if (sender && typeof sender === "object") {
+          chatEntity = sender as Record<string, unknown>;
+          entitySource = "event.getSender";
+        }
+      }
+    } catch {
+      // continue
+    }
+
+    // 3) message.sender (sync property)
+    if (!chatEntity && message?.sender && typeof message.sender === "object") {
+      chatEntity = message.sender as Record<string, unknown>;
+      entitySource = "message.sender";
+    }
+
+    // 4) event.getChat() / event.chat
+    try {
+      if ((!chatEntity || !extractAccessHashFromPeerCandidate(chatEntity)) && typeof event.getChat === "function") {
+        const loaded = await event.getChat();
+        if (loaded && typeof loaded === "object") {
+          if (!chatEntity) {
+            chatEntity = loaded as Record<string, unknown>;
+            entitySource = "event.getChat";
+          } else if (!extractAccessHashFromPeerCandidate(chatEntity) && extractAccessHashFromPeerCandidate(loaded)) {
+            chatEntity = { ...chatEntity, ...(loaded as Record<string, unknown>) };
+            entitySource = `${entitySource}+event.getChat`;
+          }
+        }
+      }
+    } catch {
+      // keep prior entity
+    }
+    if (!chatEntity && event.chat && typeof event.chat === "object") {
+      chatEntity = event.chat as Record<string, unknown>;
+      entitySource = "event.chat";
+    }
+
+    // 5) message.senderId / peerId via GramJS entity cache
+    if (!chatEntity || !extractAccessHashFromPeerCandidate(chatEntity)) {
+      const cacheCandidate =
+        (await this.tryEntityFromPeerRef(runtime, message?.senderId, "message.senderId")) ??
+        (await this.tryEntityFromPeerRef(runtime, message?.peerId, "message.peerId"));
+      if (cacheCandidate) {
+        if (!chatEntity) {
+          chatEntity = cacheCandidate.entity;
+          entitySource = cacheCandidate.source;
+        } else if (!extractAccessHashFromPeerCandidate(chatEntity) && extractAccessHashFromPeerCandidate(cacheCandidate.entity)) {
+          chatEntity = { ...chatEntity, ...cacheCandidate.entity };
+          entitySource = `${entitySource}+${cacheCandidate.source}`;
+        }
+      }
+    }
+
+    // 6) getInputChat / getInputSender for durable access_hash
+    try {
+      if (typeof event.getInputChat === "function") {
+        inputPeer = await event.getInputChat();
+        inputPeerHash = extractAccessHashFromPeerCandidate(inputPeer);
+        if (inputPeerHash && !entitySource) entitySource = "event.getInputChat";
+      }
+    } catch {
+      inputPeer = null;
     }
     try {
       if (!inputPeerHash && typeof message?.getInputSender === "function") {
@@ -745,6 +808,7 @@ export class TelegramClientAdapter {
         if (hash) {
           inputPeer = inputSender;
           inputPeerHash = hash;
+          if (!entitySource) entitySource = "message.getInputSender";
         }
       }
     } catch {
@@ -755,7 +819,7 @@ export class TelegramClientAdapter {
     const hadInputPeerHash = Boolean(inputPeerHash);
 
     if (!hadLiveEntity && !hadInputPeerHash) {
-      return { identity: null, hadLiveEntity: false, hadInputPeerHash: false };
+      return { identity: null, hadLiveEntity: false, hadInputPeerHash: false, entitySource: null };
     }
 
     const rawId = String(
@@ -827,12 +891,34 @@ export class TelegramClientAdapter {
         if (!identity.accessHash) {
           identity = { ...identity, accessHash: inputPeerHash };
         }
+        entitySource = entitySource ? `${entitySource}+resolvePeer` : "resolvePeer";
       } catch {
         // Keep live identity with hash — enough for durable InputPeer reconstruction.
       }
     }
 
-    return { identity, hadLiveEntity, hadInputPeerHash };
+    return { identity, hadLiveEntity, hadInputPeerHash, entitySource };
+  }
+
+  private async tryEntityFromPeerRef(
+    runtime: TelegramRuntime,
+    peerRef: unknown,
+    source: string
+  ): Promise<{ readonly entity: Record<string, unknown>; readonly source: string } | null> {
+    if (peerRef == null) return null;
+    // Avoid bare numeric getEntity — that is the PeerUser failure mode.
+    if (typeof peerRef === "number" || typeof peerRef === "bigint") return null;
+    if (typeof peerRef === "string" && /^-?\d+$/.test(peerRef.trim())) return null;
+    try {
+      if (typeof runtime.client.getEntity !== "function") return null;
+      const entity = await runtime.client.getEntity(peerRef as never);
+      if (entity && typeof entity === "object") {
+        return { entity: entity as Record<string, unknown>, source: `entity_cache:${source}` };
+      }
+    } catch {
+      return null;
+    }
+    return null;
   }
 
   /**

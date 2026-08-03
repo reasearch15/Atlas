@@ -165,6 +165,18 @@ describe("inbound peer access_hash persistence", () => {
     ).toBe(false);
     expect(
       isIncompletePrivatePeer({
+        chatType: "PRIVATE",
+        peerType: "USER",
+        accessHash: "123",
+        telegramChatId: "8291583373",
+        title: "Telegram user 8291583373",
+        firstName: null,
+        lastName: null,
+        username: null
+      })
+    ).toBe(true);
+    expect(
+      isIncompletePrivatePeer({
         chatType: "GROUP",
         peerType: "CHAT",
         accessHash: null,

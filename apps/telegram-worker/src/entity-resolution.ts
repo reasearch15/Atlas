@@ -1,4 +1,4 @@
-import { normalizeMarkedTelegramChatId } from "@atlas/shared";
+import { isTemporaryTelegramUserTitle, normalizeMarkedTelegramChatId } from "@atlas/shared";
 import type { TelegramRuntime } from "./telegram-client";
 
 export type TelegramPeerType = "USER" | "CHAT" | "CHANNEL";
@@ -867,17 +867,108 @@ export function extractAccessHashFromPeerCandidate(candidate: unknown): string |
 }
 
 /**
- * Returns true when a private USER peer is missing durable InputPeer fields.
+ * True when a private-USER display title is a placeholder / unusable label.
+ * Matches: naked digits, "Telegram user …", "Unknown User".
+ */
+export function isUnusablePrivatePeerTitle(title: string | null | undefined): boolean {
+  if (title == null) return true;
+  const trimmed = title.trim();
+  if (!trimmed) return true;
+  if (/^unknown\s+user$/i.test(trimmed)) return true;
+  if (/^telegram\s+user\s+/i.test(trimmed)) return true;
+  if (isTemporaryTelegramUserTitle(trimmed)) return true;
+  if (/^-?\d+$/.test(trimmed)) return true;
+  return false;
+}
+
+/**
+ * Private USER peer completeness predicate.
+ *
+ * Incomplete when any of:
+ * - peer_type IS NULL
+ * - peer_type is not USER
+ * - access_hash IS NULL / blank
+ * - title is only digits / starts with "Telegram user " / equals "Unknown User"
+ * - first_name, last_name, and username are all empty
+ *
+ * Groups/channels never match (return false) — use peer-type-specific rules elsewhere.
+ *
+ * Title/name checks apply when those fields are provided (including null).
+ * Call sites that omit title/names only evaluate peer_type + access_hash (hash gate).
  */
 export function isIncompletePrivatePeer(input: {
   readonly chatType?: string | null;
   readonly peerType?: string | null;
   readonly accessHash?: string | null;
   readonly telegramChatId?: string | null;
+  readonly title?: string | null;
+  readonly firstName?: string | null;
+  readonly lastName?: string | null;
+  readonly username?: string | null;
 }): boolean {
-  const peerType = normalizePeerType(input.peerType, input.chatType, input.telegramChatId ?? undefined);
-  if (peerType !== "USER") return false;
-  return !input.accessHash || !String(input.accessHash).trim();
+  const chatType = (input.chatType ?? "").toUpperCase();
+  // Groups/channels: do not apply private-user incompleteness rules.
+  if (chatType === "GROUP" || chatType === "SUPERGROUP" || chatType === "CHANNEL") {
+    return false;
+  }
+
+  const storedPeerType = input.peerType ? String(input.peerType).toUpperCase().trim() : null;
+  const normalized = normalizePeerType(input.peerType, input.chatType, input.telegramChatId ?? undefined);
+
+  // Explicit non-private chat types already handled; other non-PRIVATE contexts that
+  // normalize to CHAT/CHANNEL are also excluded (unless chatType is PRIVATE/UNKNOWN).
+  if (chatType !== "PRIVATE" && chatType !== "UNKNOWN" && chatType !== "") {
+    if (storedPeerType === "CHAT" || storedPeerType === "CHANNEL") return false;
+    if (normalized === "CHAT" || normalized === "CHANNEL") return false;
+    return false;
+  }
+
+  // PRIVATE / UNKNOWN / empty chatType — require durable USER metadata.
+  // peer_type must be present and exactly USER (null or mismatched CHANNEL/CHAT is incomplete).
+  if (storedPeerType !== "USER") {
+    return true;
+  }
+
+  if (!input.accessHash || !String(input.accessHash).trim()) {
+    return true;
+  }
+
+  // Title / name checks when the caller supplies them (DB row / repaired snapshot).
+  if ("title" in input) {
+    if (isUnusablePrivatePeerTitle(input.title ?? null)) {
+      return true;
+    }
+  }
+  if ("firstName" in input || "lastName" in input || "username" in input) {
+    const first = typeof input.firstName === "string" ? input.firstName.trim() : "";
+    const last = typeof input.lastName === "string" ? input.lastName.trim() : "";
+    const username = typeof input.username === "string" ? input.username.trim() : "";
+    if (!first && !last && !username) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Inverse of isIncompletePrivatePeer for private USER rows with full field sets.
+ */
+export function isPrivatePeerMetadataComplete(input: {
+  readonly chatType?: string | null;
+  readonly peerType?: string | null;
+  readonly accessHash?: string | null;
+  readonly telegramChatId?: string | null;
+  readonly title?: string | null;
+  readonly firstName?: string | null;
+  readonly lastName?: string | null;
+  readonly username?: string | null;
+}): boolean {
+  const chatType = (input.chatType ?? "").toUpperCase();
+  if (chatType === "GROUP" || chatType === "SUPERGROUP" || chatType === "CHANNEL") {
+    return true;
+  }
+  return !isIncompletePrivatePeer(input);
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   contactDisplayTitleQuality,
   isUsableHumanDisplayTitle
 } from "@atlas/shared";
+import { isIncompletePrivatePeer } from "./entity-resolution";
 import type { NormalizedDialog } from "./telegram-client";
 
 export interface IdentityBackfillCounts {
@@ -136,15 +137,25 @@ export function needsIdentityBackfillRow(chat: {
   lastName?: string | null;
   chatType: string;
   accessHash?: string | null;
+  peerType?: string | null;
 }): boolean {
+  // Private USER: share the inbound completeness predicate.
+  if (chat.chatType === "PRIVATE" || chat.chatType === "UNKNOWN") {
+    return isIncompletePrivatePeer({
+      chatType: chat.chatType,
+      peerType: chat.peerType ?? null,
+      accessHash: chat.accessHash ?? null,
+      telegramChatId: chat.telegramChatId,
+      title: chat.title,
+      firstName: chat.firstName ?? null,
+      lastName: chat.lastName ?? null,
+      username: chat.username
+    });
+  }
   if (!isUsableHumanDisplayTitle(chat.title, chat.telegramChatId)) return true;
   if (chat.chatType === "UNKNOWN") return true;
-  // Private/channel peers need a durable access hash for InputPeer reconstruction.
-  if ((chat.chatType === "PRIVATE" || chat.chatType === "CHANNEL" || chat.chatType === "SUPERGROUP") && !chat.accessHash) {
-    return true;
-  }
-  // Private rows should carry name parts or a username when Telegram provides them.
-  if (chat.chatType === "PRIVATE" && !chat.firstName && !chat.lastName && !chat.username) {
+  // Channel/supergroup peers need a durable access hash for InputPeer reconstruction.
+  if ((chat.chatType === "CHANNEL" || chat.chatType === "SUPERGROUP") && !chat.accessHash) {
     return true;
   }
   return false;

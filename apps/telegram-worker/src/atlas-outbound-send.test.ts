@@ -202,7 +202,7 @@ describe("Atlas outbound send path", () => {
     expect(repaired.accessHash).toBe("8949449174917549431");
     expect(repaired.peerType).toBe("USER");
     expect(repaired.firstName).toBe("Pat");
-    expect(isIncompletePrivatePeer({ ...existing, ...repaired, telegramChatId: existing.telegramChatId })).toBe(false);
+    expect(isIncompletePrivatePeer({ ...existing, ...repaired, telegramChatId: existing.telegramChatId, title: "Pat", firstName: "Pat", lastName: null, username: null })).toBe(false);
     // Same telegram_chat_id key — upsert updates the row, never a duplicate conversation.
     expect(existing.telegramChatId).toBe("5476500286");
   });
