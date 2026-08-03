@@ -244,4 +244,31 @@ describe("restoreTenantSession", () => {
     expect(a?.accessToken).toBe("shared-access");
     expect(b?.accessToken).toBe("shared-access");
   });
+
+  it("skips cookie refresh while a staff password-change token is pending", async () => {
+    vi.mocked(fetch).mockClear();
+    const storage = new Map<string, string>();
+    vi.stubGlobal("window", {
+      sessionStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string) => {
+          storage.delete(key);
+        }
+      }
+    });
+    storage.set(
+      "atlas:staff:password-change",
+      JSON.stringify({ changeToken: "pending-token", username: "bella" })
+    );
+
+    const { restoreTenantSession, resetTenantRefreshInflightForTests } = await import("./session-restore");
+    resetTenantRefreshInflightForTests();
+    const restored = await restoreTenantSession({ expectedRole: "STAFF" });
+    expect(restored).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
 });

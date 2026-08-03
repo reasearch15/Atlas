@@ -27,7 +27,7 @@ export function tenantTrustedDeviceCookieName(role: "COADMIN" | "STAFF"): "atlas
 /**
  * Host-only Secure cookies for same-origin platform.atlast.work.
  * Omitting Domain avoids cross-subdomain surprises and matches the API host exactly.
- * Legacy Domain-scoped cookies are cleared separately on write.
+ * Legacy parent-domain cookies (Domain=.example.com) are cleared separately on write.
  */
 export function tenantAuthCookieOptions(
   env: Pick<Env, "COOKIE_SECURE" | "COOKIE_DOMAIN">,
@@ -43,18 +43,27 @@ export function tenantAuthCookieOptions(
   };
 }
 
-/** Options used only to clear cookies previously written with Domain=COOKIE_DOMAIN. */
+/**
+ * Options used only to clear cookies previously written with Domain=.parent.tld.
+ *
+ * Exact-host COOKIE_DOMAIN values (no leading dot) are skipped: browsers treat
+ * Domain=exact-host like host-only, and @fastify/cookie emits a separate Max-Age=0
+ * Set-Cookie that can cancel the host-only token written in the same response.
+ */
 export function tenantAuthLegacyDomainClearOptions(
   env: Pick<Env, "COOKIE_SECURE" | "COOKIE_DOMAIN">,
   path: string
 ): TenantAuthCookieOptions | null {
-  if (env.COOKIE_DOMAIN === "localhost") return null;
+  const domain = env.COOKIE_DOMAIN.trim();
+  if (!domain || domain === "localhost" || !domain.startsWith(".")) {
+    return null;
+  }
   return {
     httpOnly: true,
     secure: env.COOKIE_SECURE,
     sameSite: "lax",
     path,
     maxAge: 0,
-    domain: env.COOKIE_DOMAIN
+    domain
   };
 }

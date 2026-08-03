@@ -27,10 +27,14 @@ describe("tenant auth cookies", () => {
     expect(tenantRefreshCookieName("COADMIN")).not.toBe(tenantRefreshCookieName("STAFF"));
   });
 
-  it("exposes legacy Domain clear options for migration only", () => {
+  it("clears only parent-domain legacy cookies (leading dot), never exact-host Domain", () => {
+    expect(
+      tenantAuthLegacyDomainClearOptions({ COOKIE_SECURE: true, COOKIE_DOMAIN: ".atlast.work" }, "/api/staff-auth")
+    ).toMatchObject({ domain: ".atlast.work", path: "/api/staff-auth", maxAge: 0 });
+    // Exact-host Domain shares host-only identity — clearing it in the same response cancels the new cookie.
     expect(
       tenantAuthLegacyDomainClearOptions({ COOKIE_SECURE: true, COOKIE_DOMAIN: "platform.atlast.work" }, "/api/staff-auth")
-    ).toMatchObject({ domain: "platform.atlast.work", path: "/api/staff-auth" });
+    ).toBeNull();
     expect(tenantAuthLegacyDomainClearOptions({ COOKIE_SECURE: false, COOKIE_DOMAIN: "localhost" }, "/api/staff-auth")).toBeNull();
   });
 });

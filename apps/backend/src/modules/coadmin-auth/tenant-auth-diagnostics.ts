@@ -28,6 +28,8 @@ export interface TenantAuthDiagnosticEvent {
     | "coadminSessionRole"
     | "staffSessionExpired"
     | "coadminSessionExpired"
+    | "staffLoginRequiresPasswordChange"
+    | "coadminLoginRequiresPasswordChange"
     | "refreshFailureReason";
   readonly role: "STAFF" | "COADMIN";
   readonly cookieName: string;
@@ -40,6 +42,9 @@ export interface TenantAuthDiagnosticEvent {
   readonly secure?: boolean;
   readonly sameSite?: string;
   readonly httpOnly?: boolean;
+  readonly domainPresent?: boolean;
+  readonly maxAgePresent?: boolean;
+  readonly cookieWritten?: boolean;
 }
 
 /**
@@ -50,18 +55,43 @@ export function logTenantAuthDiagnostic(payload: TenantAuthDiagnosticEvent): voi
 }
 
 export function cookieWrittenEvent(
-  role: "STAFF" | "COADMIN",
+  role: "COADMIN" | "STAFF",
   cookieName: string,
   cookiePath: string,
-  options: { readonly secure: boolean; readonly sameSite: string; readonly httpOnly: boolean }
+  options: {
+    readonly secure: boolean;
+    readonly sameSite: string;
+    readonly httpOnly: boolean;
+    readonly domainPresent: boolean;
+    readonly maxAgePresent: boolean;
+  }
 ): TenantAuthDiagnosticEvent {
   return {
     event: role === "STAFF" ? "staffCookieWritten" : "coadminCookieWritten",
     role,
     cookieName,
     cookiePath,
+    cookieWritten: true,
     secure: options.secure,
     sameSite: options.sameSite,
-    httpOnly: options.httpOnly
+    httpOnly: options.httpOnly,
+    domainPresent: options.domainPresent,
+    maxAgePresent: options.maxAgePresent
+  };
+}
+
+export function passwordChangeRequiredEvent(
+  role: "COADMIN" | "STAFF",
+  cookieName: string,
+  cookiePath: string,
+  userId: string
+): TenantAuthDiagnosticEvent {
+  return {
+    event: role === "STAFF" ? "staffLoginRequiresPasswordChange" : "coadminLoginRequiresPasswordChange",
+    role,
+    cookieName,
+    cookiePath,
+    cookieWritten: false,
+    userId
   };
 }

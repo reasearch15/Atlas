@@ -105,9 +105,11 @@ function request(
 function reply() {
   const cookies: Record<string, string> = {};
   const cookieOptions: Record<string, unknown> = {};
+  const headers: Record<string, string> = {};
   return {
     cookies,
     cookieOptions,
+    headers,
     setCookie: (name: string, value: string, options?: unknown) => {
       cookies[name] = value;
       cookieOptions[name] = options;
@@ -115,10 +117,14 @@ function reply() {
     clearCookie: (name: string) => {
       delete cookies[name];
       delete cookieOptions[name];
+    },
+    header: (name: string, value: string) => {
+      headers[name] = value;
     }
   } as unknown as FastifyReply & {
     cookies: Record<string, string>;
     cookieOptions: Record<string, unknown>;
+    headers: Record<string, string>;
   };
 }
 
@@ -459,6 +465,7 @@ describe("Staff login rate limiting", () => {
       path: "/api/staff-auth"
     });
     expect(loginReply.cookieOptions.atlas_staff_refresh).not.toHaveProperty("domain");
+    expect(loginReply.headers["x-atlas-staff-cookie"]).toBe("written");
     expect(loginReply.cookies.atlas_coadmin_refresh).toBeUndefined();
 
     const refreshed = await service.refresh(
@@ -466,6 +473,55 @@ describe("Staff login rate limiting", () => {
       reply()
     );
     expect(refreshed.accessToken).toBeTruthy();
+    expect(refreshed.user.role).toBe("STAFF");
+  });
+
+  it("does not set a staff refresh cookie when password change is required", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = true;
+    store.user.passwordHash = await bcrypt.hash("TempPass123!", 12);
+    const service = new CoadminAuthService(prisma(store), redis(), { ...env, COOKIE_DOMAIN: "platform.atlast.work", COOKIE_SECURE: true }, "STAFF");
+    const loginReply = reply();
+    const login = await service.login(
+      request({ username: "north-staff", password: "TempPass123!" }, {}, "203.0.113.30"),
+      loginReply
+    );
+    expect(login).toMatchObject({ requiresPasswordChange: true, changeToken: expect.any(String) });
+    expect(loginReply.cookies.atlas_staff_refresh).toBeUndefined();
+    expect(loginReply.headers["x-atlas-staff-cookie"]).toBe("password-change-required");
+    await expect(service.refresh(request({}, {}, "203.0.113.30"), reply())).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("sets the staff refresh cookie after password change completes", async () => {
+    const store = await storeFor("STAFF");
+    store.user.mustChangePassword = true;
+    store.user.passwordHash = await bcrypt.hash("TempPass123!", 12);
+    const r = redis();
+    const service = new CoadminAuthService(prisma(store), r, { ...env, COOKIE_DOMAIN: "platform.atlast.work", COOKIE_SECURE: true }, "STAFF");
+    const loginReply = reply();
+    const login = await service.login(request({ username: "north-staff", password: "TempPass123!" }), loginReply);
+    if (!("requiresPasswordChange" in login)) throw new Error("expected password change");
+
+    const changeReply = reply();
+    const changed = await service.changePassword(
+      request({ changeToken: login.changeToken, password: "PermanentPass123!", confirmPassword: "PermanentPass123!" }),
+      changeReply
+    );
+    expect(changed.accessToken).toBeTruthy();
+    expect(changeReply.cookies.atlas_staff_refresh).toBeTruthy();
+    expect(changeReply.headers["x-atlas-staff-cookie"]).toBe("written");
+    expect(changeReply.cookieOptions.atlas_staff_refresh).toMatchObject({
+      path: "/api/staff-auth",
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax"
+    });
+    expect(changeReply.cookieOptions.atlas_staff_refresh).not.toHaveProperty("domain");
+
+    const refreshed = await service.refresh(
+      request({}, { atlas_staff_refresh: changeReply.cookies.atlas_staff_refresh! }),
+      reply()
+    );
     expect(refreshed.user.role).toBe("STAFF");
   });
 

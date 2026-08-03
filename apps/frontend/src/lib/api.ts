@@ -38,6 +38,7 @@ import { handleFailedSessionRefresh, refreshPathFor, refreshSessionForPath } fro
 import { ApiClientError } from "@/lib/api-client-error";
 import { publicApiUrl } from "@/lib/public-api-url";
 import { clearRoleSensitiveClientCaches } from "@/lib/sensitive-cache";
+import { isPasswordChangeRequired } from "@/lib/tenant-login-response";
 
 const baseUrl = publicApiUrl;
 
@@ -159,7 +160,7 @@ export async function coadminLogin(payload: { username: string; password: string
     method: "POST",
     body: JSON.stringify(payload)
   });
-  if (!("requiresPasswordChange" in response)) {
+  if (!isPasswordChangeRequired(response)) {
     applyAuthenticatedSession(response.accessToken, response.user);
   }
   return response;
@@ -185,7 +186,7 @@ export async function staffLogin(payload: { username: string; password: string }
     method: "POST",
     body: JSON.stringify(payload)
   });
-  if (!("requiresPasswordChange" in response)) {
+  if (!isPasswordChangeRequired(response)) {
     applyAuthenticatedSession(response.accessToken, response.user);
   }
   return response;

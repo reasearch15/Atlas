@@ -2,6 +2,7 @@ import type { AuthResponse, AuthUser } from "@atlas/shared";
 import { isRoleAuthReady, markRoleAuthenticated } from "@/lib/auth-bootstrap";
 import { getPostLoginRoute } from "@/lib/post-login-route";
 import { publicApiUrl } from "@/lib/public-api-url";
+import { hasPendingTenantPasswordChange } from "@/lib/tenant-password-change-storage";
 import { useAuthStore } from "@/stores/auth-store";
 
 const apiBaseUrl = publicApiUrl;
@@ -121,6 +122,11 @@ export async function restoreTenantSession(options?: {
   readonly expectedRole?: "COADMIN" | "STAFF";
 }): Promise<AuthUser | null> {
   await waitForAuthHydration();
+
+  // First-login password change has no refresh cookie yet — never probe Coadmin/Staff refresh.
+  if (hasPendingTenantPasswordChange(options?.expectedRole)) {
+    return null;
+  }
 
   const ready = readReadyTenantUser(options?.expectedRole);
   if (ready) return ready;

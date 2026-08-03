@@ -20,6 +20,7 @@ import {
 import {
   cookieWrittenEvent,
   logTenantAuthDiagnostic,
+  passwordChangeRequiredEvent,
   type TenantRefreshFailureReason
 } from "./tenant-auth-diagnostics";
 import {
@@ -93,6 +94,12 @@ export class CoadminAuthService {
     if (user.mustChangePassword) {
       const changeToken = randomBytes(32).toString("base64url");
       await this.redis.set(`${passwordChangePrefix}${this.hashToken(changeToken)}`, user.id, "EX", 900);
+      const cookiePath = tenantAuthCookiePath(this.role);
+      logTenantAuthDiagnostic(
+        passwordChangeRequiredEvent(this.role, this.refreshCookieName, cookiePath, user.id)
+      );
+      // No refresh cookie by design — client must complete /change-password first.
+      reply.header(this.cookieStatusHeaderName(), "password-change-required");
       return { requiresPasswordChange: true, changeToken, user: this.toAuthUser(user) };
     }
     const device = await this.trustOrTouchDevice(user, request, reply);
@@ -419,16 +426,25 @@ export class CoadminAuthService {
     const options = this.refreshCookieOptions();
     const legacy = tenantAuthLegacyDomainClearOptions(this.env, path);
     if (legacy) {
+      // Parent-domain clear only (Domain=.tld). Exact-host clears are skipped — they share
+      // host-only identity with the new cookie and can cancel Set-Cookie in one response.
       reply.clearCookie(this.refreshCookieName, legacy);
     }
     reply.setCookie(this.refreshCookieName, token, options);
+    reply.header(this.cookieStatusHeaderName(), "written");
     logTenantAuthDiagnostic(
       cookieWrittenEvent(this.role, this.refreshCookieName, path, {
         secure: options.secure,
         sameSite: options.sameSite,
-        httpOnly: options.httpOnly
+        httpOnly: options.httpOnly,
+        domainPresent: typeof options.domain === "string" && options.domain.length > 0,
+        maxAgePresent: typeof options.maxAge === "number"
       })
     );
+  }
+
+  private cookieStatusHeaderName(): "x-atlas-staff-cookie" | "x-atlas-coadmin-cookie" {
+    return this.role === "STAFF" ? "x-atlas-staff-cookie" : "x-atlas-coadmin-cookie";
   }
 
   private async assertDashboardAccess(user: RequestUser): Promise<TenantUser> {

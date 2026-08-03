@@ -13,6 +13,8 @@ import { loginPasswordInputProps, loginUsernameInputProps } from "@/lib/auth-for
 import { ApiClientError } from "@/lib/api-client-error";
 import { coadminLogin, staffLogin } from "@/lib/api";
 import { getPostLoginRoute } from "@/lib/post-login-route";
+import { isPasswordChangeRequired } from "@/lib/tenant-login-response";
+import { tenantPasswordChangeStorageKey } from "@/lib/tenant-password-change-storage";
 import {
   applyRememberUsernamePreference,
   getRememberedUsername,
@@ -24,7 +26,7 @@ import {
   shouldAcceptLoginSubmit
 } from "./login-error";
 
-export const tenantPasswordChangeStorageKey = (role: "coadmin" | "staff") => `atlas:${role}:password-change`;
+export { tenantPasswordChangeStorageKey };
 
 /**
  * Renders username/password login with mandatory first-login password change.
@@ -72,8 +74,11 @@ export function TenantLoginForm({ role }: { readonly role: "coadmin" | "staff" }
       applyRememberUsernamePreference(normalized, rememberUsername);
       setPassword("");
       setRetryAfterSeconds(0);
-      if ("requiresPasswordChange" in response) {
-        sessionStorage.setItem(tenantPasswordChangeStorageKey(role), JSON.stringify({ changeToken: response.changeToken, username: normalized }));
+      if (isPasswordChangeRequired(response)) {
+        sessionStorage.setItem(
+          tenantPasswordChangeStorageKey(role),
+          JSON.stringify({ changeToken: response.changeToken, username: normalized })
+        );
         router.replace(changeRoute as Route);
         return;
       }

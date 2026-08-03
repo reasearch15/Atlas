@@ -14,6 +14,7 @@ import { tenantPasswordChangeStorageKey } from "@/features/tenant-auth/tenant-lo
 import { loginPasswordInputProps, loginUsernameInputProps } from "@/lib/auth-form-fields";
 import { tenantLogin } from "@/lib/api";
 import { getPostLoginRoute } from "@/lib/post-login-route";
+import { isPasswordChangeRequired } from "@/lib/tenant-login-response";
 import {
   applyRememberUsernamePreference,
   getRememberedUsername,
@@ -47,7 +48,7 @@ export function LoginForm() {
       applyRememberUsernamePreference(normalized, rememberUsername);
       setPassword("");
       const changeRoute = result.role === "coadmin" ? "/coadmin/change-password" : "/staff/change-password";
-      if ("requiresPasswordChange" in result.response) {
+      if (isPasswordChangeRequired(result.response)) {
         sessionStorage.setItem(
           tenantPasswordChangeStorageKey(result.role),
           JSON.stringify({ changeToken: result.response.changeToken, username: normalized })
