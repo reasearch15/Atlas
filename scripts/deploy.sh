@@ -126,16 +126,38 @@ main() {
   log "build"
   pnpm build
 
+  # Load DATABASE_URL for backup without printing secrets.
+  if [[ -z "${DATABASE_URL:-}" && -f "${RELEASE_DIR}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${RELEASE_DIR}/.env"
+    set +a
+  fi
+  DATABASE_URL="${DATABASE_URL:?DATABASE_URL is required for pre-migrate backup}"
+  # Prisma ?schema= must never be passed to pg_dump.
+  PG_DUMP_URL="${DATABASE_URL%%\?schema=*}"
+  export DATABASE_URL
+  export PG_DUMP_URL
+
   if [[ -x "${SHARED_DIR}/scripts/backup-postgres.sh" ]]; then
     log "pre-migrate postgres backup"
     ATLAS_BACKUP_DIR="${SHARED_DIR}/backups/postgres" \
+      DATABASE_URL="$DATABASE_URL" \
       bash "${SHARED_DIR}/scripts/backup-postgres.sh"
   elif [[ -x "${RELEASE_DIR}/scripts/backup-postgres.sh" ]]; then
     log "pre-migrate postgres backup"
     ATLAS_BACKUP_DIR="${SHARED_DIR}/backups/postgres" \
+      DATABASE_URL="$DATABASE_URL" \
       bash "${RELEASE_DIR}/scripts/backup-postgres.sh"
   else
-    log "WARNING: no backup-postgres.sh found; continuing without DB backup"
+    log "pre-migrate postgres backup (inline)"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    outfile="${SHARED_DIR}/backups/postgres/atlas-${stamp}.dump"
+    mkdir -p "${SHARED_DIR}/backups/postgres"
+    chmod 700 "${SHARED_DIR}/backups/postgres" || true
+    pg_dump --format=custom --no-owner --no-acl --file="$outfile" "$PG_DUMP_URL"
+    [[ -s "$outfile" ]] || die "backup file missing or empty: $outfile"
+    chmod 600 "$outfile" || true
   fi
 
   log "prisma migrate deploy"
@@ -144,6 +166,19 @@ main() {
   log "atomic symlink switch"
   ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 
+  # Install/refresh systemd unit templates from the release so GitHub deploys
+  # never require manual VPS unit edits (e.g. frontend 127.0.0.1:3200).
+  if [[ -d "${CURRENT_LINK}/deploy/systemd" ]]; then
+    log "syncing systemd units from release"
+    install -m 644 "${CURRENT_LINK}/deploy/systemd/atlas-backend.service" \
+      "/etc/systemd/system/${ATLAS_SYSTEMD_PREFIX}-backend.service"
+    install -m 644 "${CURRENT_LINK}/deploy/systemd/atlas-frontend.service" \
+      "/etc/systemd/system/${ATLAS_SYSTEMD_PREFIX}-frontend.service"
+    install -m 644 "${CURRENT_LINK}/deploy/systemd/atlas-telegram-worker.service" \
+      "/etc/systemd/system/${ATLAS_SYSTEMD_PREFIX}-telegram-worker.service"
+    systemctl daemon-reload
+  fi
+
   log "restart services"
   systemctl restart "${ATLAS_SYSTEMD_PREFIX}-backend.service"
   systemctl restart "${ATLAS_SYSTEMD_PREFIX}-frontend.service"
@@ -151,6 +186,8 @@ main() {
 
   sleep 3
   HEALTHCHECK="${CURRENT_LINK}/scripts/healthcheck.sh"
+  export ATLAS_FRONTEND_URL="${ATLAS_FRONTEND_URL:-http://127.0.0.1:3200}"
+  export ATLAS_BACKEND_URL="${ATLAS_BACKEND_URL:-http://127.0.0.1:4000}"
   if [[ -x "$HEALTHCHECK" ]]; then
     if ! bash "$HEALTHCHECK"; then
       if [[ -n "$previous" ]]; then

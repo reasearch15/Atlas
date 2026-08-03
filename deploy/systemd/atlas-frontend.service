@@ -11,8 +11,8 @@ WorkingDirectory=/opt/atlas/current
 EnvironmentFile=/opt/atlas/shared/.env
 Environment=NODE_ENV=production
 # NEXT_PUBLIC_API_URL must be present at build time for client bundles.
-# Runtime: next start serves apps/frontend/.next
-ExecStart=/usr/bin/pnpm --filter @atlas/frontend start:production
+# Bound to loopback only; Nginx on the same host proxies public HTTPS traffic.
+ExecStart=/usr/bin/pnpm --filter @atlas/frontend exec next start --hostname 127.0.0.1 --port 3200
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

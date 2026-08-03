@@ -33,7 +33,10 @@ const envSchema = z
     EMAIL_FROM: z.string().trim().min(1, "EMAIL_FROM is required"),
     BOOTSTRAP_ADMIN_EMAIL: optionalEmail,
     BOOTSTRAP_ADMIN_PASSWORD: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(12).optional()),
-    ENABLE_DEV_FIXTURES: z.coerce.boolean().default(false)
+    ENABLE_DEV_FIXTURES: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true")
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV !== "production") {

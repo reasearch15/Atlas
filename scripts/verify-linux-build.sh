@@ -131,6 +131,6 @@ tail -n 20 /tmp/worker-start.log || true
 echo "[verify] worker exit code after timeout/start: $worker_ec"
 
 echo "[verify] frontend start command present"
-node -e "const p=require('./apps/frontend/package.json'); if(!p.scripts['start:production']?.includes('next start')) process.exit(1)"
+node -e "const p=require('./apps/frontend/package.json'); const s=p.scripts['start:production']||''; if(!s.includes('next start')||!s.includes('127.0.0.1')||!s.includes('3200')) process.exit(1)"
 
 echo "LINUX_PRODUCTION_BUILD_OK"

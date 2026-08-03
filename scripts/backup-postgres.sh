@@ -6,6 +6,8 @@ ATLAS_BACKUP_DIR="${ATLAS_BACKUP_DIR:-/opt/atlas/shared/backups/postgres}"
 ATLAS_PG_DUMP="${ATLAS_PG_DUMP:-pg_dump}"
 ATLAS_BACKUP_RETENTION_DAYS="${ATLAS_BACKUP_RETENTION_DAYS:-14}"
 DATABASE_URL="${DATABASE_URL:?DATABASE_URL is required}"
+# Prisma query params (e.g. ?schema=public) break pg_dump - strip them.
+PG_DUMP_URL="${DATABASE_URL%%\?schema=*}"
 
 mkdir -p "$ATLAS_BACKUP_DIR"
 chmod 700 "$ATLAS_BACKUP_DIR" || true
@@ -19,8 +21,8 @@ die() { printf '[backup-postgres] ERROR: %s\n' "$*" >&2; exit 1; }
 command -v "$ATLAS_PG_DUMP" >/dev/null || die "pg_dump not found"
 
 log "writing $outfile"
-# pg_dump accepts connection URIs; avoid echoing DATABASE_URL.
-"$ATLAS_PG_DUMP" --format=custom --no-owner --no-acl --file="$outfile" "$DATABASE_URL"
+# pg_dump accepts connection URIs; never pass Prisma ?schema= and never echo credentials.
+"$ATLAS_PG_DUMP" --format=custom --no-owner --no-acl --file="$outfile" "$PG_DUMP_URL"
 
 [[ -s "$outfile" ]] || die "backup file missing or empty: $outfile"
 chmod 600 "$outfile" || true

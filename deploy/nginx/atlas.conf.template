@@ -7,7 +7,7 @@
 #
 # Arrangement A (recommended): https://ATLAS_DOMAIN
 #   /api /health /ws → backend :4000
-#   everything else → frontend :3000
+#   everything else -> frontend 127.0.0.1:3200
 #
 # Arrangement B (split): https://ATLAS_DOMAIN + https://ATLAS_API_DOMAIN
 #   Requires FRONTEND_ORIGIN=https://ATLAS_DOMAIN
@@ -16,7 +16,7 @@
 #            CORS already limited to FRONTEND_ORIGIN
 
 upstream atlas_frontend {
-    server 127.0.0.1:3000;
+    server 127.0.0.1:3200;
     keepalive 32;
 }
 

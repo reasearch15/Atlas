@@ -6,8 +6,8 @@
   "scripts": {
     "build": "next build",
     "dev": "next dev --turbo",
-    "start": "next start",
-    "start:production": "next start --hostname 0.0.0.0 --port 3000",
+    "start": "next start --hostname 127.0.0.1 --port 3200",
+    "start:production": "next start --hostname 127.0.0.1 --port 3200",
     "lint": "next lint",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

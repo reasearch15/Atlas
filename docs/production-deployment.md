@@ -8,7 +8,7 @@ Monorepo (`pnpm` workspaces):
 | Process | Package | Default port | Production entry |
 |---------|---------|--------------|------------------|
 | API + WebSocket | `@atlas/backend` | `BACKEND_PORT` (4000) | `apps/backend/dist/apps/backend/src/index.js` via `pnpm --filter @atlas/backend start` |
-| UI | `@atlas/frontend` | 3000 | `next start` via `pnpm --filter @atlas/frontend start:production` |
+| UI | `@atlas/frontend` | **127.0.0.1:3200** | `pnpm --filter @atlas/frontend exec next start --hostname 127.0.0.1 --port 3200` (systemd) |
 | Telegram worker | `@atlas/telegram-worker` | none | `apps/telegram-worker/dist/apps/telegram-worker/src/worker.js` via `pnpm --filter @atlas/telegram-worker start` |
 
 Dependencies: PostgreSQL 17, Redis 7, S3-compatible object storage (MinIO or managed), Nginx, Cloudflare, systemd.
@@ -83,7 +83,7 @@ Templates: `deploy/systemd/*.service`, `deploy/nginx/atlas.conf.template`.
 ## Health checks
 
 - Public: `GET /health` (DB + Redis + S3)
-- Script: `scripts/healthcheck.sh` (`ATLAS_BACKEND_URL`, `ATLAS_FRONTEND_URL`, optional Redis)
+- Script: `scripts/healthcheck.sh` (`ATLAS_BACKEND_URL` default `http://127.0.0.1:4000`, `ATLAS_FRONTEND_URL` default `http://127.0.0.1:3200`, optional Redis)
 - Worker: Redis key `atlas:telegram-worker:heartbeat`
 - Windows local: `pnpm status` (PowerShell) still available
 
