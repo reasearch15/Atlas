@@ -1,0 +1,28 @@
+[Unit]
+Description=Atlas frontend (Next.js)
+After=network-online.target atlas-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas/current
+EnvironmentFile=/opt/atlas/shared/.env
+Environment=NODE_ENV=production
+# NEXT_PUBLIC_API_URL must be present at build time for client bundles.
+# Runtime: next start serves apps/frontend/.next
+ExecStart=/usr/bin/pnpm --filter @atlas/frontend start:production
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atlas-frontend
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

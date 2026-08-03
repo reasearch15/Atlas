@@ -1,0 +1,27 @@
+[Unit]
+Description=Atlas Telegram worker (GramJS + BullMQ)
+After=network-online.target atlas-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas/current
+EnvironmentFile=/opt/atlas/shared/.env
+Environment=NODE_ENV=production
+# Verified production entry after build: apps/telegram-worker/dist/apps/telegram-worker/src/worker.js
+ExecStart=/usr/bin/pnpm --filter @atlas/telegram-worker start
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGTERM
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atlas-telegram-worker
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

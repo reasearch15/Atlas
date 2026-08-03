@@ -1,0 +1,102 @@
+# Atlas Nginx template — placeholders only. Do not use as-is without replacing ATLAS_*.
+#
+# Recommended arrangement for this codebase: SAME-DOMAIN (Arrangement A).
+# Why: FRONTEND_ORIGIN is a single origin with credentials; refresh cookies use COOKIE_DOMAIN;
+# NEXT_PUBLIC_API_URL derives WebSocket URLs via http→ws replacement. Same-domain avoids CORS
+# and cookie Domain mismatches common with split hosts.
+#
+# Arrangement A (recommended): https://ATLAS_DOMAIN
+#   /api /health /ws → backend :4000
+#   everything else → frontend :3000
+#
+# Arrangement B (split): https://ATLAS_DOMAIN + https://ATLAS_API_DOMAIN
+#   Requires FRONTEND_ORIGIN=https://ATLAS_DOMAIN
+#            NEXT_PUBLIC_API_URL=https://ATLAS_API_DOMAIN
+#            COOKIE_DOMAIN=.parent.example (shared parent)
+#            CORS already limited to FRONTEND_ORIGIN
+
+upstream atlas_frontend {
+    server 127.0.0.1:3000;
+    keepalive 32;
+}
+
+upstream atlas_backend {
+    server 127.0.0.1:4000;
+    keepalive 32;
+}
+
+# Cloudflare: restore visitor IP when orange-clouded. Prefer authenticating Cloudflare
+# IPs via real_ip modules with an up-to-date Cloudflare IP list — do not trust arbitrary
+# X-Forwarded-For from the public internet.
+# real_ip_header CF-Connecting-IP;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ATLAS_DOMAIN;
+
+    # Redirect to HTTPS when certificates are installed (certbot or Cloudflare origin cert).
+    # return 301 https://$host$request_uri;
+
+    client_max_body_size 64m;
+
+    location /health {
+        proxy_pass http://atlas_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /api/ {
+        proxy_pass http://atlas_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    location /ws {
+        proxy_pass http://atlas_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location / {
+        proxy_pass http://atlas_frontend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Optional Arrangement B API vhost (only if using ATLAS_API_DOMAIN):
+# server {
+#     listen 443 ssl http2;
+#     server_name ATLAS_API_DOMAIN;
+#     # ssl_certificate ...;
+#     client_max_body_size 64m;
+#     location / {
+#         proxy_pass http://atlas_backend;
+#         proxy_http_version 1.1;
+#         proxy_set_header Upgrade $http_upgrade;
+#         proxy_set_header Connection $connection_upgrade;
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#         proxy_read_timeout 3600s;
+#         proxy_buffering off;
+#     }
+# }

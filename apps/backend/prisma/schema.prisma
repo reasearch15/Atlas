@@ -1,0 +1,767 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PLATFORM_ADMIN
+  COADMIN
+  STAFF
+}
+
+enum UserStatus {
+  ACTIVE
+  PENDING_PASSWORD_CHANGE
+  SUSPENDED
+  ARCHIVED
+  DISABLED
+}
+
+enum WorkspaceStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum PlatformAdminStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum AdminLoginChallengePurpose {
+  NEW_DEVICE
+}
+
+enum DeveloperAppProvider {
+  TELEGRAM
+}
+
+enum DeveloperAppStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum TelegramAccountStatus {
+  PENDING
+  AUTHORIZING
+  WAITING_FOR_QR
+  WAITING_FOR_PHONE
+  WAITING_FOR_CODE
+  WAITING_FOR_PASSWORD
+  SYNCING
+  CONNECTED
+  DEGRADED
+  REAUTH_REQUIRED
+  DISCONNECTED
+  FAILED
+  DELETING
+}
+
+enum TelegramAuthorizationState {
+  EMPTY
+  QR_REQUESTED
+  PHONE_REQUESTED
+  CODE_REQUESTED
+  PASSWORD_REQUESTED
+  AUTHORIZED
+  EXPIRED
+  CANCELLED
+  REAUTH_REQUIRED
+}
+
+enum TelegramSyncState {
+  IDLE
+  INITIAL_SYNC
+  LIVE
+  PAUSED
+  FAILED
+}
+
+enum TelegramChatType {
+  PRIVATE
+  GROUP
+  SUPERGROUP
+  CHANNEL
+  UNKNOWN
+}
+
+enum TelegramMessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum TelegramMessageContentType {
+  TEXT
+  PHOTO
+  VIDEO
+  VIDEO_NOTE
+  VOICE
+  AUDIO
+  DOCUMENT
+  ANIMATION
+  STICKER
+  CONTACT
+  LOCATION
+  LIVE_LOCATION
+  POLL
+  DICE
+  OTHER
+}
+
+enum TelegramMediaDownloadState {
+  NONE
+  PENDING
+  DOWNLOADING
+  STORED
+  FAILED
+  SKIPPED
+}
+
+enum TelegramSendStatus {
+  RECEIVED
+  QUEUED
+  UPLOADING
+  SENDING
+  SENT
+  DELIVERED
+  FAILED_RETRYABLE
+  FAILED_PERMANENT
+}
+
+enum TelegramOutboundOperation {
+  SEND_TEXT_MESSAGE
+  SEND_MEDIA_MESSAGE
+  START_AUTH
+  SUBMIT_PHONE
+  SUBMIT_CODE
+  SUBMIT_PASSWORD
+  CANCEL_AUTH
+  DISCONNECT
+  REAUTHORIZE
+  INITIAL_SYNC
+  MEDIA_BACKFILL
+  PERMANENT_DELETE
+}
+
+enum TelegramAccountDeletionStage {
+  REQUESTED
+  STOPPING_WORKER
+  DELETING_DATABASE
+  DELETING_MEDIA
+  COMPLETED
+  FAILED
+}
+
+enum TelegramOutboundStatus {
+  QUEUED
+  SENDING
+  SENT
+  FAILED_RETRYABLE
+  FAILED_PERMANENT
+  CANCELLED
+}
+
+enum CrmConversationStatus {
+  NEW
+  OPEN
+  WAITING
+  RESOLVED
+  CLOSED
+}
+
+enum CrmContactKind {
+  PRIVATE
+  GROUP
+  CHANNEL
+  UNKNOWN
+}
+
+enum CrmActivityType {
+  CLAIMED
+  ASSIGNED
+  REASSIGNED
+  RELEASED
+  STATUS_CHANGED
+  TAG_ADDED
+  TAG_REMOVED
+  NOTE_CREATED
+  NOTE_EDITED
+  REOPENED
+  TELEGRAM_MESSAGE_SENT
+  INTERNAL_MESSAGE_SENT
+}
+
+model Workspace {
+  id               String                    @id @default(uuid()) @db.Uuid
+  name             String                    @db.VarChar(120)
+  slug             String                    @unique @db.VarChar(64)
+  displayName      String?                   @map("display_name") @db.VarChar(120)
+  adminNotes       String?                   @map("admin_notes") @db.Text
+  status           WorkspaceStatus           @default(ACTIVE)
+  primaryCoadminId String?                   @unique @map("primary_coadmin_id") @db.Uuid
+  isDevelopmentFixture Boolean                @default(false) @map("is_development_fixture")
+  fixtureKey      String?                    @unique @map("fixture_key") @db.VarChar(120)
+  createdAt        DateTime                  @default(now()) @map("created_at")
+  updatedAt        DateTime                  @updatedAt @map("updated_at")
+  users            User[]
+  sessions         Session[]
+  auditLogs        AuditLog[]
+  telegramAccounts TelegramAccount[]
+  developerApps    DeveloperApp[]
+  telegramChats    TelegramChat[]
+  telegramMessages TelegramMessage[]
+  telegramCommands TelegramOutboundCommand[]
+  primaryCoadmin   User?                     @relation("PrimaryWorkspaceCoadmin", fields: [primaryCoadminId], references: [id], onDelete: SetNull)
+  crmContacts      CrmContact[]
+  workspaceTags    WorkspaceTag[]
+  crmNotes         CrmInternalNote[]
+  crmActivities   CrmActivityEvent[]
+  crmStatusHistory CrmStatusHistory[]
+  internalThreads  InternalMessageThread[]
+  internalMessages InternalMessage[]
+  telegramAccountDeletions TelegramAccountDeletion[]
+
+  @@map("workspaces")
+}
+
+model User {
+  id                      String                    @id @default(uuid()) @db.Uuid
+  workspaceId             String?                   @map("workspace_id") @db.Uuid
+  workspace               Workspace?                @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  email                   String?                   @unique @db.VarChar(320)
+  username                String?                   @unique @db.VarChar(80)
+  name                    String                    @db.VarChar(120)
+  passwordHash            String                    @map("password_hash")
+  passwordChangedAt       DateTime?                 @map("password_changed_at")
+  temporaryPasswordIssuedAt DateTime?               @map("temporary_password_issued_at")
+  mustChangePassword      Boolean                   @default(false) @map("must_change_password")
+  role                    UserRole
+  status                  UserStatus                @default(ACTIVE)
+  isDevelopmentFixture    Boolean                   @default(false) @map("is_development_fixture")
+  fixtureKey              String?                   @unique @map("fixture_key") @db.VarChar(120)
+  createdAt               DateTime                  @default(now()) @map("created_at")
+  updatedAt               DateTime                  @updatedAt @map("updated_at")
+  sessions                Session[]
+  auditLogs               AuditLog[]                @relation("ActorAuditLogs")
+  createdTelegramAccounts TelegramAccount[]         @relation("CreatedTelegramAccounts")
+  createdDeveloperApps    DeveloperApp[]            @relation("CreatedDeveloperApps")
+  sentTelegramMessages    TelegramMessage[]         @relation("InternalTelegramMessages")
+  telegramCommands        TelegramOutboundCommand[] @relation("RequestedTelegramCommands")
+  ownedWorkspace           Workspace?                @relation("PrimaryWorkspaceCoadmin")
+  platformAdmin           PlatformAdmin?
+  trustedDevices           UserTrustedDevice[]
+  assignedTelegramChats    TelegramChat[]            @relation("ChatAssignee")
+  assignmentActorChats     TelegramChat[]            @relation("ChatAssignedBy")
+  crmNotesAuthored         CrmInternalNote[]         @relation("CrmNoteAuthor")
+  crmActivitiesActed       CrmActivityEvent[]        @relation("CrmActivityActor")
+  crmStatusChanges        CrmStatusHistory[]        @relation("CrmStatusActor")
+  tagsCreated              WorkspaceTag[]            @relation("TagCreator")
+  chatTagsAdded            TelegramChatTag[]         @relation("ChatTagAdder")
+  staffInternalThreads     InternalMessageThread[]   @relation("InternalThreadStaff")
+  sentInternalMessages     InternalMessage[]         @relation("InternalMessageSender")
+  receivedInternalMessages InternalMessage[]         @relation("InternalMessageReceiver")
+  telegramAccountDeletions TelegramAccountDeletion[] @relation("TelegramAccountDeletionActor")
+
+  @@index([username])
+  @@index([workspaceId, role])
+  @@map("users")
+}
+
+model UserTrustedDevice {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  tokenHash       String    @unique @map("token_hash")
+  displayName     String    @map("display_name") @db.VarChar(160)
+  browser         String    @db.VarChar(80)
+  operatingSystem String    @map("operating_system") @db.VarChar(80)
+  firstIp         String    @map("first_ip") @db.Inet
+  lastIp          String    @map("last_ip") @db.Inet
+  firstTrustedAt  DateTime  @default(now()) @map("first_trusted_at")
+  lastUsedAt      DateTime  @default(now()) @map("last_used_at")
+  expiresAt       DateTime  @map("expires_at")
+  revokedAt       DateTime? @map("revoked_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions        Session[]
+
+  @@index([userId, revokedAt, expiresAt])
+  @@map("user_trusted_devices")
+}
+
+model PlatformAdmin {
+  id                String                @id @default(uuid()) @db.Uuid
+  userId            String                @unique @map("user_id") @db.Uuid
+  email             String                @unique @db.VarChar(320)
+  passwordHash      String                @map("password_hash")
+  status            PlatformAdminStatus   @default(ACTIVE)
+  passwordChangedAt DateTime              @default(now()) @map("password_changed_at")
+  lastLoginAt       DateTime?             @map("last_login_at")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+  user              User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challenges        AdminLoginChallenge[]
+  trustedDevices    AdminTrustedDevice[]
+
+  @@map("platform_admins")
+}
+
+model AdminLoginChallenge {
+  id                  String                     @id @default(uuid()) @db.Uuid
+  adminId             String                     @map("admin_id") @db.Uuid
+  codeHash            String                     @map("code_hash")
+  purpose             AdminLoginChallengePurpose @default(NEW_DEVICE)
+  expiresAt           DateTime                   @map("expires_at")
+  failedAttempts      Int                        @default(0) @map("failed_attempts")
+  maxAttempts         Int                        @default(5) @map("max_attempts")
+  consumedAt          DateTime?                  @map("consumed_at")
+  createdAt           DateTime                   @default(now()) @map("created_at")
+  lastSentAt          DateTime                   @default(now()) @map("last_sent_at")
+  requestingIp        String                     @map("requesting_ip") @db.Inet
+  requestingUserAgent String                     @map("requesting_user_agent")
+  admin               PlatformAdmin              @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId, purpose, consumedAt, expiresAt])
+  @@map("admin_login_challenges")
+}
+
+model AdminTrustedDevice {
+  id                  String        @id @default(uuid()) @db.Uuid
+  adminId             String        @map("admin_id") @db.Uuid
+  tokenHash           String        @unique @map("token_hash")
+  displayName         String        @map("display_name") @db.VarChar(160)
+  browser             String        @db.VarChar(80)
+  operatingSystem     String        @map("operating_system") @db.VarChar(80)
+  firstIp             String        @map("first_ip") @db.Inet
+  lastIp              String        @map("last_ip") @db.Inet
+  firstTrustedAt      DateTime      @default(now()) @map("first_trusted_at")
+  lastUsedAt          DateTime      @default(now()) @map("last_used_at")
+  expiresAt           DateTime      @map("expires_at")
+  revokedAt           DateTime?     @map("revoked_at")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+  admin               PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  sessions            Session[]
+
+  @@index([adminId, revokedAt, expiresAt])
+  @@map("admin_trusted_devices")
+}
+
+model DeveloperApp {
+  id               String               @id @default(uuid()) @db.Uuid
+  workspaceId      String               @map("workspace_id") @db.Uuid
+  provider         DeveloperAppProvider
+  displayName      String               @map("display_name") @db.VarChar(120)
+  apiId            Int                  @map("api_id")
+  encryptedApiHash Json                 @map("encrypted_api_hash")
+  status           DeveloperAppStatus   @default(ACTIVE)
+  isDevelopmentFixture Boolean           @default(false) @map("is_development_fixture")
+  fixtureKey       String?              @unique @map("fixture_key") @db.VarChar(120)
+  createdByUserId  String               @map("created_by") @db.Uuid
+  createdAt        DateTime             @default(now()) @map("created_at")
+  updatedAt        DateTime             @updatedAt @map("updated_at")
+  deletedAt        DateTime?            @map("deleted_at")
+  workspace        Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy        User                 @relation("CreatedDeveloperApps", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  telegramAccounts TelegramAccount[]
+
+  @@unique([workspaceId, provider, displayName])
+  @@index([workspaceId, provider, status])
+  @@map("developer_apps")
+}
+
+model TelegramAccount {
+  id                   String                     @id @default(uuid()) @db.Uuid
+  workspaceId          String                     @map("workspace_id") @db.Uuid
+  developerAppId       String                     @map("developer_app_id") @db.Uuid
+  displayName          String                     @map("display_name") @db.VarChar(120)
+  telegramUserId       String?                    @map("telegram_user_id") @db.VarChar(64)
+  telegramUsername     String?                    @map("telegram_username") @db.VarChar(120)
+  phoneNumberEncrypted Json?                      @map("phone_number_encrypted")
+  sessionEncrypted     Json?                      @map("session_encrypted")
+  status               TelegramAccountStatus      @default(PENDING)
+  authorizationState   TelegramAuthorizationState @default(EMPTY) @map("authorization_state")
+  syncState            TelegramSyncState          @default(IDLE) @map("sync_state")
+  isDevelopmentFixture Boolean                    @default(false) @map("is_development_fixture")
+  fixtureKey           String?                    @unique @map("fixture_key") @db.VarChar(120)
+  lastConnectedAt      DateTime?                  @map("last_connected_at")
+  lastUpdateAt         DateTime?                  @map("last_update_at")
+  lastErrorCode        String?                    @map("last_error_code") @db.VarChar(80)
+  lastErrorMessage     String?                    @map("last_error_message") @db.VarChar(500)
+  workerLeaseOwner     String?                    @map("worker_lease_owner") @db.VarChar(120)
+  workerLeaseExpiresAt DateTime?                  @map("worker_lease_expires_at")
+  createdByUserId      String                     @map("created_by_user_id") @db.Uuid
+  createdAt            DateTime                   @default(now()) @map("created_at")
+  updatedAt            DateTime                   @updatedAt @map("updated_at")
+  disconnectedAt       DateTime?                  @map("disconnected_at")
+  workspace            Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  developerApp         DeveloperApp               @relation(fields: [developerAppId], references: [id], onDelete: Restrict)
+  createdBy            User                       @relation("CreatedTelegramAccounts", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  chats                TelegramChat[]
+  messages             TelegramMessage[]
+  outboundCommands     TelegramOutboundCommand[]
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, developerAppId])
+  @@index([workerLeaseExpiresAt])
+  @@map("telegram_accounts")
+}
+
+model TelegramChat {
+  id                 String                    @id @default(uuid()) @db.Uuid
+  workspaceId        String                    @map("workspace_id") @db.Uuid
+  telegramAccountId  String                    @map("telegram_account_id") @db.Uuid
+  telegramChatId     String                    @map("telegram_chat_id") @db.VarChar(80)
+  chatType           TelegramChatType          @map("chat_type")
+  title              String                    @db.VarChar(255)
+  username           String?                   @db.VarChar(120)
+  firstName          String?                   @map("first_name") @db.VarChar(120)
+  lastName           String?                   @map("last_name") @db.VarChar(120)
+  isBot              Boolean                   @default(false) @map("is_bot")
+  photoMetadata      Json?                     @map("photo_metadata")
+  lastMessageId      String?                   @map("last_message_id") @db.VarChar(80)
+  lastMessagePreview String?                   @map("last_message_preview") @db.VarChar(500)
+  lastMessageAt      DateTime?                 @map("last_message_at")
+  unreadCount        Int                       @default(0) @map("unread_count")
+  isPinned           Boolean                   @default(false) @map("is_pinned")
+  isArchived         Boolean                   @default(false) @map("is_archived")
+  isDevelopmentFixture Boolean                 @default(false) @map("is_development_fixture")
+  fixtureKey         String?                   @unique @map("fixture_key") @db.VarChar(120)
+  rawMetadataJson    Json                      @default("{}") @map("raw_metadata_json")
+  /** GramJS InputPeer access_hash as decimal string (required for USER/CHANNEL peers). */
+  accessHash         String?                   @map("access_hash") @db.VarChar(80)
+  /** USER | CHAT | CHANNEL — drives InputPeer construction. */
+  peerType           String?                   @map("peer_type") @db.VarChar(16)
+  /** Optional phone captured from User entity for resolution (not shown to Staff by default). */
+  peerPhone          String?                   @map("peer_phone") @db.VarChar(32)
+  crmContactId       String?                   @map("crm_contact_id") @db.Uuid
+  crmStatus          CrmConversationStatus     @default(NEW) @map("crm_status")
+  assignedUserId     String?                   @map("assigned_user_id") @db.Uuid
+  assignedAt         DateTime?                 @map("assigned_at")
+  assignedByUserId   String?                   @map("assigned_by_user_id") @db.Uuid
+  claimedAt          DateTime?                 @map("claimed_at")
+  lastAssignmentChangeAt DateTime?             @map("last_assignment_change_at")
+  needsCrmAttention  Boolean                   @default(true) @map("needs_crm_attention")
+  crmAttentionAt     DateTime?                 @map("crm_attention_at")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  workspace          Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  telegramAccount    TelegramAccount           @relation(fields: [telegramAccountId], references: [id], onDelete: Cascade)
+  crmContact         CrmContact?               @relation(fields: [crmContactId], references: [id], onDelete: SetNull)
+  assignedUser       User?                     @relation("ChatAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  assignedByUser     User?                     @relation("ChatAssignedBy", fields: [assignedByUserId], references: [id], onDelete: SetNull)
+  messages           TelegramMessage[]
+  outboundCommands   TelegramOutboundCommand[]
+  tags               TelegramChatTag[]
+  notes              CrmInternalNote[]
+  activities         CrmActivityEvent[]
+  statusHistory      CrmStatusHistory[]
+
+  @@unique([telegramAccountId, telegramChatId])
+  @@index([workspaceId, lastMessageAt])
+  @@index([workspaceId, telegramAccountId])
+  @@index([workspaceId, crmStatus, assignedUserId])
+  @@index([workspaceId, needsCrmAttention, lastMessageAt])
+  @@index([assignedUserId])
+  @@index([crmContactId])
+  @@map("telegram_chats")
+}
+
+model CrmContact {
+  id              String         @id @default(uuid()) @db.Uuid
+  workspaceId     String         @map("workspace_id") @db.Uuid
+  telegramPeerId  String         @map("telegram_peer_id") @db.VarChar(80)
+  kind            CrmContactKind @default(UNKNOWN)
+  displayName     String         @map("display_name") @db.VarChar(255)
+  username        String?        @db.VarChar(120)
+  phoneMasked     String?        @map("phone_masked") @db.VarChar(32)
+  firstSeenAt     DateTime       @default(now()) @map("first_seen_at")
+  lastSeenAt      DateTime       @default(now()) @map("last_seen_at")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  workspace       Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  chats           TelegramChat[]
+
+  @@unique([workspaceId, telegramPeerId])
+  @@index([workspaceId, lastSeenAt])
+  @@map("crm_contacts")
+}
+
+model WorkspaceTag {
+  id              String            @id @default(uuid()) @db.Uuid
+  workspaceId     String            @map("workspace_id") @db.Uuid
+  name            String            @db.VarChar(80)
+  color           String            @db.VarChar(16)
+  archivedAt      DateTime?         @map("archived_at")
+  createdByUserId String?           @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+  workspace       Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy       User?             @relation("TagCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  chatTags        TelegramChatTag[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, archivedAt])
+  @@map("workspace_tags")
+}
+
+model TelegramChatTag {
+  id            String       @id @default(uuid()) @db.Uuid
+  workspaceId   String       @map("workspace_id") @db.Uuid
+  chatId        String       @map("chat_id") @db.Uuid
+  tagId         String       @map("tag_id") @db.Uuid
+  addedByUserId String?      @map("added_by_user_id") @db.Uuid
+  createdAt     DateTime     @default(now()) @map("created_at")
+  chat          TelegramChat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  tag           WorkspaceTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  addedBy       User?        @relation("ChatTagAdder", fields: [addedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([chatId, tagId])
+  @@index([workspaceId, tagId])
+  @@map("telegram_chat_tags")
+}
+
+model CrmInternalNote {
+  id          String       @id @default(uuid()) @db.Uuid
+  workspaceId String       @map("workspace_id") @db.Uuid
+  chatId      String       @map("chat_id") @db.Uuid
+  authorUserId String      @map("author_user_id") @db.Uuid
+  body        String       @db.Text
+  createdAt   DateTime     @default(now()) @map("created_at")
+  editedAt    DateTime?    @map("edited_at")
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  chat        TelegramChat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  author      User         @relation("CrmNoteAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, chatId, createdAt])
+  @@map("crm_internal_notes")
+}
+
+model CrmActivityEvent {
+  id          String         @id @default(uuid()) @db.Uuid
+  workspaceId String         @map("workspace_id") @db.Uuid
+  chatId      String         @map("chat_id") @db.Uuid
+  actorUserId String?        @map("actor_user_id") @db.Uuid
+  type        CrmActivityType
+  payloadJson Json           @default("{}") @map("payload_json")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  workspace   Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  chat        TelegramChat   @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  actor       User?          @relation("CrmActivityActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, chatId, createdAt])
+  @@map("crm_activity_events")
+}
+
+model CrmStatusHistory {
+  id          String                @id @default(uuid()) @db.Uuid
+  workspaceId String                @map("workspace_id") @db.Uuid
+  chatId      String                @map("chat_id") @db.Uuid
+  fromStatus  CrmConversationStatus @map("from_status")
+  toStatus    CrmConversationStatus @map("to_status")
+  actorUserId String?               @map("actor_user_id") @db.Uuid
+  reason      String?               @db.VarChar(120)
+  createdAt   DateTime              @default(now()) @map("created_at")
+  workspace   Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  chat        TelegramChat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  actor       User?                 @relation("CrmStatusActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, chatId, createdAt])
+  @@map("crm_status_history")
+}
+
+model TelegramMessage {
+  id                       String                     @id @default(uuid()) @db.Uuid
+  workspaceId              String                     @map("workspace_id") @db.Uuid
+  telegramAccountId        String                     @map("telegram_account_id") @db.Uuid
+  telegramChatDbId         String                     @map("telegram_chat_db_id") @db.Uuid
+  telegramChatId           String                     @map("telegram_chat_id") @db.VarChar(80)
+  telegramMessageId        String                     @map("telegram_message_id") @db.VarChar(80)
+  senderTelegramUserId     String?                    @map("sender_telegram_user_id") @db.VarChar(80)
+  direction                TelegramMessageDirection
+  contentType              TelegramMessageContentType @map("content_type")
+  textContent              String                     @map("text_content") @db.Text
+  caption                  String?                    @db.Text
+  mimeType                 String?                    @map("mime_type") @db.VarChar(120)
+  fileName                 String?                    @map("file_name") @db.VarChar(255)
+  fileSizeBytes            BigInt?                    @map("file_size_bytes")
+  width                    Int?
+  height                   Int?
+  durationSeconds          Int?                       @map("duration_seconds")
+  waveformJson             Json?                      @map("waveform_json")
+  mediaMetadataJson        Json?                      @map("media_metadata_json")
+  mediaStorageKey          String?                    @map("media_storage_key") @db.VarChar(512)
+  thumbnailStorageKey      String?                    @map("thumbnail_storage_key") @db.VarChar(512)
+  mediaDownloadState       TelegramMediaDownloadState @default(NONE) @map("media_download_state")
+  mediaUploadState         TelegramMediaDownloadState @default(NONE) @map("media_upload_state")
+  mediaError               String?                    @map("media_error") @db.VarChar(500)
+  replyToTelegramMessageId String?                    @map("reply_to_telegram_message_id") @db.VarChar(80)
+  telegramCreatedAt        DateTime                   @map("telegram_created_at")
+  telegramEditedAt         DateTime?                  @map("telegram_edited_at")
+  internalSenderUserId     String?                    @map("internal_sender_user_id") @db.Uuid
+  internalSenderSessionId  String?                    @map("internal_sender_session_id") @db.Uuid
+  internalSenderRole       UserRole?                  @map("internal_sender_role")
+  internalSenderName       String?                    @map("internal_sender_name") @db.VarChar(120)
+  sendStatus               TelegramSendStatus         @default(RECEIVED) @map("send_status")
+  isDevelopmentFixture     Boolean                    @default(false) @map("is_development_fixture")
+  fixtureKey               String?                    @unique @map("fixture_key") @db.VarChar(120)
+  createdAt                DateTime                   @default(now()) @map("created_at")
+  updatedAt                DateTime                   @updatedAt @map("updated_at")
+  workspace                Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  telegramAccount          TelegramAccount            @relation(fields: [telegramAccountId], references: [id], onDelete: Cascade)
+  telegramChat             TelegramChat               @relation(fields: [telegramChatDbId], references: [id], onDelete: Cascade)
+  internalSender           User?                      @relation("InternalTelegramMessages", fields: [internalSenderUserId], references: [id], onDelete: SetNull)
+
+  @@unique([telegramAccountId, telegramChatId, telegramMessageId])
+  @@index([workspaceId, telegramChatDbId, telegramCreatedAt])
+  @@index([internalSenderUserId])
+  @@index([mediaDownloadState])
+  @@map("telegram_messages")
+}
+
+model TelegramOutboundCommand {
+  id                   String                    @id @default(uuid()) @db.Uuid
+  workspaceId          String                    @map("workspace_id") @db.Uuid
+  telegramAccountId    String                    @map("telegram_account_id") @db.Uuid
+  telegramChatDbId     String?                   @map("telegram_chat_db_id") @db.Uuid
+  telegramChatId       String?                   @map("telegram_chat_id") @db.VarChar(80)
+  requestedByUserId    String                    @map("requested_by_user_id") @db.Uuid
+  requestedBySessionId String                    @map("requested_by_session_id") @db.Uuid
+  operation            TelegramOutboundOperation
+  payloadJson          Json                      @map("payload_json")
+  idempotencyKey       String                    @unique @map("idempotency_key") @db.VarChar(160)
+  status               TelegramOutboundStatus    @default(QUEUED)
+  isDevelopmentFixture Boolean                   @default(false) @map("is_development_fixture")
+  fixtureKey           String?                   @unique @map("fixture_key") @db.VarChar(120)
+  telegramMessageId    String?                   @map("telegram_message_id") @db.VarChar(80)
+  attempts             Int                       @default(0)
+  lastError            String?                   @map("last_error") @db.VarChar(500)
+  createdAt            DateTime                  @default(now()) @map("created_at")
+  processedAt          DateTime?                 @map("processed_at")
+  workspace            Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  telegramAccount      TelegramAccount           @relation(fields: [telegramAccountId], references: [id], onDelete: Cascade)
+  telegramChat         TelegramChat?             @relation(fields: [telegramChatDbId], references: [id], onDelete: SetNull)
+  requestedBy          User                      @relation("RequestedTelegramCommands", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, status])
+  @@index([telegramAccountId, status])
+  @@map("telegram_outbound_commands")
+}
+
+model Session {
+  id                   String              @id @default(uuid()) @db.Uuid
+  userId               String              @map("user_id") @db.Uuid
+  workspaceId          String?             @map("workspace_id") @db.Uuid
+  adminTrustedDeviceId String?             @map("admin_trusted_device_id") @db.Uuid
+  userTrustedDeviceId String?              @map("user_trusted_device_id") @db.Uuid
+  refreshHash          String              @map("refresh_hash")
+  deviceName           String              @map("device_name") @db.VarChar(160)
+  ipAddress            String              @map("ip_address") @db.Inet
+  userAgent            String              @map("user_agent")
+  isDevelopmentFixture Boolean             @default(false) @map("is_development_fixture")
+  fixtureKey           String?             @unique @map("fixture_key") @db.VarChar(120)
+  createdAt            DateTime            @default(now()) @map("created_at")
+  lastSeenAt           DateTime            @default(now()) @map("last_seen_at")
+  expiresAt            DateTime            @map("expires_at")
+  revokedAt            DateTime?           @map("revoked_at")
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace            Workspace?          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  adminTrustedDevice   AdminTrustedDevice? @relation(fields: [adminTrustedDeviceId], references: [id], onDelete: SetNull)
+  userTrustedDevice    UserTrustedDevice?  @relation(fields: [userTrustedDeviceId], references: [id], onDelete: SetNull)
+
+  @@index([userId, revokedAt])
+  @@index([adminTrustedDeviceId])
+  @@index([userTrustedDeviceId])
+  @@index([workspaceId])
+  @@map("sessions")
+}
+
+model AuditLog {
+  id          String     @id @default(uuid()) @db.Uuid
+  workspaceId String?    @map("workspace_id") @db.Uuid
+  actorId     String?    @map("actor_id") @db.Uuid
+  action      String     @db.VarChar(120)
+  metadata    Json       @default("{}")
+  ipAddress   String?    @map("ip_address") @db.Inet
+  userAgent   String?    @map("user_agent")
+  isDevelopmentFixture Boolean @default(false) @map("is_development_fixture")
+  fixtureKey  String?    @unique @map("fixture_key") @db.VarChar(120)
+  createdAt   DateTime   @default(now()) @map("created_at")
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor       User?      @relation("ActorAuditLogs", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+/**
+ * One internal Coadmin↔Staff thread per Staff member in a workspace.
+ * Messages never enter the Telegram pipeline.
+ */
+model InternalMessageThread {
+  id                   String            @id @default(uuid()) @db.Uuid
+  workspaceId          String            @map("workspace_id") @db.Uuid
+  staffUserId          String            @map("staff_user_id") @db.Uuid
+  lastMessageAt        DateTime?         @map("last_message_at")
+  lastMessagePreview   String?           @map("last_message_preview") @db.VarChar(500)
+  staffUnreadCount     Int               @default(0) @map("staff_unread_count")
+  coadminUnreadCount   Int               @default(0) @map("coadmin_unread_count")
+  createdAt            DateTime          @default(now()) @map("created_at")
+  updatedAt            DateTime          @updatedAt @map("updated_at")
+  workspace            Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  staffUser            User              @relation("InternalThreadStaff", fields: [staffUserId], references: [id], onDelete: Cascade)
+  messages             InternalMessage[]
+
+  @@unique([workspaceId, staffUserId])
+  @@index([workspaceId, lastMessageAt])
+  @@map("internal_message_threads")
+}
+
+model InternalMessage {
+  id             String                @id @default(uuid()) @db.Uuid
+  workspaceId    String                @map("workspace_id") @db.Uuid
+  threadId       String                @map("thread_id") @db.Uuid
+  senderUserId   String                @map("sender_user_id") @db.Uuid
+  receiverUserId String                @map("receiver_user_id") @db.Uuid
+  body           String                @db.Text
+  createdAt      DateTime              @default(now()) @map("created_at")
+  readAt         DateTime?             @map("read_at")
+  editedAt       DateTime?             @map("edited_at")
+  deletedAt      DateTime?             @map("deleted_at")
+  workspace      Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  thread         InternalMessageThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender         User                  @relation("InternalMessageSender", fields: [senderUserId], references: [id], onDelete: Cascade)
+  receiver       User                  @relation("InternalMessageReceiver", fields: [receiverUserId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+  @@index([workspaceId, receiverUserId, readAt])
+  @@map("internal_messages")
+}
+
+model TelegramAccountDeletion {
+  id                 String                       @id @default(uuid()) @db.Uuid
+  workspaceId        String                       @map("workspace_id") @db.Uuid
+  telegramAccountId  String                       @unique @map("telegram_account_id") @db.Uuid
+  safeDisplayName    String                       @map("safe_display_name") @db.VarChar(255)
+  actorUserId        String                       @map("actor_user_id") @db.Uuid
+  stage              TelegramAccountDeletionStage @default(REQUESTED)
+  conversationCount  Int                          @default(0) @map("conversation_count")
+  messageCount       Int                          @default(0) @map("message_count")
+  mediaCount         Int                          @default(0) @map("media_count")
+  chatIdsJson        Json                         @default("[]") @map("chat_ids_json")
+  mediaKeysJson      Json                         @default("[]") @map("media_keys_json")
+  requestedAt        DateTime                     @default(now()) @map("requested_at")
+  completedAt        DateTime?                    @map("completed_at")
+  lastError          String?                      @map("last_error") @db.VarChar(500)
+  outcome            String?                      @db.VarChar(40)
+  workspace          Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor              User                         @relation("TelegramAccountDeletionActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, stage])
+  @@map("telegram_account_deletions")
+}
