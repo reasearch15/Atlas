@@ -26,11 +26,11 @@ export function MobileBottomNav({ items }: MobileBottomNavProps) {
 
   return (
     <nav
-      className="fixed inset-x-0 bottom-0 z-40 border-t bg-white md:hidden"
+      className="fixed inset-x-0 bottom-0 z-40 border-t border-border/60 bg-white/95 backdrop-blur-sm md:hidden"
       style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       aria-label="Primary"
     >
-      <ul className="grid h-14 grid-flow-col auto-cols-fr">
+      <ul className="grid h-12 grid-flow-col auto-cols-fr">
         {items.map((item) => {
           const Icon = item.icon;
           const active =
@@ -40,17 +40,17 @@ export function MobileBottomNav({ items }: MobileBottomNavProps) {
           const content = (
             <>
               <span className="relative">
-                <Icon className="size-5" aria-hidden="true" />
+                <Icon className={active ? "size-[22px]" : "size-5"} strokeWidth={active ? 2.25 : 1.75} aria-hidden="true" />
                 {typeof item.badge === "number" && item.badge > 0 ? (
-                  <span className="absolute -right-2 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold text-destructive-foreground">
+                  <span className="absolute -right-2 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-destructive px-1 text-[9px] font-semibold text-destructive-foreground">
                     {item.badge > 99 ? "99+" : item.badge}
                   </span>
                 ) : null}
               </span>
-              <span className="text-[10px] font-medium leading-none">{item.label}</span>
+              <span className={`text-[10px] leading-none ${active ? "font-semibold" : "font-medium"}`}>{item.label}</span>
             </>
           );
-          const className = `flex min-h-11 flex-col items-center justify-center gap-1 px-1 ${
+          const className = `flex min-h-11 flex-col items-center justify-center gap-0.5 px-1 transition-colors ${
             active ? "text-primary" : "text-muted-foreground"
           }`;
           return (

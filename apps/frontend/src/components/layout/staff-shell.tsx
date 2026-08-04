@@ -127,11 +127,14 @@ export function StaffShell({ children }: { readonly children: ReactNode }) {
       </aside>
 
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {!isChatOpen ? <MobileHeader title={title} subtitle={user?.email ?? user?.name ?? null} onMenuClick={() => setDrawerOpen(true)} /> : null}
+        {/* Inbox list owns its compact header — avoid a duplicate shell title. */}
+        {!isChatOpen && !isInbox ? (
+          <MobileHeader title={title} subtitle={user?.email ?? user?.name ?? null} onMenuClick={() => setDrawerOpen(true)} />
+        ) : null}
         <div
           className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${
             isInbox ? "" : "overflow-y-auto overscroll-contain"
-          } ${!isChatOpen ? "pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0" : ""}`}
+          } ${!isChatOpen ? "pb-[calc(3rem+env(safe-area-inset-bottom))] md:pb-0" : ""}`}
         >
           {children}
         </div>
