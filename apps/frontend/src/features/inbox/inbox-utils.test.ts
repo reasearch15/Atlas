@@ -4,9 +4,14 @@ import {
   computeInboxCounts,
   filterConversations,
   formatMessagePreview,
+  isUnreadArrivalPulseActive,
   mergeAndDeduplicate,
   mergeMessage,
-  toInboxConversation
+  resolveUnreadUrgency,
+  toInboxConversation,
+  UNREAD_ARRIVAL_PULSE_MS,
+  UNREAD_FRESH_MS,
+  UNREAD_WAITING_MS
 } from "./inbox-utils";
 import { emptyMediaFields } from "./media-message-helpers";
 import type { TelegramChatDto, TelegramMessageDto } from "@atlas/shared";
@@ -167,5 +172,24 @@ describe("inbox ordering activity", () => {
       unread: 1,
       resolved: 1
     });
+  });
+
+  it("maps unread age into fresh / waiting / urgent visual bands", () => {
+    const now = Date.parse("2026-08-04T12:00:00.000Z");
+    expect(resolveUnreadUrgency(0, "2026-08-04T11:59:00.000Z", now)).toBe("none");
+    expect(resolveUnreadUrgency(1, null, now)).toBe("none");
+    expect(resolveUnreadUrgency(1, new Date(now - 30_000).toISOString(), now)).toBe("fresh");
+    expect(resolveUnreadUrgency(1, new Date(now - UNREAD_FRESH_MS + 1).toISOString(), now)).toBe("fresh");
+    expect(resolveUnreadUrgency(1, new Date(now - UNREAD_FRESH_MS).toISOString(), now)).toBe("waiting");
+    expect(resolveUnreadUrgency(2, new Date(now - 5 * 60_000).toISOString(), now)).toBe("waiting");
+    expect(resolveUnreadUrgency(1, new Date(now - UNREAD_WAITING_MS).toISOString(), now)).toBe("urgent");
+    expect(resolveUnreadUrgency(3, new Date(now - 20 * 60_000).toISOString(), now)).toBe("urgent");
+  });
+
+  it("limits the arrival pulse to the first few seconds after lastMessageAt", () => {
+    const now = Date.parse("2026-08-04T12:00:00.000Z");
+    expect(isUnreadArrivalPulseActive(new Date(now - 1_000).toISOString(), now)).toBe(true);
+    expect(isUnreadArrivalPulseActive(new Date(now - UNREAD_ARRIVAL_PULSE_MS).toISOString(), now)).toBe(false);
+    expect(isUnreadArrivalPulseActive(null, now)).toBe(false);
   });
 });

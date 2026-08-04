@@ -178,6 +178,45 @@ export function formatInboxTime(iso: string | null): string {
   return date.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
 }
 
+/** Unread visual urgency based only on unread age (not CRM status). */
+export type UnreadUrgency = "none" | "fresh" | "waiting" | "urgent";
+
+/** Unread for under 2 minutes. */
+export const UNREAD_FRESH_MS = 2 * 60_000;
+/** Unread waiting band ends at 10 minutes (then urgent). */
+export const UNREAD_WAITING_MS = 10 * 60_000;
+/** One-shot arrival pulse window after lastMessageAt. */
+export const UNREAD_ARRIVAL_PULSE_MS = 4_000;
+
+/**
+ * Resolves unread list urgency from unread count + last message age.
+ * Read-only presentation helper — does not change filters or CRM status.
+ */
+export function resolveUnreadUrgency(
+  unreadCount: number,
+  lastMessageAt: string | null,
+  nowMs: number = Date.now()
+): UnreadUrgency {
+  if (unreadCount <= 0 || !lastMessageAt) return "none";
+  const at = Date.parse(lastMessageAt);
+  if (!Number.isFinite(at)) return "none";
+  const age = Math.max(0, nowMs - at);
+  if (age < UNREAD_FRESH_MS) return "fresh";
+  if (age < UNREAD_WAITING_MS) return "waiting";
+  return "urgent";
+}
+
+/**
+ * True while a newly arrived unread message should play the short arrival pulse.
+ */
+export function isUnreadArrivalPulseActive(lastMessageAt: string | null, nowMs: number = Date.now()): boolean {
+  if (!lastMessageAt) return false;
+  const at = Date.parse(lastMessageAt);
+  if (!Number.isFinite(at)) return false;
+  const age = nowMs - at;
+  return age >= 0 && age < UNREAD_ARRIVAL_PULSE_MS;
+}
+
 /**
  * Builds a stable avatar color from a seed string.
  */

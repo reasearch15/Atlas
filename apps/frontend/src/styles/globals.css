@@ -46,3 +46,40 @@ body {
 .safe-pt {
   padding-top: env(safe-area-inset-top);
 }
+
+/* Inbox unread urgency — keep motion subtle and respect reduced-motion. */
+@keyframes inbox-arrival-pulse {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 0 rgb(16 185 129 / 0%);
+  }
+  40% {
+    box-shadow: inset 0 0 0 999px rgb(16 185 129 / 12%);
+  }
+}
+
+@keyframes inbox-urgent-pulse {
+  0%,
+  92%,
+  100% {
+    box-shadow: inset 3px 0 0 0 rgb(248 113 113 / 0%);
+  }
+  96% {
+    box-shadow: inset 3px 0 0 0 rgb(248 113 113 / 35%);
+  }
+}
+
+.inbox-row-arrival-pulse {
+  animation: inbox-arrival-pulse 1s ease-in-out 4;
+}
+
+.inbox-row-urgent-pulse {
+  animation: inbox-urgent-pulse 45s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inbox-row-arrival-pulse,
+  .inbox-row-urgent-pulse {
+    animation: none;
+  }
+}
