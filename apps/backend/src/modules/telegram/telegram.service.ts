@@ -309,7 +309,6 @@ export class TelegramService {
       throw telegramNotFound();
     }
 
-    const previousUnread = chat.unreadCount;
     const recent = await this.app.prisma.telegramMessage.findMany({
       where: { telegramChatDbId: chat.id, deletedAt: null },
       orderBy: { telegramCreatedAt: "desc" },
@@ -338,21 +337,6 @@ export class TelegramService {
           : { lastReadAt: new Date() })
       }
     });
-
-    this.app.log.info(
-      {
-        channel: "atlas.inbox.reliability",
-        event: "telegram_chat.mark_read_api",
-        conversationId: chat.id,
-        telegramAccountId: chat.telegramAccountId,
-        peerId: chat.telegramChatId,
-        previousUnreadCount: previousUnread,
-        newUnreadCount: 0,
-        readMaxMessageId: maxId,
-        skippedTelegramRead: !maxId
-      },
-      maxId ? "chat marked read" : "chat marked read locally; no remote Telegram id for ReadHistory"
-    );
 
     await this.app.redis.publish(
       "atlas.workspace-events",

@@ -47,36 +47,12 @@ async function publishWorkspaceEventWithRetry(
   attempts = 3
 ): Promise<void> {
   let lastError: unknown;
-  const typed = event as { type?: string; eventId?: string; chatId?: string; chatDbId?: string };
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       await redis.publish("atlas.workspace-events", JSON.stringify(event));
-      console.info(
-        JSON.stringify({
-          channel: "atlas.inbox.reliability",
-          event: "worker.ws_publish",
-          at: new Date().toISOString(),
-          eventType: typed.type ?? null,
-          eventId: typed.eventId ?? null,
-          chatId: typed.chatDbId ?? typed.chatId ?? null,
-          attempt,
-          ok: true
-        })
-      );
       return;
     } catch (error) {
       lastError = error;
-      console.warn(
-        JSON.stringify({
-          channel: "atlas.inbox.reliability",
-          event: "worker.ws_publish_retry",
-          at: new Date().toISOString(),
-          eventType: typed.type ?? null,
-          eventId: typed.eventId ?? null,
-          attempt,
-          ok: false
-        })
-      );
       if (attempt < attempts) {
         await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
       }
@@ -619,21 +595,6 @@ async function upsertChat(
       crmAttentionAt: attentionAt
     }
   });
-
-  if (!message.isOutgoing) {
-    console.info(
-      JSON.stringify({
-        channel: "atlas.inbox.reliability",
-        event: "worker.unread_increment",
-        at: new Date().toISOString(),
-        chatId: chat.id,
-        telegramAccountId,
-        previousUnreadCount: existing?.unreadCount ?? 0,
-        newUnreadCount: chat.unreadCount,
-        telegramMessageId: message.telegramMessageId
-      })
-    );
-  }
 
   // Invariant: if live hash was available, the row must now carry it.
   if ((liveMeta.hadInputPeerHash || peerFields.accessHash) && !chat.accessHash) {
