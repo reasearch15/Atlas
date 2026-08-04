@@ -47,30 +47,53 @@ body {
   padding-top: env(safe-area-inset-top);
 }
 
-/* Inbox unread urgency — keep motion subtle and respect reduced-motion. */
+/* Inbox unread urgency — high visibility, live color bands, reduced-motion safe. */
+.inbox-row-urgency {
+  transition:
+    background-color 0.55s ease,
+    box-shadow 0.55s ease;
+}
+
+.inbox-row-urgency-fresh {
+  background-color: #d1fae5; /* emerald-100 */
+}
+
+.inbox-row-urgency-waiting {
+  background-color: #fde68a; /* amber-200 soft */
+}
+
+.inbox-row-urgency-urgent {
+  background-color: #fecaca; /* red-200 */
+}
+
 @keyframes inbox-arrival-pulse {
   0%,
   100% {
-    box-shadow: inset 0 0 0 0 rgb(16 185 129 / 0%);
+    box-shadow:
+      inset 5px 0 0 #10b981,
+      0 0 0 0 rgb(16 185 129 / 0%);
   }
-  40% {
-    box-shadow: inset 0 0 0 999px rgb(16 185 129 / 12%);
+  50% {
+    box-shadow:
+      inset 5px 0 0 #059669,
+      0 0 0 3px rgb(16 185 129 / 40%);
   }
 }
 
 @keyframes inbox-urgent-pulse {
   0%,
-  92%,
+  88%,
   100% {
-    box-shadow: inset 3px 0 0 0 rgb(248 113 113 / 0%);
+    filter: brightness(1);
   }
-  96% {
-    box-shadow: inset 3px 0 0 0 rgb(248 113 113 / 35%);
+  94% {
+    filter: brightness(0.96);
   }
 }
 
 .inbox-row-arrival-pulse {
-  animation: inbox-arrival-pulse 1s ease-in-out 4;
+  animation: inbox-arrival-pulse 0.9s ease-in-out 5;
+  z-index: 1;
 }
 
 .inbox-row-urgent-pulse {
@@ -78,6 +101,10 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .inbox-row-urgency {
+    transition: none;
+  }
+
   .inbox-row-arrival-pulse,
   .inbox-row-urgent-pulse {
     animation: none;

@@ -12,7 +12,10 @@ import {
   formatInboxTime,
   isUnreadArrivalPulseActive,
   needsIdentityBackfill,
-  resolveUnreadUrgency
+  resolveUnreadUrgency,
+  UNREAD_ARRIVAL_PULSE_MS,
+  UNREAD_FRESH_MS,
+  UNREAD_WAITING_MS
 } from "./inbox-utils";
 
 interface ConversationRowProps {
@@ -24,9 +27,15 @@ interface ConversationRowProps {
 
 const isDev = process.env.NODE_ENV === "development";
 
+const URGENCY_BADGE: Record<Exclude<UnreadUrgency, "none">, { readonly label: string; readonly className: string }> = {
+  fresh: { label: "New", className: "bg-emerald-500 text-white" },
+  waiting: { label: "Waiting", className: "bg-amber-500 text-white" },
+  urgent: { label: "Urgent", className: "bg-red-500 text-white" }
+};
+
 /**
- * Renders a compact Telegram-style conversation list row with CRM indicators
- * and unread-age urgency styling (fresh / waiting / urgent).
+ * Renders a compact conversation row with high-visibility unread urgency.
+ * Opening/selecting a chat suppresses urgency styling immediately.
  */
 export const ConversationRow = memo(function ConversationRow({
   conversation,
@@ -40,10 +49,12 @@ export const ConversationRow = memo(function ConversationRow({
   const unresolved = needsIdentityBackfill(chat);
   const isUnassigned = chat.assignedUserId === null && chat.crmStatus !== "RESOLVED" && chat.crmStatus !== "CLOSED";
   const visibleTags = chat.tags.filter((tag) => !tag.archivedAt).slice(0, 2);
-  const hasUnread = chat.unreadCount > 0;
-  const nowMs = useUnreadClock(hasUnread, chat.lastMessageAt);
-  const urgency = resolveUnreadUrgency(chat.unreadCount, chat.lastMessageAt, nowMs);
-  const arrivalPulse = hasUnread && isUnreadArrivalPulseActive(chat.lastMessageAt, nowMs);
+  // Selected/open chat clears urgency chrome immediately (unread also cleared by provider).
+  const showUrgency = !selected && chat.unreadCount > 0;
+  const nowMs = useUnreadClock(showUrgency, chat.lastMessageAt);
+  const urgency = showUrgency ? resolveUnreadUrgency(chat.unreadCount, chat.lastMessageAt, nowMs) : "none";
+  const arrivalPulse = showUrgency && urgency === "fresh" && isUnreadArrivalPulseActive(chat.lastMessageAt, nowMs);
+  const urgencyMeta = urgency === "none" ? null : URGENCY_BADGE[urgency];
 
   return (
     <button
@@ -55,13 +66,29 @@ export const ConversationRow = memo(function ConversationRow({
       onFocus={onPrefetch}
       title={displayTitle}
       className={cn(
-        "grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 border-b border-border/40 px-2.5 py-2 text-left transition-colors duration-100",
-        urgencyRowClass(urgency, selected),
-        arrivalPulse && "inbox-row-arrival-pulse",
-        urgency === "urgent" && "inbox-row-urgent-pulse border-l-[3px] border-l-red-400 pl-[7px]"
+        "inbox-row-urgency relative grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 border-b border-border/40 py-2 pr-2.5 text-left",
+        urgency === "none" ? "px-2.5" : "pl-2",
+        selected && urgency === "none" && "bg-primary/10",
+        !selected && urgency === "none" && "hover:bg-muted/50 active:bg-muted/70",
+        urgency === "fresh" && "inbox-row-urgency-fresh",
+        urgency === "waiting" && "inbox-row-urgency-waiting",
+        urgency === "urgent" && "inbox-row-urgency-urgent inbox-row-urgent-pulse",
+        arrivalPulse && "inbox-row-arrival-pulse"
       )}
       aria-current={selected ? "true" : undefined}
     >
+      {urgency !== "none" ? (
+        <span
+          className={cn(
+            "absolute inset-y-0 left-0 w-[5px]",
+            urgency === "fresh" && "bg-emerald-500",
+            urgency === "waiting" && "bg-amber-500",
+            urgency === "urgent" && "bg-red-500"
+          )}
+          aria-hidden="true"
+        />
+      ) : null}
+
       <span className="relative shrink-0 self-center">
         <span
           className="flex size-10 items-center justify-center rounded-full text-[13px] font-semibold text-white"
@@ -80,7 +107,7 @@ export const ConversationRow = memo(function ConversationRow({
           <span
             className={cn(
               "min-w-0 flex-1 truncate text-[13.5px] leading-tight text-foreground",
-              hasUnread || urgency !== "none" ? "font-semibold" : "font-medium"
+              urgency !== "none" ? "font-bold" : "font-medium"
             )}
             title={displayTitle}
           >
@@ -92,11 +119,7 @@ export const ConversationRow = memo(function ConversationRow({
         <span
           className={cn(
             "mt-0.5 block truncate text-[12.5px] leading-tight",
-            urgency === "fresh" || urgency === "waiting" || urgency === "urgent"
-              ? "font-semibold text-foreground/85"
-              : hasUnread
-                ? "font-medium text-foreground/80"
-                : "text-muted-foreground"
+            urgency !== "none" ? "font-bold text-foreground" : "text-muted-foreground"
           )}
           title={preview}
         >
@@ -104,14 +127,14 @@ export const ConversationRow = memo(function ConversationRow({
         </span>
 
         <span className="mt-1 flex min-w-0 items-center gap-1 overflow-hidden">
-          {urgency === "waiting" ? (
-            <span className="shrink-0 rounded bg-amber-200/80 px-1 py-px text-[9px] font-semibold leading-[14px] text-amber-900">
-              Waiting
-            </span>
-          ) : null}
-          {urgency === "urgent" ? (
-            <span className="shrink-0 rounded bg-red-200/90 px-1 py-px text-[9px] font-semibold leading-[14px] text-red-800">
-              Urgent
+          {urgencyMeta ? (
+            <span
+              className={cn(
+                "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold leading-none tracking-wide",
+                urgencyMeta.className
+              )}
+            >
+              {urgencyMeta.label}
             </span>
           ) : null}
 
@@ -165,22 +188,15 @@ export const ConversationRow = memo(function ConversationRow({
         <span
           className={cn(
             "text-[11px] leading-none",
-            urgency === "waiting" || urgency === "urgent"
-              ? "font-semibold text-foreground"
-              : hasUnread
-                ? "font-medium text-primary"
-                : "text-muted-foreground"
+            urgency !== "none" ? "font-bold text-foreground" : "text-muted-foreground"
           )}
         >
           {time}
         </span>
-        {hasUnread ? (
+        {showUrgency ? (
           <span
             className={cn(
-              "inline-flex items-center justify-center rounded-full bg-primary font-semibold text-primary-foreground",
-              urgency === "urgent"
-                ? "min-w-[22px] px-1.5 py-0.5 text-[12px] leading-4"
-                : "min-w-[18px] px-1 py-px text-[10px] leading-4",
+              "inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[12px] font-bold leading-none text-white",
               urgency === "fresh" && "bg-emerald-600",
               urgency === "waiting" && "bg-amber-600",
               urgency === "urgent" && "bg-red-600"
@@ -188,54 +204,54 @@ export const ConversationRow = memo(function ConversationRow({
           >
             {chat.unreadCount > 99 ? "99+" : chat.unreadCount}
           </span>
+        ) : chat.unreadCount > 0 && selected ? (
+          <span className="h-6" />
         ) : (
-          <span className="h-4" />
+          <span className="h-6" />
         )}
       </span>
     </button>
   );
 });
 
-function urgencyRowClass(urgency: UnreadUrgency, selected: boolean): string {
-  if (selected) {
-    switch (urgency) {
-      case "fresh":
-        return "bg-emerald-100/90";
-      case "waiting":
-        return "bg-amber-100/90";
-      case "urgent":
-        return "bg-red-100/90";
-      default:
-        return "bg-primary/10";
-    }
-  }
-  switch (urgency) {
-    case "fresh":
-      return "bg-emerald-50 hover:bg-emerald-100/80 active:bg-emerald-100";
-    case "waiting":
-      return "bg-amber-50 hover:bg-amber-100/80 active:bg-amber-100";
-    case "urgent":
-      return "bg-red-50 hover:bg-red-100/80 active:bg-red-100";
-    default:
-      return "hover:bg-muted/50 active:bg-muted/70";
-  }
-}
-
 /**
- * Ticks while a row is unread so urgency bands advance without inbox reloads.
+ * Live clock for unread rows — ticks often during arrival, then at band boundaries.
  */
-function useUnreadClock(hasUnread: boolean, lastMessageAt: string | null): number {
+function useUnreadClock(active: boolean, lastMessageAt: string | null): number {
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
-    if (!hasUnread) return;
+    if (!active || !lastMessageAt) return;
     setNowMs(Date.now());
 
-    const arrivalActive = isUnreadArrivalPulseActive(lastMessageAt, Date.now());
-    const tickMs = arrivalActive ? 500 : 15_000;
-    const timer = window.setInterval(() => setNowMs(Date.now()), tickMs);
-    return () => window.clearInterval(timer);
-  }, [hasUnread, lastMessageAt]);
+    const timers: number[] = [];
+    const schedule = (): void => {
+      const now = Date.now();
+      setNowMs(now);
+      const at = Date.parse(lastMessageAt);
+      if (!Number.isFinite(at)) return;
+      const age = Math.max(0, now - at);
+
+      if (age < UNREAD_ARRIVAL_PULSE_MS) {
+        timers.push(window.setTimeout(schedule, 400));
+        return;
+      }
+      if (age < UNREAD_FRESH_MS) {
+        timers.push(window.setTimeout(schedule, Math.min(5_000, UNREAD_FRESH_MS - age + 50)));
+        return;
+      }
+      if (age < UNREAD_WAITING_MS) {
+        timers.push(window.setTimeout(schedule, Math.min(15_000, UNREAD_WAITING_MS - age + 50)));
+        return;
+      }
+      timers.push(window.setTimeout(schedule, 30_000));
+    };
+
+    schedule();
+    return () => {
+      for (const id of timers) window.clearTimeout(id);
+    };
+  }, [active, lastMessageAt]);
 
   return nowMs;
 }

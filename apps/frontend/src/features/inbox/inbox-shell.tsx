@@ -27,6 +27,7 @@ import {
 } from "./inbox-list-anchor";
 import { ConversationRow } from "./conversation-row";
 import { useInbox } from "./inbox-provider";
+import { isRowIntersectingContainer, shouldAutoScrollToUnreadArrival } from "./inbox-unread-scroll";
 import { computeInboxCounts, filterConversations, type InboxFilter } from "./inbox-utils";
 
 const FILTERS: ReadonlyArray<{ readonly id: InboxFilter; readonly label: string; readonly countKey: keyof CrmInboxCountsDto | null }> = [
@@ -60,6 +61,8 @@ export function InboxShell({ children }: { readonly children: ReactNode }) {
   const savedScrollTop = useRef(0);
   const visibleOrderKeyRef = useRef("");
   const pendingListAnchorRef = useRef<SelectedRowAnchor | null>(null);
+  const unreadSignatureRef = useRef<Map<string, string>>(new Map());
+  const unreadSignaturesReadyRef = useRef(false);
 
   useEffect(() => {
     setPendingChatId(null);
@@ -107,6 +110,63 @@ export function InboxShell({ children }: { readonly children: ReactNode }) {
   const isMobile = breakpoint === "mobile";
   const showList = !isMobile || !selectedFromUrl;
   const showChat = !isMobile || Boolean(selectedFromUrl);
+
+  // Soft-scroll to a newly arrived unread row only when it won't interrupt reading.
+  useEffect(() => {
+    const nextSignatures = new Map<string, string>();
+    let arrivedChatId: string | null = null;
+    let arrivedAt = 0;
+
+    for (const row of visible) {
+      if (row.chat.unreadCount <= 0 || !row.chat.lastMessageAt) continue;
+      const signature = `${row.chat.lastMessageAt}|${row.chat.unreadCount}`;
+      nextSignatures.set(row.chat.id, signature);
+      const previous = unreadSignatureRef.current.get(row.chat.id);
+      if (!previous || previous.split("|")[0] !== row.chat.lastMessageAt) {
+        const at = Date.parse(row.chat.lastMessageAt);
+        if (Number.isFinite(at) && at >= arrivedAt) {
+          arrivedAt = at;
+          arrivedChatId = row.chat.id;
+        }
+      }
+    }
+
+    const bootstrapped = unreadSignaturesReadyRef.current;
+    unreadSignatureRef.current = nextSignatures;
+    if (!bootstrapped) {
+      unreadSignaturesReadyRef.current = true;
+      return;
+    }
+    if (!arrivedChatId) return;
+
+    const container = listScrollRef.current;
+    if (!container || !showList) return;
+    const row = container.querySelector<HTMLElement>(`[data-chat-id="${CSS.escape(arrivedChatId)}"]`);
+    if (!row) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const partiallyVisible = isRowIntersectingContainer({
+      containerTop: containerRect.top,
+      containerBottom: containerRect.bottom,
+      rowTop: rowRect.top,
+      rowBottom: rowRect.bottom
+    });
+
+    if (
+      !shouldAutoScrollToUnreadArrival({
+        listVisible: showList,
+        selectedChatId,
+        arrivedChatId,
+        scrollTop: container.scrollTop,
+        rowFullyOrPartiallyVisible: partiallyVisible
+      })
+    ) {
+      return;
+    }
+
+    row.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+  }, [visible, selectedChatId, showList]);
 
   function selectConversation(chatId: string): void {
     if (listScrollRef.current) {
