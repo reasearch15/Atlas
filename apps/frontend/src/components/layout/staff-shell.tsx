@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { MobileBottomNav } from "@/components/layout/mobile-bottom-nav";
 import { MobileDrawer } from "@/components/layout/mobile-drawer";
 import { MobileHeader } from "@/components/layout/mobile-header";
+import { PwaInstallButton } from "@/components/pwa/pwa-install-button";
 import { staffLogout } from "@/lib/api";
 import { clearRoleAuthBootstrap } from "@/lib/auth-bootstrap";
 import { useRoleWorkspaceBootstrap } from "@/lib/use-role-workspace-bootstrap";
@@ -88,11 +89,14 @@ export function StaffShell({ children }: { readonly children: ReactNode }) {
     );
   });
 
-  const signOutAction = (
-    <Button className="min-h-11 w-full justify-start" variant="ghost" onClick={() => void signOut()}>
-      <LogOut className="size-4" aria-hidden="true" />
-      Sign out
-    </Button>
+  const accountActions = (
+    <div className="grid gap-1">
+      <PwaInstallButton variant="drawer" />
+      <Button className="min-h-11 w-full justify-start" variant="ghost" onClick={() => void signOut()}>
+        <LogOut className="size-4" aria-hidden="true" />
+        Sign out
+      </Button>
+    </div>
   );
 
   return (
@@ -103,7 +107,7 @@ export function StaffShell({ children }: { readonly children: ReactNode }) {
           <p className="text-xs text-muted-foreground">{user?.email ?? user?.name}</p>
         </div>
         <nav className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto">{navLinks}</nav>
-        <div className="mt-auto shrink-0 pt-4">{signOutAction}</div>
+        <div className="mt-auto shrink-0 pt-4">{accountActions}</div>
       </aside>
 
       <aside className="hidden h-full w-16 shrink-0 flex-col items-center gap-1 overflow-hidden border-r bg-white py-3 md:flex lg:hidden">
@@ -150,7 +154,7 @@ export function StaffShell({ children }: { readonly children: ReactNode }) {
         />
       ) : null}
 
-      <MobileDrawer open={drawerOpen} title="Atlas Staff" onClose={closeDrawer} footer={signOutAction}>
+      <MobileDrawer open={drawerOpen} title="Atlas Staff" onClose={closeDrawer} footer={accountActions}>
         <div className="mb-3 px-3">
           <div className="mb-2 flex size-11 items-center justify-center rounded-full bg-muted">
             <UserRound className="size-5 text-muted-foreground" aria-hidden="true" />

@@ -16,7 +16,6 @@ import {
 } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { PwaInstallButton } from "@/components/pwa/pwa-install-button";
 import { useAtlasBreakpoint } from "@/hooks/use-atlas-breakpoint";
 import { coadminLogout, staffLogout } from "@/lib/api";
 import { clearRoleAuthBootstrap } from "@/lib/auth-bootstrap";
@@ -149,7 +148,6 @@ export function InboxShell({ children }: { readonly children: ReactNode }) {
           <div className="flex h-9 items-center gap-1">
             <h1 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight">Inbox</h1>
             <div className="flex shrink-0 items-center gap-0.5">
-              <PwaInstallButton />
               <Button
                 type="button"
                 variant="ghost"

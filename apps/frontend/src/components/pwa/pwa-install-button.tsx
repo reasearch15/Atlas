@@ -3,74 +3,85 @@
 import { useEffect, useState } from "react";
 import { Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  canPromptPwaInstall,
+  getPwaInstallDiagnostics,
+  isPwaInstalled,
+  promptPwaInstall,
+  subscribePwaInstallChanges
+} from "@/components/pwa/pwa-install-controller";
 
-interface BeforeInstallPromptEvent extends Event {
-  readonly prompt: () => Promise<void>;
-  readonly userChoice: Promise<{ readonly outcome: "accepted" | "dismissed" }>;
+interface PwaInstallButtonProps {
+  /** drawer = full-width nav footer control; compact = icon/text header control */
+  readonly variant?: "drawer" | "compact";
 }
 
 /**
- * Compact header control that triggers the browser PWA install prompt when available.
- * Hidden when the app is already installed or the browser has no install prompt.
+ * Shows a real Install App control only when Chromium exposes beforeinstallprompt.
+ * Hidden when already installed or when installation is not possible.
  */
-export function PwaInstallButton() {
-  const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(null);
+export function PwaInstallButton({ variant = "drawer" }: PwaInstallButtonProps) {
+  const [canPrompt, setCanPrompt] = useState(false);
   const [installed, setInstalled] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const media = window.matchMedia("(display-mode: standalone)");
-    const nav = window.navigator as Navigator & { standalone?: boolean };
-    const alreadyInstalled = media.matches || nav.standalone === true;
-    setInstalled(alreadyInstalled);
-
-    function onChange(): void {
-      setInstalled(media.matches || nav.standalone === true);
+    function sync(): void {
+      setInstalled(isPwaInstalled());
+      setCanPrompt(canPromptPwaInstall());
+      if (process.env.NODE_ENV === "development") {
+        // Operator breadcrumb — never logs tokens/secrets.
+        console.info("[atlas-pwa]", getPwaInstallDiagnostics());
+      }
     }
-
-    function onBeforeInstall(event: Event): void {
-      event.preventDefault();
-      setDeferred(event as BeforeInstallPromptEvent);
-    }
-
-    function onAppInstalled(): void {
-      setInstalled(true);
-      setDeferred(null);
-    }
-
-    media.addEventListener("change", onChange);
-    window.addEventListener("beforeinstallprompt", onBeforeInstall);
-    window.addEventListener("appinstalled", onAppInstalled);
-    return () => {
-      media.removeEventListener("change", onChange);
-      window.removeEventListener("beforeinstallprompt", onBeforeInstall);
-      window.removeEventListener("appinstalled", onAppInstalled);
-    };
+    sync();
+    return subscribePwaInstallChanges(sync);
   }, []);
 
-  if (installed || !deferred) return null;
+  if (installed || !canPrompt) return null;
 
-  async function install(): Promise<void> {
-    if (!deferred) return;
-    await deferred.prompt();
-    const choice = await deferred.userChoice;
-    if (choice.outcome === "accepted") {
-      setInstalled(true);
+  async function onInstall(): Promise<void> {
+    setBusy(true);
+    try {
+      const outcome = await promptPwaInstall();
+      if (outcome === "accepted") {
+        setInstalled(true);
+        setCanPrompt(false);
+      } else {
+        setCanPrompt(canPromptPwaInstall());
+      }
+    } finally {
+      setBusy(false);
     }
-    setDeferred(null);
+  }
+
+  if (variant === "compact") {
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        className="h-8 shrink-0 gap-1 px-2 text-xs font-medium text-muted-foreground"
+        onClick={() => void onInstall()}
+        disabled={busy}
+        aria-label="Install App"
+      >
+        <Download className="size-3.5" aria-hidden="true" />
+        <span className="hidden sm:inline">Install</span>
+      </Button>
+    );
   }
 
   return (
     <Button
       type="button"
       variant="ghost"
-      className="h-8 shrink-0 gap-1 px-2 text-xs font-medium text-muted-foreground"
-      onClick={() => void install()}
-      aria-label="Install PWA"
+      className="min-h-11 w-full justify-start"
+      onClick={() => void onInstall()}
+      disabled={busy}
+      aria-label="Install App"
     >
-      <Download className="size-3.5" aria-hidden="true" />
-      <span className="hidden sm:inline">Install</span>
+      <Download className="size-4" aria-hidden="true" />
+      Install App
     </Button>
   );
 }

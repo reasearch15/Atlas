@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { MobileBottomNav } from "@/components/layout/mobile-bottom-nav";
 import { MobileDrawer } from "@/components/layout/mobile-drawer";
 import { MobileHeader } from "@/components/layout/mobile-header";
+import { PwaInstallButton } from "@/components/pwa/pwa-install-button";
 import { api, coadminLogout } from "@/lib/api";
 import { clearRoleAuthBootstrap } from "@/lib/auth-bootstrap";
 import { useRoleWorkspaceBootstrap } from "@/lib/use-role-workspace-bootstrap";
@@ -99,8 +100,9 @@ export function WorkspaceShell({ children }: { readonly children: ReactNode }) {
     );
   });
 
-  const signOutActions = (
+  const accountActions = (
     <div className="grid gap-1">
+      <PwaInstallButton variant="drawer" />
       <Button className="min-h-11 justify-start" variant="ghost" onClick={() => void signOut()}>
         <LogOut className="size-4" aria-hidden="true" />
         Sign out
@@ -120,7 +122,7 @@ export function WorkspaceShell({ children }: { readonly children: ReactNode }) {
           <p className="text-xs text-muted-foreground">{user?.email ?? user?.name}</p>
         </div>
         <nav className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto">{navLinks}</nav>
-        <div className="mt-auto shrink-0 pt-4">{signOutActions}</div>
+        <div className="mt-auto shrink-0 pt-4">{accountActions}</div>
       </aside>
 
       {/* Tablet compact rail */}
@@ -170,7 +172,7 @@ export function WorkspaceShell({ children }: { readonly children: ReactNode }) {
         />
       ) : null}
 
-      <MobileDrawer open={drawerOpen} title="Atlas Workspace" onClose={closeDrawer} footer={signOutActions}>
+      <MobileDrawer open={drawerOpen} title="Atlas Workspace" onClose={closeDrawer} footer={accountActions}>
         <div className="mb-3 px-3">
           <p className="text-sm font-medium">{user?.name ?? "Coadmin"}</p>
           <p className="text-xs text-muted-foreground">{user?.email}</p>
