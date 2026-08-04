@@ -16,7 +16,29 @@ const clients = new Set<Client>();
 export function registerWorkspaceSocket(workspaceId: string | null, role: Role, socket: WebSocket): void {
   const client = { workspaceId, role, socket };
   clients.add(client);
-  socket.on("close", () => clients.delete(client));
+  console.info(
+    JSON.stringify({
+      channel: "atlas.inbox.reliability",
+      event: "ws.connected",
+      at: new Date().toISOString(),
+      workspaceId,
+      role,
+      clients: clients.size
+    })
+  );
+  socket.on("close", () => {
+    clients.delete(client);
+    console.info(
+      JSON.stringify({
+        channel: "atlas.inbox.reliability",
+        event: "ws.disconnected",
+        at: new Date().toISOString(),
+        workspaceId,
+        role,
+        clients: clients.size
+      })
+    );
+  });
   socket.on("message", (_message: RawData) => undefined);
 }
 

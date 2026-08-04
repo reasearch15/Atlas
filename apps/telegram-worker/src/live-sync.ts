@@ -38,6 +38,54 @@ import { applySoftDeletedMessage } from "./message-deletion";
 const activeAccounts = new Map<string, TelegramRuntime>();
 
 /**
+ * Publishes a workspace realtime event with bounded retries.
+ * Persistence already committed — this only closes the publish-after-write gap.
+ */
+async function publishWorkspaceEventWithRetry(
+  redis: Redis,
+  event: unknown,
+  attempts = 3
+): Promise<void> {
+  let lastError: unknown;
+  const typed = event as { type?: string; eventId?: string; chatId?: string; chatDbId?: string };
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await redis.publish("atlas.workspace-events", JSON.stringify(event));
+      console.info(
+        JSON.stringify({
+          channel: "atlas.inbox.reliability",
+          event: "worker.ws_publish",
+          at: new Date().toISOString(),
+          eventType: typed.type ?? null,
+          eventId: typed.eventId ?? null,
+          chatId: typed.chatDbId ?? typed.chatId ?? null,
+          attempt,
+          ok: true
+        })
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn(
+        JSON.stringify({
+          channel: "atlas.inbox.reliability",
+          event: "worker.ws_publish_retry",
+          at: new Date().toISOString(),
+          eventType: typed.type ?? null,
+          eventId: typed.eventId ?? null,
+          attempt,
+          ok: false
+        })
+      );
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("workspace event publish failed");
+}
+
+/**
  * Periodically attaches live Telegram update handlers for connected accounts.
  */
 export function startLiveSync(prisma: PrismaClient, redis: Redis, env: WorkerEnv): NodeJS.Timeout {
@@ -129,18 +177,16 @@ async function attachConnectedAccounts(
       }
       const persisted = await persistInboundMessage(prisma, redis, account.workspaceId, account.id, chat.id, message);
       const refreshed = await prisma.telegramChat.findUnique({ where: { id: chat.id } });
-      await redis.publish("atlas.workspace-events", JSON.stringify(messageCreatedEvent(account.workspaceId, persisted)));
+      await publishWorkspaceEventWithRetry(redis, messageCreatedEvent(account.workspaceId, persisted));
       if (refreshed) {
-        await redis.publish(
-          "atlas.workspace-events",
-          JSON.stringify(
-            chatUpdatedEvent(
-              account.workspaceId,
-              chatUpdatedFieldsFromRow({
-                ...refreshed,
-                lastMessageDirection: persisted.direction
-              })
-            )
+        await publishWorkspaceEventWithRetry(
+          redis,
+          chatUpdatedEvent(
+            account.workspaceId,
+            chatUpdatedFieldsFromRow({
+              ...refreshed,
+              lastMessageDirection: persisted.direction
+            })
           )
         );
       }
@@ -573,6 +619,21 @@ async function upsertChat(
       crmAttentionAt: attentionAt
     }
   });
+
+  if (!message.isOutgoing) {
+    console.info(
+      JSON.stringify({
+        channel: "atlas.inbox.reliability",
+        event: "worker.unread_increment",
+        at: new Date().toISOString(),
+        chatId: chat.id,
+        telegramAccountId,
+        previousUnreadCount: existing?.unreadCount ?? 0,
+        newUnreadCount: chat.unreadCount,
+        telegramMessageId: message.telegramMessageId
+      })
+    );
+  }
 
   // Invariant: if live hash was available, the row must now carry it.
   if ((liveMeta.hadInputPeerHash || peerFields.accessHash) && !chat.accessHash) {

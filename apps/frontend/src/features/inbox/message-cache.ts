@@ -69,6 +69,15 @@ export function refreshChatMessagesIfStale(chatId: string): void {
 }
 
 /**
+ * Force-refresh chat history after reconnect / missed-event recovery.
+ * Bypasses the soft stale gate used for routine catch-up.
+ */
+export function refreshChatMessagesForced(chatId: string): void {
+  if (!queryClient) return;
+  void queryClient.invalidateQueries({ queryKey: chatMessagesQueryKey(chatId), exact: true });
+}
+
+/**
  * Cancels any in-flight history fetch for a chat (e.g. when switching away).
  */
 export function cancelChatMessagesQuery(chatId: string): void {

@@ -341,6 +341,7 @@ export class TelegramService {
 
     this.app.log.info(
       {
+        channel: "atlas.inbox.reliability",
         event: "telegram_chat.mark_read_api",
         conversationId: chat.id,
         telegramAccountId: chat.telegramAccountId,

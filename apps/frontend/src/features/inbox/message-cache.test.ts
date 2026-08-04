@@ -1,60 +1,47 @@
-import { describe, expect, it } from "vitest";
-import { QueryClient } from "@tanstack/react-query";
-import {
-  bindChatMessagesQueryClient,
-  chatMessagesQueryKey,
-  peekChatMessages,
-  rememberChatMessage,
-  rememberChatMessages,
-  refreshChatMessagesIfStale
-} from "./message-cache";
-import type { TelegramMessageDto } from "@atlas/shared";
-import { emptyMediaFields } from "./media-message-helpers";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { CHAT_MESSAGES_STALE_MS, refreshChatMessagesForced, refreshChatMessagesIfStale, bindChatMessagesQueryClient } from "./message-cache";
 
-function msg(id: string, telegramMessageId: string, text: string): TelegramMessageDto {
-  return {
-    id,
-    telegramAccountId: "acc",
-    chatId: "chat-1",
-    telegramMessageId,
-    direction: "INBOUND",
-    senderTelegramUserId: null,
-    senderDisplayName: null,
-    internalSenderUserId: null,
-    text,
-    contentType: "TEXT",
-    mediaType: "TEXT",
-    ...emptyMediaFields(),
-    replyToTelegramMessageId: null,
-    sentAt: new Date().toISOString(),
-    editedAt: null,
-    isEdited: false,
-    isDeleted: false,
-    sendStatus: "RECEIVED"
-  };
-}
+describe("chat message refresh helpers", () => {
+  const invalidateQueries = vi.fn();
+  const getQueryState = vi.fn();
 
-describe("chat message query cache", () => {
-  it("stores and peeks messages without network", () => {
-    const client = new QueryClient();
-    bindChatMessagesQueryClient(client);
-    rememberChatMessages("chat-1", [msg("1", "10", "hello")]);
-    expect(peekChatMessages("chat-1")?.map((row) => row.text)).toEqual(["hello"]);
-    rememberChatMessage("chat-1", msg("2", "11", "world"));
-    expect(peekChatMessages("chat-1")?.map((row) => row.text)).toEqual(["hello", "world"]);
+  beforeEach(() => {
+    invalidateQueries.mockReset();
+    getQueryState.mockReset();
+    bindChatMessagesQueryClient({
+      invalidateQueries,
+      getQueryState,
+      setQueryData: vi.fn(),
+      cancelQueries: vi.fn(),
+      removeQueries: vi.fn()
+    } as never);
   });
 
-  it("skips invalidate when the active chat cache is still fresh", () => {
-    const client = new QueryClient();
-    bindChatMessagesQueryClient(client);
-    client.setQueryData(chatMessagesQueryKey("chat-1"), [msg("1", "10", "hello")]);
-    let invalidated = 0;
-    const original = client.invalidateQueries.bind(client);
-    client.invalidateQueries = (async (...args: Parameters<typeof original>) => {
-      invalidated += 1;
-      return original(...args);
-    }) as typeof client.invalidateQueries;
+  afterEach(() => {
+    bindChatMessagesQueryClient(null as never);
+  });
+
+  it("skips soft refresh when cache is fresh", () => {
+    getQueryState.mockReturnValue({ data: [{ id: "1" }], dataUpdatedAt: Date.now() });
     refreshChatMessagesIfStale("chat-1");
-    expect(invalidated).toBe(0);
+    expect(invalidateQueries).not.toHaveBeenCalled();
+  });
+
+  it("force refresh always invalidates even when cache is fresh", () => {
+    getQueryState.mockReturnValue({ data: [{ id: "1" }], dataUpdatedAt: Date.now() });
+    refreshChatMessagesForced("chat-1");
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["telegram", "chat-messages", "chat-1"],
+      exact: true
+    });
+  });
+
+  it("soft refresh invalidates when older than stale window", () => {
+    getQueryState.mockReturnValue({
+      data: [{ id: "1" }],
+      dataUpdatedAt: Date.now() - CHAT_MESSAGES_STALE_MS - 1
+    });
+    refreshChatMessagesIfStale("chat-1");
+    expect(invalidateQueries).toHaveBeenCalled();
   });
 });

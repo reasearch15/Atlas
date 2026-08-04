@@ -14,7 +14,8 @@ import {
 } from "./inbox-utils";
 import { notifyIncomingMessage } from "./desktop-notifications";
 import { installAudioUnlockListeners } from "./notification-sound";
-import { rememberChatMessage, refreshChatMessagesIfStale, purgeChatMessageCaches } from "./message-cache";
+import { rememberChatMessage, refreshChatMessagesForced, refreshChatMessagesIfStale, purgeChatMessageCaches } from "./message-cache";
+import { logInboxReliability } from "./inbox-reliability-log";
 import { toast } from "sonner";
 
 interface InboxContextValue {
@@ -28,12 +29,14 @@ interface InboxContextValue {
   readonly applyOutgoingActivity: (chatId: string, text: string, sentAt: string) => void;
   readonly clearUnread: (chatId: string) => void;
   readonly subscribeMessages: (chatId: string, handler: (message: TelegramMessageDto) => void) => () => void;
-  readonly requestActiveChatCatchUp: (chatId: string) => void;
+  readonly requestActiveChatCatchUp: (chatId: string, options?: { readonly force?: boolean }) => void;
 }
 
 const InboxContext = createContext<InboxContextValue | null>(null);
 const MESSAGE_BUFFER_LIMIT = 50;
 const CRM_EVENT_ID_LIMIT = 500;
+const MESSAGE_EVENT_ID_LIMIT = 500;
+const INBOX_RECONCILE_MIN_INTERVAL_MS = 2_000;
 /** Per browser session — avoid re-enqueueing metadata GetDialogs jobs on every inbox reload. */
 const metadataBackfillRequested = new Set<string>();
 
@@ -55,6 +58,8 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
   const seenCrmEventIdsRef = useRef<string[]>([]);
+  const seenMessageEventIdsRef = useRef<string[]>([]);
+  const lastInboxReconcileAtRef = useRef(0);
   const activeChatId = useMemo(() => parseSelectedChatId(pathname), [pathname]);
   activeChatIdRef.current = activeChatId;
 
@@ -62,10 +67,33 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
     try {
       const flattened = await fetchConversations();
       setConversations(flattened);
+      logInboxReliability("inbox.react_state_updated", {
+        reason: "quiet_reload",
+        meta: { conversationCount: flattened.length }
+      });
     } catch {
       // Keep the current list if a quiet refresh fails.
     }
   }, []);
+
+  /**
+   * Reconciles the inbox list from REST after reconnect / resume.
+   * Throttled so rapid socket flaps cannot stampede the API.
+   */
+  const reconcileInboxFromServer = useCallback(async (): Promise<void> => {
+    const now = Date.now();
+    if (now - lastInboxReconcileAtRef.current < INBOX_RECONCILE_MIN_INTERVAL_MS) {
+      logInboxReliability("ws.event_dropped", {
+        reason: "reconcile_throttled",
+        meta: { minIntervalMs: INBOX_RECONCILE_MIN_INTERVAL_MS }
+      });
+      return;
+    }
+    lastInboxReconcileAtRef.current = now;
+    logInboxReliability("inbox.reconcile_started", { reason: "server_catch_up" });
+    await reloadQuietly();
+    logInboxReliability("inbox.reconcile_completed", { reason: "server_catch_up", ok: true });
+  }, [reloadQuietly]);
 
   const reload = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -126,16 +154,49 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
   }, []);
 
   const clearUnread = useCallback((chatId: string) => {
+    const prior = conversationsRef.current.find((row) => row.chat.id === chatId)?.chat.unreadCount ?? null;
     setConversations((current) =>
       current.map((item) => {
         if (item.chat.id !== chatId || item.chat.unreadCount === 0) return item;
         return toInboxConversation({ ...item.chat, unreadCount: 0 }, item.accountLabel);
       })
     );
-    void api.telegramMarkChatRead(chatId).catch(() => {
-      // Optimistic UI already cleared; refresh will reconcile if persistence failed.
+    logInboxReliability("inbox.mark_read_requested", {
+      chatId,
+      reason: "clearUnread",
+      ...(prior !== null ? { unreadCount: prior } : {})
     });
-  }, []);
+    // Durable persistence is required — optimistic UI alone leaves DB unread after concurrent inbound.
+    void api
+      .telegramMarkChatRead(chatId)
+      .then(() => {
+        logInboxReliability("inbox.mark_read_succeeded", { chatId, unreadCount: 0, attempt: 1, ok: true });
+        setConversations((current) =>
+          current.map((item) => {
+            if (item.chat.id !== chatId || item.chat.unreadCount === 0) return item;
+            return toInboxConversation({ ...item.chat, unreadCount: 0 }, item.accountLabel);
+          })
+        );
+      })
+      .catch(() => {
+        logInboxReliability("inbox.mark_read_failed", { chatId, attempt: 1, ok: false, reason: "retrying" });
+        // Retry once; if still failing, quiet reconcile restores truth from the server.
+        void api
+          .telegramMarkChatRead(chatId)
+          .then(() => {
+            logInboxReliability("inbox.mark_read_succeeded", { chatId, unreadCount: 0, attempt: 2, ok: true });
+          })
+          .catch(() => {
+            logInboxReliability("inbox.mark_read_failed", {
+              chatId,
+              attempt: 2,
+              ok: false,
+              reason: "reconcile_fallback"
+            });
+            void reloadQuietly();
+          });
+      });
+  }, [reloadQuietly]);
 
   const deliverMessageToChat = useCallback((chatId: string, message: TelegramMessageDto) => {
     if (message.isDeleted) {
@@ -249,14 +310,27 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
     };
   }, []);
 
-  const requestActiveChatCatchUp = useCallback((chatId: string) => {
-    // Soft stale-aware refresh only — never bulk-fetch histories.
-    refreshChatMessagesIfStale(chatId);
+  const requestActiveChatCatchUp = useCallback((chatId: string, options?: { readonly force?: boolean }) => {
+    if (options?.force) {
+      refreshChatMessagesForced(chatId);
+    } else {
+      refreshChatMessagesIfStale(chatId);
+    }
     catchUpHandlersRef.current.get(chatId)?.();
   }, []);
 
   const handleRealtimeEvent = useCallback(
     (event: TelegramWorkspaceRealtimeEvent) => {
+      logInboxReliability("ws.event_received", {
+        eventType: event.type,
+        ...("eventId" in event && event.eventId ? { eventId: event.eventId } : {}),
+        ...((): { chatId?: string } => {
+          if ("chatDbId" in event && event.chatDbId) return { chatId: event.chatDbId };
+          if ("chatId" in event && event.chatId) return { chatId: event.chatId };
+          return {};
+        })()
+      });
+
       if (event.type === "telegram.message.created" || event.type === "telegram.message.updated") {
         const chatDbId = event.chatDbId || event.chatId || event.message.chatId;
         const open = activeChatIdRef.current === chatDbId;
@@ -264,9 +338,23 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
         deliverMessageToChat(chatDbId, event.message);
 
         if (event.type === "telegram.message.created") {
+          const seen = seenMessageEventIdsRef.current;
+          if (seen.includes(event.eventId)) {
+            logInboxReliability("ws.event_dropped", {
+              eventId: event.eventId,
+              eventType: event.type,
+              chatId: chatDbId,
+              reason: "duplicate_event_id"
+            });
+            return;
+          }
+          seen.push(event.eventId);
+          if (seen.length > MESSAGE_EVENT_ID_LIMIT) seen.splice(0, seen.length - MESSAGE_EVENT_ID_LIMIT);
+
           const existing = conversationsRef.current.find((row) => row.chat.id === chatDbId);
           const previewText =
             event.message.caption || event.message.text || existing?.chat.lastMessagePreview || "";
+          const viewingLive = open && windowActive;
           if (event.message.direction === "INBOUND") {
             notifyIncomingMessage({
               direction: event.message.direction,
@@ -282,10 +370,32 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
               previewText,
               sentAt: event.message.sentAt,
               direction: event.message.direction,
-              bumpUnread: event.message.direction === "INBOUND" && !(open && windowActive),
-              ...(open && windowActive ? { unreadCount: 0 } : {})
+              bumpUnread: event.message.direction === "INBOUND" && !viewingLive,
+              ...(viewingLive ? { unreadCount: 0 } : {}),
+              telegramAccountId: event.telegramAccountId || event.message.telegramAccountId,
+              accountLabel: existing?.accountLabel ?? "Telegram"
             })
           );
+          logInboxReliability("inbox.react_state_updated", {
+            chatId: chatDbId,
+            eventId: event.eventId,
+            eventType: event.type,
+            reason: viewingLive ? "viewing_live_zero" : "activity_applied",
+            meta: {
+              direction: event.message.direction,
+              viewingLive,
+              bumpUnread: event.message.direction === "INBOUND" && !viewingLive
+            }
+          });
+          // Worker already incremented durable unread — re-issue mark-read while staff is actively viewing.
+          if (viewingLive && event.message.direction === "INBOUND") {
+            logInboxReliability("inbox.viewing_inbound_cleared", {
+              chatId: chatDbId,
+              eventId: event.eventId,
+              reason: "viewing_live_inbound"
+            });
+            clearUnread(chatDbId);
+          }
         }
         return;
       }
@@ -298,6 +408,8 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
       if (event.type === "telegram.chat.updated") {
         // Chat-list metadata only — never clears open conversation message state.
         const open = activeChatIdRef.current === event.chatId;
+        const windowActive = typeof document === "undefined" ? true : document.visibilityState === "visible";
+        const viewingLive = open && windowActive;
         setConversations((current) => {
           const existing = current.find((row) => row.chat.id === event.chatId);
           return applyChatActivity(current, {
@@ -305,7 +417,7 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
             previewText: event.lastMessagePreview ?? existing?.chat.lastMessagePreview ?? "",
             sentAt: event.lastMessageAt ?? existing?.chat.lastMessageAt ?? new Date().toISOString(),
             direction: event.lastMessageDirection ?? existing?.chat.lastMessageDirection ?? "INBOUND",
-            unreadCount: open ? 0 : event.unreadCount,
+            unreadCount: viewingLive ? 0 : event.unreadCount,
             telegramAccountId: event.telegramAccountId,
             ...(event.title !== undefined ? { title: event.title } : {}),
             ...(event.firstName !== undefined ? { firstName: event.firstName } : {}),
@@ -326,6 +438,17 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
             ...(existing ? { accountLabel: existing.accountLabel } : { accountLabel: "Telegram" })
           });
         });
+        logInboxReliability("inbox.react_state_updated", {
+          chatId: event.chatId,
+          eventId: event.eventId,
+          eventType: event.type,
+          unreadCount: viewingLive ? 0 : event.unreadCount,
+          reason: viewingLive ? "chat_updated_viewing_mask" : "chat_updated_applied"
+        });
+        // If the server still reports unread while this chat is open and visible, persist read again.
+        if (viewingLive && event.unreadCount > 0) {
+          clearUnread(event.chatId);
+        }
         // Chat-list metadata only — message bodies arrive via WS message events.
         // Soft stale refresh for media hydration if needed; never force-download history.
         if (open) {
@@ -336,7 +459,15 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
 
       if (event.type === "crm.conversation.updated") {
         const seen = seenCrmEventIdsRef.current;
-        if (seen.includes(event.eventId)) return;
+        if (seen.includes(event.eventId)) {
+          logInboxReliability("ws.event_dropped", {
+            eventId: event.eventId,
+            eventType: event.type,
+            chatId: event.chatId,
+            reason: "duplicate_crm_event_id"
+          });
+          return;
+        }
         seen.push(event.eventId);
         if (seen.length > CRM_EVENT_ID_LIMIT) seen.splice(0, seen.length - CRM_EVENT_ID_LIMIT);
 
@@ -380,7 +511,7 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
         }
       }
     },
-    [deliverMessageToChat, deliverMessageDeleted]
+    [clearUnread, deliverMessageToChat, deliverMessageDeleted]
   );
 
   const handleRealtimeEventRef = useRef(handleRealtimeEvent);
@@ -396,18 +527,30 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let hadPriorConnection = false;
 
     const connect = (): void => {
       if (closed) return;
+      if (hadPriorConnection) {
+        logInboxReliability("ws.reconnecting", { reason: "schedule_reconnect" });
+      }
       const wsBase = apiBaseUrl.replace(/^http/, "ws");
       socket = new WebSocket(`${wsBase}/ws?token=${encodeURIComponent(accessToken)}`);
 
       socket.onopen = () => {
         if (closed) return;
         setRealtimeConnected(true);
+        logInboxReliability(hadPriorConnection ? "ws.reconnected" : "ws.connected", {
+          reason: hadPriorConnection ? "reconnect" : "initial",
+          ok: true
+        });
+        hadPriorConnection = true;
+        // Pub/Sub has no replay — reconcile inbox list + force-refresh open chat after every connect.
+        void reconcileInboxFromServer();
         const openChatId = activeChatIdRef.current;
         if (openChatId) {
-          refreshChatMessagesIfStale(openChatId);
+          refreshChatMessagesForced(openChatId);
+          catchUpHandlersRef.current.get(openChatId)?.();
         }
       };
 
@@ -425,9 +568,14 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
             payload.type === "telegram_account.deletion_started"
           ) {
             handleRealtimeEventRef.current(payload as TelegramWorkspaceRealtimeEvent);
+          } else if (payload.type && payload.type !== "connected" && payload.type !== "pong") {
+            logInboxReliability("ws.event_dropped", {
+              eventType: payload.type,
+              reason: "unhandled_frame_type"
+            });
           }
         } catch {
-          // Ignore malformed frames.
+          logInboxReliability("ws.event_dropped", { reason: "malformed_frame" });
         }
       };
 
@@ -437,6 +585,7 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
 
       socket.onclose = () => {
         setRealtimeConnected(false);
+        logInboxReliability("ws.disconnected", { reason: closed ? "provider_unmount" : "socket_close" });
         if (closed) return;
         reconnectTimer = setTimeout(connect, 2_000);
       };
@@ -456,11 +605,40 @@ export function InboxProvider({ children }: { readonly children: ReactNode }) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       socket?.close();
     };
-  }, [accessToken]);
+  }, [accessToken, reconcileInboxFromServer]);
 
   useEffect(() => {
     if (activeChatId) clearUnread(activeChatId);
   }, [activeChatId, clearUnread]);
+
+  // Resume from background / network restore: re-mark open chat read + reconcile list.
+  useEffect(() => {
+    function onVisibleOrOnline(): void {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      logInboxReliability("proof.timeline_step", {
+        reason: "browser_resume_or_online",
+        meta: { visibility: typeof document === "undefined" ? "ssr" : document.visibilityState }
+      });
+      const openChatId = activeChatIdRef.current;
+      if (openChatId && (typeof document === "undefined" || document.visibilityState === "visible")) {
+        clearUnread(openChatId);
+      }
+      void reconcileInboxFromServer();
+    }
+
+    function onVisibilityChange(): void {
+      if (document.visibilityState === "visible") onVisibleOrOnline();
+    }
+
+    window.addEventListener("online", onVisibleOrOnline);
+    window.addEventListener("pageshow", onVisibleOrOnline);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("online", onVisibleOrOnline);
+      window.removeEventListener("pageshow", onVisibleOrOnline);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [clearUnread, reconcileInboxFromServer]);
 
   const registerCatchUpHandler = useCallback((chatId: string, handler: () => void) => {
     catchUpHandlersRef.current.set(chatId, handler);
