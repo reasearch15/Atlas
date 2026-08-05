@@ -356,10 +356,10 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
           </Button>
         </header>
 
-        <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           <div
             ref={listRef}
-            className="h-full overflow-x-hidden overflow-y-auto overscroll-contain px-3 py-3 sm:px-5"
+            className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-3 py-3 sm:px-5"
             onScroll={() => {
               const nearBottom = isNearBottom();
               stickToBottomRef.current = nearBottom;
@@ -457,7 +457,10 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
           ) : null}
         </div>
 
-        <div style={{ paddingBottom: isMobile ? "env(safe-area-inset-bottom)" : undefined }}>
+        <div
+          className="shrink-0 border-t bg-white"
+          style={{ paddingBottom: isMobile ? "env(safe-area-inset-bottom, 0px)" : undefined }}
+        >
           <MessageComposer
             chatId={chat.id}
             disabled={loading}

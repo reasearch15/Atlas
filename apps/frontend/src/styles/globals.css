@@ -28,7 +28,13 @@ html,
 body {
   height: 100%;
   width: 100%;
+  /*
+   * Set both axes explicitly. `overflow-x: hidden` alone computes overflow-y to
+   * `auto`, which makes the document a mobile scroll root and lets the chat page
+   * drag (header/composer leave the screen).
+   */
   overflow-x: hidden;
+  overflow-y: auto;
 }
 
 body {
@@ -36,6 +42,22 @@ body {
   background: hsl(var(--background));
   color: hsl(var(--foreground));
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/*
+ * Applied by StaffShell / WorkspaceShell while the messaging app is mounted.
+ * Locks the document so only intentional inner scrollers (inbox list, messages) move.
+ */
+html.app-viewport-lock,
+html.app-viewport-lock body {
+  height: 100%;
+  max-height: 100dvh;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+html.app-viewport-lock body {
+  min-height: 0;
 }
 
 /* PWA / mobile shell helpers */

@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { MobileBottomNav } from "@/components/layout/mobile-bottom-nav";
 import { MobileDrawer } from "@/components/layout/mobile-drawer";
 import { MobileHeader } from "@/components/layout/mobile-header";
+import { useAppViewportLock } from "@/components/layout/use-app-viewport-lock";
 import { PwaInstallButton } from "@/components/pwa/pwa-install-button";
 import { staffLogout } from "@/lib/api";
 import { clearRoleAuthBootstrap } from "@/lib/auth-bootstrap";
@@ -37,6 +38,7 @@ export function StaffShell({ children }: { readonly children: ReactNode }) {
   const { status, error, retry } = useRoleWorkspaceBootstrap("STAFF");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  useAppViewportLock();
 
   async function signOut(): Promise<void> {
     clearRoleAuthBootstrap("STAFF");
@@ -100,7 +102,7 @@ export function StaffShell({ children }: { readonly children: ReactNode }) {
   );
 
   return (
-    <div className="flex h-dvh max-h-dvh w-full overflow-hidden bg-background">
+    <div className="flex h-dvh max-h-dvh w-full overflow-hidden overscroll-none bg-background">
       <aside className="hidden h-full w-[16rem] shrink-0 flex-col overflow-hidden border-r bg-white p-4 lg:flex">
         <div className="mb-8 shrink-0 px-2">
           <p className="font-semibold">Atlas Staff</p>

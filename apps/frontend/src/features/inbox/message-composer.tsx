@@ -332,7 +332,7 @@ export function MessageComposer({
   const showDefaultComposer = composerMode === "text" || composerMode === "attachment";
 
   return (
-    <form onSubmit={handleSubmit} className="sticky bottom-0 z-10 shrink-0 border-t bg-white px-3 py-2.5">
+    <form onSubmit={handleSubmit} className="z-10 shrink-0 bg-white px-3 py-2.5">
       {permissionHint ? (
         <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900" role="status">
           {permissionHint}

@@ -21,7 +21,7 @@ export function ConversationSkeleton() {
         <BubblePlaceholder align="end" width="w-3/5" />
       </div>
 
-      <div className="sticky bottom-0 shrink-0 border-t bg-white px-3 py-2.5">
+      <div className="shrink-0 border-t bg-white px-3 py-2.5">
         <div className="h-11 animate-pulse rounded-2xl bg-muted/60" />
       </div>
     </div>
