@@ -18,6 +18,10 @@
   --border: 214 18% 82%;
   --input: 214 18% 82%;
   --ring: 174 70% 30%;
+  /* Synced from Visual Viewport while messaging shells are mounted. */
+  --app-vv-height: 100dvh;
+  --app-vv-offset-top: 0px;
+  --app-vv-offset-left: 0px;
 }
 
 * {
@@ -46,18 +50,36 @@ body {
 
 /*
  * Applied by StaffShell / WorkspaceShell while the messaging app is mounted.
- * Locks the document so only intentional inner scrollers (inbox list, messages) move.
+ * Document is fixed so it cannot scroll; the shell frame tracks visualViewport
+ * (soft keyboard open/close) via --app-vv-* variables.
  */
 html.app-viewport-lock,
 html.app-viewport-lock body {
+  position: fixed;
+  inset: 0;
+  width: 100%;
   height: 100%;
-  max-height: 100dvh;
   overflow: hidden;
   overscroll-behavior: none;
+  min-height: 0;
+  max-height: none;
 }
 
 html.app-viewport-lock body {
+  /* Avoid 100dvh min-height fighting the visual viewport frame. */
   min-height: 0;
+  height: 100%;
+}
+
+.app-viewport-frame {
+  position: fixed;
+  top: var(--app-vv-offset-top, 0px);
+  left: var(--app-vv-offset-left, 0px);
+  width: 100%;
+  height: var(--app-vv-height, 100dvh);
+  max-height: var(--app-vv-height, 100dvh);
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 /* PWA / mobile shell helpers */

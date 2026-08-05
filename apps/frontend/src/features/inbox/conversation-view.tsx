@@ -5,6 +5,7 @@ import { ChevronLeft } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { BottomSheet } from "@/components/layout/bottom-sheet";
+import { APP_VISUAL_VIEWPORT_EVENT } from "@/components/layout/use-app-viewport-lock";
 import { Button } from "@/components/ui/button";
 import { useAtlasBreakpoint } from "@/hooks/use-atlas-breakpoint";
 import { api } from "@/lib/api";
@@ -85,6 +86,16 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
   }, []);
   const scrollToBottomRef = useRef(scrollToBottom);
   scrollToBottomRef.current = scrollToBottom;
+
+  // Soft keyboard / visual viewport changes resize the shell — keep stick-to-bottom in sync.
+  useEffect(() => {
+    function onVisualViewport(): void {
+      if (!stickToBottomRef.current) return;
+      requestAnimationFrame(() => scrollToBottomRef.current("auto"));
+    }
+    window.addEventListener(APP_VISUAL_VIEWPORT_EVENT, onVisualViewport);
+    return () => window.removeEventListener(APP_VISUAL_VIEWPORT_EVENT, onVisualViewport);
+  }, []);
 
   const applyIncomingMessage = useCallback(
     (incoming: TelegramMessageDto) => {
