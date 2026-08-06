@@ -7,7 +7,6 @@ import {
   type NotificationAckEvent,
   type NotificationAction,
   type NotificationAnalyticsDto,
-  type NotificationHistoryItemDto,
   type NotificationReconcileResultDto,
   type NotificationType
 } from "@atlas/shared";
@@ -260,7 +259,7 @@ export class NotificationService {
   public async reconcileForUser(user: RequestUser): Promise<NotificationReconcileResultDto> {
     const workspaceId = user.workspaceId;
     if (!workspaceId) {
-      return { unreadBadge: 0, pendingNotifications: 0, requeued: 0, historyUnread: 0 };
+      return { unreadBadge: 0, pendingNotifications: 0, requeued: 0 };
     }
 
     const devices = await this.devices.activeTokensForUsers(workspaceId, [user.id]);
@@ -320,7 +319,7 @@ export class NotificationService {
       }
     }
 
-    const [unreadBadge, pendingNotifications, historyUnread] = await Promise.all([
+    const [unreadBadge, pendingNotifications] = await Promise.all([
       this.loadUnreadBadge(workspaceId),
       this.app.prisma.pushNotification.count({
         where: {
@@ -329,56 +328,13 @@ export class NotificationService {
           status: { in: ["QUEUED", "DISPATCHING", "RETRY_SCHEDULED", "FAILED"] },
           expiresAt: { gt: new Date() }
         }
-      }),
-      this.app.prisma.pushNotification.count({
-        where: {
-          userId: user.id,
-          workspaceId,
-          openedAt: null,
-          dismissedAt: null,
-          status: { notIn: ["CANCELLED", "EXPIRED", "SKIPPED"] }
-        }
       })
     ]);
 
-    return { unreadBadge, pendingNotifications, requeued, historyUnread };
+    return { unreadBadge, pendingNotifications, requeued };
   }
 
-  public async listHistory(
-    user: RequestUser,
-    query: { status: "unread" | "read" | "dismissed" | "failed" | "all"; limit: number; cursor?: string }
-  ): Promise<NotificationHistoryItemDto[]> {
-    const workspaceId = this.requireWorkspace(user);
-    const where: Record<string, unknown> = { userId: user.id, workspaceId };
-
-    if (query.status === "unread") {
-      where.openedAt = null;
-      where.dismissedAt = null;
-      where.status = { notIn: ["CANCELLED", "EXPIRED", "SKIPPED"] };
-    } else if (query.status === "read") {
-      where.openedAt = { not: null };
-    } else if (query.status === "dismissed") {
-      where.dismissedAt = { not: null };
-    } else if (query.status === "failed") {
-      where.status = { in: ["FAILED", "INVALID_TOKEN", "EXPIRED"] };
-    }
-
-    if (query.cursor) {
-      const cursorRow = await this.app.prisma.pushNotification.findUnique({ where: { id: query.cursor } });
-      if (cursorRow) {
-        where.createdAt = { lt: cursorRow.createdAt };
-      }
-    }
-
-    const rows = await this.app.prisma.pushNotification.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      take: query.limit
-    });
-    return rows.map((row) => this.toHistoryDto(row));
-  }
-
-  public async acknowledge(user: RequestUser, notificationId: string, event: NotificationAckEvent): Promise<NotificationHistoryItemDto> {
+  public async acknowledge(user: RequestUser, notificationId: string, event: NotificationAckEvent): Promise<{ ok: true }> {
     const row = await this.requireOwnedNotification(user, notificationId);
     const now = new Date();
     const data =
@@ -388,7 +344,7 @@ export class NotificationService {
           ? { status: "OPENED" as const, openedAt: row.openedAt ?? now, deliveredAt: row.deliveredAt ?? now }
           : { status: "DISMISSED" as const, dismissedAt: row.dismissedAt ?? now };
 
-    const updated = await this.app.prisma.pushNotification.update({ where: { id: row.id }, data });
+    await this.app.prisma.pushNotification.update({ where: { id: row.id }, data });
     await this.deliveryLog.record({
       workspaceId: row.workspaceId,
       userId: row.userId,
@@ -403,7 +359,7 @@ export class NotificationService {
       messageId: row.messageId,
       attempt: row.attemptCount
     });
-    return this.toHistoryDto(updated);
+    return { ok: true };
   }
 
   public async performAction(
@@ -832,50 +788,6 @@ export class NotificationService {
     });
     if (!row) throw new AppError(404, "NOT_FOUND", "Notification not found");
     return row;
-  }
-
-  private toHistoryDto(row: {
-    id: string;
-    type: NotificationType;
-    status: import("@atlas/shared").NotificationDeliveryStatus;
-    title: string;
-    body: string;
-    customerName: string | null;
-    chatId: string | null;
-    messageId: string | null;
-    workspaceId: string;
-    deepLinkPath: string;
-    attemptCount: number;
-    createdAt: Date;
-    sentAt: Date | null;
-    deliveredAt: Date | null;
-    openedAt: Date | null;
-    dismissedAt: Date | null;
-    failedAt: Date | null;
-    expiresAt: Date;
-    lastErrorCode: string | null;
-  }): NotificationHistoryItemDto {
-    return {
-      id: row.id,
-      type: row.type,
-      status: row.status,
-      title: row.title,
-      body: row.body,
-      customerName: row.customerName,
-      chatId: row.chatId,
-      messageId: row.messageId,
-      workspaceId: row.workspaceId,
-      deepLinkPath: row.deepLinkPath,
-      attemptCount: row.attemptCount,
-      createdAt: row.createdAt.toISOString(),
-      sentAt: row.sentAt?.toISOString() ?? null,
-      deliveredAt: row.deliveredAt?.toISOString() ?? null,
-      openedAt: row.openedAt?.toISOString() ?? null,
-      dismissedAt: row.dismissedAt?.toISOString() ?? null,
-      failedAt: row.failedAt?.toISOString() ?? null,
-      expiresAt: row.expiresAt.toISOString(),
-      lastErrorCode: row.lastErrorCode
-    };
   }
 
   public async adminStats(workspaceId?: string) {

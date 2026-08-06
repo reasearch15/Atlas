@@ -7,6 +7,7 @@ import {
   ackNotification,
   bindForegroundPushHandlers,
   ensurePushRegistration,
+  isPushDisabledOnThisDevice,
   reconcileNotifications,
   runNotificationAction
 } from "@/features/notifications/push-client";
@@ -28,6 +29,8 @@ export function PushBootstrap(): null {
     let unbind: (() => void) | undefined;
 
     void (async () => {
+      if (isPushDisabledOnThisDevice()) return;
+
       const result = await ensurePushRegistration();
       if (cancelled) return;
       if (result.status === "registered") {

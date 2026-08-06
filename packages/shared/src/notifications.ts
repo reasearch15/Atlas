@@ -174,33 +174,10 @@ export type NotificationWebConfigDto = {
   readonly vapidKey: string | null;
 };
 
-export type NotificationHistoryItemDto = {
-  readonly id: string;
-  readonly type: NotificationType;
-  readonly status: NotificationDeliveryStatus;
-  readonly title: string;
-  readonly body: string;
-  readonly customerName: string | null;
-  readonly chatId: string | null;
-  readonly messageId: string | null;
-  readonly workspaceId: string;
-  readonly deepLinkPath: string;
-  readonly attemptCount: number;
-  readonly createdAt: string;
-  readonly sentAt: string | null;
-  readonly deliveredAt: string | null;
-  readonly openedAt: string | null;
-  readonly dismissedAt: string | null;
-  readonly failedAt: string | null;
-  readonly expiresAt: string;
-  readonly lastErrorCode: string | null;
-};
-
 export type NotificationReconcileResultDto = {
   readonly unreadBadge: number;
   readonly pendingNotifications: number;
   readonly requeued: number;
-  readonly historyUnread: number;
 };
 
 export type NotificationAnalyticsDto = {
@@ -228,12 +205,6 @@ export const notificationActionSchema = z.object({
   action: z.enum(notificationActions)
 });
 export type NotificationActionInput = z.infer<typeof notificationActionSchema>;
-
-export const notificationHistoryQuerySchema = z.object({
-  status: z.enum(["unread", "read", "dismissed", "failed", "all"]).default("all"),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  cursor: z.string().uuid().optional()
-});
 
 export type NotificationDeepLinkPayload = {
   readonly workspaceId: string;

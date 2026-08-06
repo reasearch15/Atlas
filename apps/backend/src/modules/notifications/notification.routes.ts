@@ -3,7 +3,6 @@ import {
   deletePushDeviceSchema,
   notificationAckSchema,
   notificationActionSchema,
-  notificationHistoryQuerySchema,
   notificationPreferencesSchema,
   refreshPushDeviceSchema,
   registerPushDeviceSchema
@@ -17,7 +16,7 @@ const testBodySchema = z
   .optional();
 
 /**
- * Device registration, preference, history, ack/actions, and admin notification APIs.
+ * Device registration, preferences, ack/actions, and admin notification APIs.
  */
 export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   const tenantGuards = [app.authenticate, app.requireRole(["COADMIN", "STAFF"] as const)];
@@ -65,15 +64,6 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
       workspaceId: request.user!.workspaceId!,
       userId: request.user!.id,
       ...(body.deviceTokenId ? { deviceTokenId: body.deviceTokenId } : {})
-    });
-  });
-
-  app.get("/history", { preHandler: tenantGuards }, async (request) => {
-    const query = notificationHistoryQuerySchema.parse(request.query);
-    return app.notifications.listHistory(request.user!, {
-      status: query.status,
-      limit: query.limit,
-      ...(query.cursor ? { cursor: query.cursor } : {})
     });
   });
 

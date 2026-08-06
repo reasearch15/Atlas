@@ -43,9 +43,8 @@ Each registered device gets its own `push_notifications` row. Delivery to one de
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/notifications/:id/ack` | `delivered` / `opened` / `dismissed` |
+| `POST /api/notifications/:id/ack` | `delivered` / `opened` / `dismissed` (delivery lifecycle only) |
 | `POST /api/notifications/:id/actions` | `open` / `mark_read` / `claim` |
-| `GET /api/notifications/history` | User history filters |
 | `POST /api/notifications/reconcile` | Catch up after reconnect |
 | `GET /api/notifications/admin/analytics` | Latency / open / failure rates |
 

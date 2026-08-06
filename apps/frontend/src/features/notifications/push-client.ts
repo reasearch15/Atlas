@@ -2,7 +2,6 @@ import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   type NotificationAckEvent,
   type NotificationAction,
-  type NotificationHistoryItemDto,
   type NotificationPreferencesDto,
   type NotificationReconcileResultDto,
   type NotificationWebConfigDto,
@@ -13,10 +12,65 @@ import { apiRequest } from "@/lib/api";
 import { normalizeFirebaseVapidKey } from "@/lib/firebase-csp";
 
 const TOKEN_STORAGE_KEY = "atlas.fcm.token";
+const DEVICE_ID_STORAGE_KEY = "atlas.fcm.deviceId";
+const DISABLED_STORAGE_KEY = "atlas.fcm.disabled";
 
 export type PushRegistrationState =
-  | { readonly status: "unsupported" | "disabled" | "denied" | "ready" | "error"; readonly detail?: string }
-  | { readonly status: "registered"; readonly token: string };
+  | { readonly status: "unsupported" | "disabled" | "disabled_locally" | "denied" | "ready" | "error"; readonly detail?: string }
+  | { readonly status: "registered"; readonly token: string; readonly deviceId: string };
+
+export function isPushDisabledOnThisDevice(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(DISABLED_STORAGE_KEY) === "1";
+}
+
+export function getLocalPushToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(TOKEN_STORAGE_KEY);
+}
+
+export function getLocalPushDeviceId(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+}
+
+/**
+ * Backfills the local device id for browsers that registered before per-device tracking shipped.
+ */
+export function syncLocalDeviceRegistration(devices: readonly PushDeviceDto[]): void {
+  if (typeof window === "undefined") return;
+  if (isPushDisabledOnThisDevice() || getLocalPushDeviceId() || !getLocalPushToken()) return;
+
+  const deviceName = navigator.userAgent.slice(0, 160);
+  const match = devices.find((device) => device.deviceName === deviceName);
+  if (match) {
+    window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, match.id);
+  }
+}
+
+/**
+ * True when this browser has an active push registration that still exists on the server.
+ */
+export function isThisDeviceRegistered(devices: readonly PushDeviceDto[]): boolean {
+  if (typeof window === "undefined") return false;
+  if (isPushDisabledOnThisDevice()) return false;
+  syncLocalDeviceRegistration(devices);
+  const deviceId = getLocalPushDeviceId();
+  const token = getLocalPushToken();
+  if (!token || !deviceId) return false;
+  return devices.some((device) => device.id === deviceId);
+}
+
+function persistLocalPushRegistration(token: string, deviceId: string): void {
+  window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, deviceId);
+  window.localStorage.removeItem(DISABLED_STORAGE_KEY);
+}
+
+function clearLocalPushRegistration(): void {
+  window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+  window.localStorage.removeItem(DEVICE_ID_STORAGE_KEY);
+}
 
 /**
  * Detects the best push platform label for this browser / device.
@@ -93,17 +147,11 @@ export async function reconcileNotifications(): Promise<NotificationReconcileRes
   return apiRequest<NotificationReconcileResultDto>("/api/notifications/reconcile", { method: "POST" });
 }
 
-export async function fetchNotificationHistory(
-  status: "unread" | "read" | "dismissed" | "failed" | "all" = "all"
-): Promise<NotificationHistoryItemDto[]> {
-  return apiRequest<NotificationHistoryItemDto[]>(`/api/notifications/history?status=${status}&limit=50`);
-}
-
 export async function ackNotification(
   notificationId: string,
   event: NotificationAckEvent
-): Promise<NotificationHistoryItemDto> {
-  return apiRequest<NotificationHistoryItemDto>(`/api/notifications/${notificationId}/ack`, {
+): Promise<{ ok: true }> {
+  return apiRequest<{ ok: true }>(`/api/notifications/${notificationId}/ack`, {
     method: "POST",
     body: JSON.stringify({ event })
   });
@@ -120,10 +168,40 @@ export async function runNotificationAction(
 }
 
 /**
+ * Revokes this device's FCM token on the server and opts out of auto-registration.
+ */
+export async function disablePushOnThisDevice(): Promise<void> {
+  if (typeof window === "undefined") return;
+  const token = getLocalPushToken();
+  if (token) {
+    try {
+      await deletePushDevice(token);
+    } catch {
+      // Best-effort — local opt-out still applies.
+    }
+  }
+  window.localStorage.setItem(DISABLED_STORAGE_KEY, "1");
+  clearLocalPushRegistration();
+}
+
+/**
+ * Clears the local opt-out and registers (or rotates) an FCM web token.
+ */
+export async function enablePushOnThisDevice(): Promise<PushRegistrationState> {
+  if (typeof window !== "undefined") {
+    window.localStorage.removeItem(DISABLED_STORAGE_KEY);
+  }
+  return ensurePushRegistration({ force: true });
+}
+
+/**
  * Registers (or rotates) an FCM web token for the authenticated session.
  */
-export async function ensurePushRegistration(): Promise<PushRegistrationState> {
+export async function ensurePushRegistration(options?: { force?: boolean }): Promise<PushRegistrationState> {
   if (typeof window === "undefined") return { status: "unsupported" };
+  if (!options?.force && isPushDisabledOnThisDevice()) {
+    return { status: "disabled_locally" };
+  }
   if (!("Notification" in window) || !("serviceWorker" in navigator)) {
     return { status: "unsupported" };
   }
@@ -175,17 +253,16 @@ export async function ensurePushRegistration(): Promise<PushRegistrationState> {
 
     if (!token) return { status: "error", detail: "empty_token" };
 
-    const previous = localStorage.getItem(TOKEN_STORAGE_KEY);
+    const previous = getLocalPushToken();
     const platform = detectPushPlatform();
     const deviceName = navigator.userAgent.slice(0, 160);
 
-    if (previous && previous !== token) {
-      await refreshPushDevice({ previousToken: previous, token, platform, deviceName, appVersion: "web-1" });
-    } else {
-      await registerPushDevice({ token, platform, deviceName, appVersion: "web-1" });
-    }
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
-    return { status: "registered", token };
+    const device =
+      previous && previous !== token
+        ? await refreshPushDevice({ previousToken: previous, token, platform, deviceName, appVersion: "web-1" })
+        : await registerPushDevice({ token, platform, deviceName, appVersion: "web-1" });
+    persistLocalPushRegistration(token, device.id);
+    return { status: "registered", token, deviceId: device.id };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "register_failed";
     // CSP blocks usually surface as Failed to fetch against firebaseinstallations / fcmregistrations.
@@ -198,14 +275,14 @@ export async function ensurePushRegistration(): Promise<PushRegistrationState> {
  */
 export async function unregisterLocalPushDevice(): Promise<void> {
   if (typeof window === "undefined") return;
-  const token = localStorage.getItem(TOKEN_STORAGE_KEY);
+  const token = getLocalPushToken();
   if (!token) return;
   try {
     await deletePushDevice(token);
   } catch {
     // Best-effort — server also revokes by session on logout.
   } finally {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    clearLocalPushRegistration();
   }
 }
 
@@ -284,4 +361,9 @@ export async function bindForegroundPushHandlers(handlers: {
   }
 }
 
-export { DEFAULT_NOTIFICATION_PREFERENCES, TOKEN_STORAGE_KEY };
+export {
+  DEFAULT_NOTIFICATION_PREFERENCES,
+  DEVICE_ID_STORAGE_KEY,
+  DISABLED_STORAGE_KEY,
+  TOKEN_STORAGE_KEY
+};
