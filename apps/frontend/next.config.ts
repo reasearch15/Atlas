@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { buildAtlasConnectSrc } from "./src/lib/firebase-csp";
 import { resolvePublicApiUrl } from "./src/lib/resolve-public-api-url";
 
 /**
@@ -27,11 +28,14 @@ const nextConfig: NextConfig = {
     // Do not allow private MinIO / localhost origins.
     const apiOrigin = new URL(nextPublicApiUrl);
     const wsOrigin = `${apiOrigin.protocol === "https:" ? "wss" : "ws"}://${apiOrigin.host}`;
+    // FCM web getToken() calls firebaseinstallations + fcmregistrations; SW telemetry hits play.google.com.
+    // Keep allowlist explicit — never open *.googleapis.com.
+    const connectSrc = buildAtlasConnectSrc({ apiOrigin: nextPublicApiUrl, wsOrigin });
     const csp = [
       "default-src 'self'",
       "img-src 'self' data: blob:",
       "media-src 'self' blob:",
-      `connect-src 'self' ${nextPublicApiUrl} ${wsOrigin}`,
+      `connect-src ${connectSrc}`,
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "style-src 'self' 'unsafe-inline'",
       "font-src 'self' data:",

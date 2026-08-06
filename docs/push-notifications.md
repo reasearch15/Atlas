@@ -60,3 +60,18 @@ Service worker posts ack/action messages to the app; notifications use `requireI
 ## Favor reliability
 
 If minimizing noise conflicts with never missing a customer message, Atlas keeps the notification pending and retries.
+
+## Content Security Policy (FCM web)
+
+CSP is generated in `apps/frontend/next.config.ts` via `buildAtlasConnectSrc()`.
+
+`connect-src` must allow the hosts the Firebase Messaging JS SDK actually calls
+(verified in `@firebase/installations` + `@firebase/messaging`):
+
+| Origin | Why |
+|--------|-----|
+| `https://firebaseinstallations.googleapis.com` | Installation ID before `getToken()` |
+| `https://fcmregistrations.googleapis.com` | Web FCM token registration |
+| `https://play.google.com` | Optional SW delivery telemetry |
+
+Without these, Chrome blocks registration (`Connecting to firebaseinstallations.googleapis.com violates Content Security Policy`) and `PushBootstrap` never obtains a token. Do **not** widen to `*.googleapis.com`.

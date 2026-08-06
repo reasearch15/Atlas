@@ -10,6 +10,7 @@ import {
   type PushPlatform
 } from "@atlas/shared";
 import { apiRequest } from "@/lib/api";
+import { normalizeFirebaseVapidKey } from "@/lib/firebase-csp";
 
 const TOKEN_STORAGE_KEY = "atlas.fcm.token";
 
@@ -138,6 +139,11 @@ export async function ensurePushRegistration(): Promise<PushRegistrationState> {
     return { status: "disabled" };
   }
 
+  const vapidKey = normalizeFirebaseVapidKey(config.vapidKey);
+  if (!vapidKey) {
+    return { status: "error", detail: "invalid_vapid_key" };
+  }
+
   if (Notification.permission === "denied") return { status: "denied" };
   if (Notification.permission !== "granted") {
     const permission = await Notification.requestPermission();
@@ -163,7 +169,7 @@ export async function ensurePushRegistration(): Promise<PushRegistrationState> {
     const messaging = getMessaging(app);
     const registration = await navigator.serviceWorker.ready;
     const token = await getToken(messaging, {
-      vapidKey: config.vapidKey,
+      vapidKey,
       serviceWorkerRegistration: registration
     });
 
@@ -181,7 +187,9 @@ export async function ensurePushRegistration(): Promise<PushRegistrationState> {
     localStorage.setItem(TOKEN_STORAGE_KEY, token);
     return { status: "registered", token };
   } catch (error) {
-    return { status: "error", detail: error instanceof Error ? error.message : "register_failed" };
+    const detail = error instanceof Error ? error.message : "register_failed";
+    // CSP blocks usually surface as Failed to fetch against firebaseinstallations / fcmregistrations.
+    return { status: "error", detail };
   }
 }
 
