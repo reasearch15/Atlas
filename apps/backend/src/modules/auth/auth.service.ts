@@ -141,6 +141,10 @@ export class AuthService {
         where: { id: request.user.sessionId, userId: request.user.id },
         data: { revokedAt: new Date() }
       });
+      await this.prisma.pushDeviceToken.updateMany({
+        where: { userId: request.user.id, sessionId: request.user.sessionId, revokedAt: null },
+        data: { revokedAt: new Date() }
+      });
       await this.audit.record({
         workspaceId: request.user.workspaceId,
         actorId: request.user.id,

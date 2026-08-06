@@ -36,7 +36,22 @@ const envSchema = z
     ENABLE_DEV_FIXTURES: z
       .enum(["true", "false"])
       .default("false")
-      .transform((value) => value === "true")
+      .transform((value) => value === "true"),
+    /** When false or incomplete, push dispatch no-ops safely (local/test). */
+    FCM_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    FIREBASE_PROJECT_ID: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
+    FIREBASE_CLIENT_EMAIL: z.preprocess((value) => (value === "" ? undefined : value), z.string().email().optional()),
+    FIREBASE_PRIVATE_KEY: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
+    FIREBASE_WEB_API_KEY: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
+    FIREBASE_WEB_AUTH_DOMAIN: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
+    FIREBASE_MESSAGING_SENDER_ID: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
+    FIREBASE_WEB_APP_ID: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
+    FIREBASE_VAPID_KEY: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
+    /** How long pending customer notifications remain retryable (default 7 days). */
+    NOTIFICATION_TTL_HOURS: z.coerce.number().int().positive().default(168)
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV !== "production") {
@@ -73,6 +88,26 @@ const envSchema = z
         path: ["FRONTEND_ORIGIN"],
         message: "FRONTEND_ORIGIN must use https in production"
       });
+    }
+
+    if (env.FCM_ENABLED) {
+      for (const key of [
+        "FIREBASE_PROJECT_ID",
+        "FIREBASE_CLIENT_EMAIL",
+        "FIREBASE_PRIVATE_KEY",
+        "FIREBASE_WEB_API_KEY",
+        "FIREBASE_MESSAGING_SENDER_ID",
+        "FIREBASE_WEB_APP_ID",
+        "FIREBASE_VAPID_KEY"
+      ] as const) {
+        if (!env[key]) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [key],
+            message: `${key} is required when FCM_ENABLED=true`
+          });
+        }
+      }
     }
   });
 

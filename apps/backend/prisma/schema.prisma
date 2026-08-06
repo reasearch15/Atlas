@@ -211,6 +211,40 @@ enum CrmActivityType {
   INTERNAL_MESSAGE_SENT
 }
 
+enum PushPlatform {
+  ANDROID
+  WEB
+  IOS
+}
+
+enum NotificationType {
+  INCOMING_MESSAGE
+  NEW_CONVERSATION
+  CONVERSATION_ASSIGNED
+  CONVERSATION_REASSIGNED
+  MENTION
+  CONVERSATION_REOPENED
+  URGENT_FLAG
+  SLA_WARNING
+  FAILED_MESSAGE
+  TEST
+}
+
+enum NotificationDeliveryStatus {
+  QUEUED
+  DISPATCHING
+  SENT
+  DELIVERED
+  OPENED
+  DISMISSED
+  FAILED
+  RETRY_SCHEDULED
+  EXPIRED
+  CANCELLED
+  SKIPPED
+  INVALID_TOKEN
+}
+
 model Workspace {
   id               String                    @id @default(uuid()) @db.Uuid
   name             String                    @db.VarChar(120)
@@ -240,6 +274,10 @@ model Workspace {
   internalThreads  InternalMessageThread[]
   internalMessages InternalMessage[]
   telegramAccountDeletions TelegramAccountDeletion[]
+  pushDeviceTokens PushDeviceToken[]
+  notificationPreferences NotificationPreference[]
+  notificationDeliveryLogs NotificationDeliveryLog[]
+  pushNotifications PushNotification[]
 
   @@map("workspaces")
 }
@@ -282,6 +320,10 @@ model User {
   sentInternalMessages     InternalMessage[]         @relation("InternalMessageSender")
   receivedInternalMessages InternalMessage[]         @relation("InternalMessageReceiver")
   telegramAccountDeletions TelegramAccountDeletion[] @relation("TelegramAccountDeletionActor")
+  pushDeviceTokens         PushDeviceToken[]
+  notificationPreference   NotificationPreference?
+  notificationDeliveryLogs NotificationDeliveryLog[]
+  pushNotifications        PushNotification[]
 
   @@index([username])
   @@index([workspaceId, role])
@@ -792,4 +834,137 @@ model TelegramAccountDeletion {
 
   @@index([workspaceId, stage])
   @@map("telegram_account_deletions")
+}
+
+/// FCM registration for an authenticated Atlas device (Android / Web / future iOS).
+model PushDeviceToken {
+  id                        String       @id @default(uuid()) @db.Uuid
+  userId                    String       @map("user_id") @db.Uuid
+  workspaceId               String       @map("workspace_id") @db.Uuid
+  sessionId                 String?      @map("session_id") @db.Uuid
+  platform                  PushPlatform
+  token                     String       @unique @db.VarChar(4096)
+  deviceName                String?      @map("device_name") @db.VarChar(160)
+  appVersion                String?      @map("app_version") @db.VarChar(64)
+  lastSeenAt                DateTime     @default(now()) @map("last_seen_at")
+  lastSuccessfulDeliveryAt  DateTime?    @map("last_successful_delivery_at")
+  lastFailedDeliveryAt      DateTime?    @map("last_failed_delivery_at")
+  revokedAt                 DateTime?    @map("revoked_at")
+  createdAt                 DateTime     @default(now()) @map("created_at")
+  updatedAt                 DateTime     @updatedAt @map("updated_at")
+  user                      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace                 Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deliveryLogs              NotificationDeliveryLog[]
+  pushNotifications         PushNotification[]
+
+  @@index([userId, workspaceId, revokedAt])
+  @@index([workspaceId, revokedAt])
+  @@index([sessionId])
+  @@map("push_device_tokens")
+}
+
+/// Per-user notification preference controls (workspace-scoped).
+model NotificationPreference {
+  id                 String    @id @default(uuid()) @db.Uuid
+  userId             String    @unique @map("user_id") @db.Uuid
+  workspaceId        String    @map("workspace_id") @db.Uuid
+  enabled            Boolean   @default(true)
+  customerMessages   Boolean   @default(true) @map("customer_messages")
+  assignments        Boolean   @default(true)
+  mentions           Boolean   @default(true)
+  urgentOnly         Boolean   @default(false) @map("urgent_only")
+  sound              Boolean   @default(true)
+  vibration          Boolean   @default(true)
+  previewText        Boolean   @default(true) @map("preview_text")
+  showCustomerNames  Boolean   @default(true) @map("show_customer_names")
+  muteAll            Boolean   @default(false) @map("mute_all")
+  doNotDisturb       Json?     @map("do_not_disturb")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@map("notification_preferences")
+}
+
+/// Immutable delivery audit trail for push notifications (success + failure).
+model NotificationDeliveryLog {
+  id              String                     @id @default(uuid()) @db.Uuid
+  workspaceId     String                     @map("workspace_id") @db.Uuid
+  userId          String                     @map("user_id") @db.Uuid
+  deviceTokenId   String?                    @map("device_token_id") @db.Uuid
+  notificationId  String?                    @map("notification_id") @db.Uuid
+  type            NotificationType
+  status          NotificationDeliveryStatus
+  dedupeKey       String                     @map("dedupe_key") @db.VarChar(320)
+  title           String                     @db.VarChar(200)
+  body            String                     @db.VarChar(280)
+  chatId          String?                    @map("chat_id") @db.Uuid
+  messageId       String?                    @map("message_id") @db.Uuid
+  fcmMessageId    String?                    @map("fcm_message_id") @db.VarChar(200)
+  errorCode       String?                    @map("error_code") @db.VarChar(120)
+  errorMessage    String?                    @map("error_message") @db.VarChar(500)
+  payload         Json?
+  attempt         Int                        @default(1)
+  createdAt       DateTime                   @default(now()) @map("created_at")
+  workspace       Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user            User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceToken     PushDeviceToken?           @relation(fields: [deviceTokenId], references: [id], onDelete: SetNull)
+  notification    PushNotification?          @relation(fields: [notificationId], references: [id], onDelete: SetNull)
+
+  @@index([dedupeKey])
+  @@index([notificationId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([type, createdAt])
+  @@map("notification_delivery_logs")
+}
+
+/// Durable notification queue + user history. Survives backend/worker restarts.
+model PushNotification {
+  id               String                     @id @default(uuid()) @db.Uuid
+  workspaceId      String                     @map("workspace_id") @db.Uuid
+  userId           String                     @map("user_id") @db.Uuid
+  deviceTokenId    String?                    @map("device_token_id") @db.Uuid
+  type             NotificationType
+  status           NotificationDeliveryStatus @default(QUEUED)
+  priority         String                     @db.VarChar(16)
+  idempotencyKey   String                     @unique @map("idempotency_key") @db.VarChar(320)
+  title            String                     @db.VarChar(200)
+  body             String                     @db.VarChar(280)
+  customerName     String?                    @map("customer_name") @db.VarChar(160)
+  chatId           String?                    @map("chat_id") @db.Uuid
+  messageId        String?                    @map("message_id") @db.Uuid
+  deepLinkPath     String                     @map("deep_link_path") @db.VarChar(500)
+  imageUrl         String?                    @map("image_url") @db.VarChar(1000)
+  badgeCount       Int?                       @map("badge_count")
+  sound            Boolean                    @default(true)
+  vibration        Boolean                    @default(true)
+  fcmMessageId     String?                    @map("fcm_message_id") @db.VarChar(200)
+  attemptCount     Int                        @default(0) @map("attempt_count")
+  nextAttemptAt    DateTime?                  @map("next_attempt_at")
+  expiresAt        DateTime                   @map("expires_at")
+  lastErrorCode    String?                    @map("last_error_code") @db.VarChar(120)
+  lastErrorMessage String?                    @map("last_error_message") @db.VarChar(500)
+  sentAt           DateTime?                  @map("sent_at")
+  deliveredAt      DateTime?                  @map("delivered_at")
+  openedAt         DateTime?                  @map("opened_at")
+  dismissedAt      DateTime?                  @map("dismissed_at")
+  failedAt         DateTime?                  @map("failed_at")
+  createdAt        DateTime                   @default(now()) @map("created_at")
+  updatedAt        DateTime                   @updatedAt @map("updated_at")
+  workspace        Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user             User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceToken      PushDeviceToken?           @relation(fields: [deviceTokenId], references: [id], onDelete: SetNull)
+  events           NotificationDeliveryLog[]
+
+  @@index([status, nextAttemptAt])
+  @@index([userId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([userId, status, createdAt])
+  @@index([expiresAt, status])
+  @@index([deviceTokenId, status])
+  @@map("push_notifications")
 }

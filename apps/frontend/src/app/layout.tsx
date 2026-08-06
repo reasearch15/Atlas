@@ -3,6 +3,7 @@ import Script from "next/script";
 import { Inter } from "next/font/google";
 import { Toaster } from "sonner";
 import { PwaBootstrap } from "@/components/pwa/pwa-bootstrap";
+import { PushBootstrap } from "@/features/notifications/push-bootstrap";
 import { AppProviders } from "@/lib/providers";
 import "@/styles/globals.css";
 
@@ -74,6 +75,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         </Script>
         <AppProviders>
           <PwaBootstrap />
+          <PushBootstrap />
           {children}
           <Toaster richColors closeButton position="top-right" />
         </AppProviders>

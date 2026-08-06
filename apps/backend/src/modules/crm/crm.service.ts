@@ -116,6 +116,19 @@ export class CrmService {
       toUserId: assigneeUserId
     });
     await this.publishCrmConversationUpdated(workspaceId, chatId, activityType.toLowerCase());
+
+    if (assigneeUserId && (activityType === "ASSIGNED" || activityType === "REASSIGNED")) {
+      const customerName =
+        [chat.firstName, chat.lastName].filter(Boolean).join(" ").trim() || chat.title || "Customer";
+      void this.app.notifications.notifyAssignment({
+        workspaceId,
+        chatId,
+        assigneeUserId,
+        actorUserId: user.id,
+        customerName,
+        reassigned: activityType === "REASSIGNED"
+      });
+    }
   }
 
   /**
@@ -164,6 +177,19 @@ export class CrmService {
     await this.writeStatusHistory(workspaceId, chatId, fromStatus, status, user.id, "manual");
     await this.writeActivity(workspaceId, chatId, user.id, "STATUS_CHANGED", { from: fromStatus, to: status });
     await this.publishCrmConversationUpdated(workspaceId, chatId, "status_changed");
+
+    const wasClosed = fromStatus === "RESOLVED" || fromStatus === "CLOSED";
+    const isOpenAgain = status === "OPEN" || status === "WAITING" || status === "NEW";
+    if (wasClosed && isOpenAgain) {
+      const customerName =
+        [chat.firstName, chat.lastName].filter(Boolean).join(" ").trim() || chat.title || "Customer";
+      void this.app.notifications.notifyConversationReopened({
+        workspaceId,
+        chatId,
+        customerName,
+        ...(chat.assignedUserId ? { recipientUserIds: [chat.assignedUserId] } : {})
+      });
+    }
   }
 
   /**

@@ -58,6 +58,8 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
   const [replyTo, setReplyTo] = useState<TelegramMessageDto | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<TelegramMessageDto | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [pushHighlightMessageId, setPushHighlightMessageId] = useState<string | null>(null);
+  const [fromPush, setFromPush] = useState(false);
   const crm = useCrmConversationPanel(chat.id);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -65,6 +67,13 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
   const chatIdRef = useRef(chat.id);
   const pendingMessageIdRef = useRef<string | null>(null);
   chatIdRef.current = chat.id;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    setFromPush(params.get("from") === "push");
+    setPushHighlightMessageId(params.get("messageId"));
+  }, [chat.id]);
 
   useEffect(() => {
     // Desktop defaults to CRM open; mobile/tablet keep it closed until requested.
@@ -86,6 +95,17 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
   }, []);
   const scrollToBottomRef = useRef(scrollToBottom);
   scrollToBottomRef.current = scrollToBottom;
+
+  // Deep link from push: always land on newest messages and briefly highlight unread.
+  useEffect(() => {
+    if (!fromPush || loading || messages.length === 0) return;
+    requestAnimationFrame(() => scrollToBottomRef.current("smooth"));
+    if (pushHighlightMessageId) {
+      const el = document.getElementById(`atlas-msg-${pushHighlightMessageId}`);
+      el?.classList.add("atlas-push-highlight");
+      window.setTimeout(() => el?.classList.remove("atlas-push-highlight"), 2400);
+    }
+  }, [fromPush, pushHighlightMessageId, loading, messages.length, chat.id]);
 
   // Soft keyboard / visual viewport changes resize the shell — keep stick-to-bottom in sync.
   useEffect(() => {
@@ -408,6 +428,7 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
               return (
                 <article
                   key={message.id}
+                  id={`atlas-msg-${message.id}`}
                   className={`group relative mb-1.5 flex ${outgoing ? "justify-end" : "justify-start"}`}
                 >
                   <div className={`relative max-w-[85%] sm:max-w-[65%] ${outgoing ? "ml-auto" : "mr-auto"}`}>

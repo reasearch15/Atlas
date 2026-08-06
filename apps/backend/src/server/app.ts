@@ -22,6 +22,8 @@ import { crmRoutes } from "../modules/crm/crm.routes";
 import { dashboardRoutes } from "../modules/dashboard/dashboard.routes";
 import { developerAppRoutes } from "../modules/developer-apps/developer-app.routes";
 import { healthRoutes } from "../modules/health/health.routes";
+import { notificationPlugin } from "../modules/notifications/notification.plugin";
+import { notificationRoutes } from "../modules/notifications/notification.routes";
 import { staffAuthRoutes } from "../modules/staff-auth/staff-auth.routes";
 import { staffManagementRoutes } from "../modules/staff/staff-management.routes";
 import { internalMessagesRoutes } from "../modules/internal-messages/internal-messages.routes";
@@ -68,6 +70,7 @@ export async function buildApp(env: Env) {
     await app.register(storagePlugin, { env });
     await app.register(realtimePlugin);
     await app.register(authPlugin, { env });
+    await app.register(notificationPlugin);
 
     // Pass media upload bodies through as streams (do not buffer into JSON/string).
     const passStream = (_request: unknown, payload: NodeJS.ReadableStream, done: (err: null, body: NodeJS.ReadableStream) => void) => {
@@ -97,6 +100,7 @@ export async function buildApp(env: Env) {
     await app.register(developerAppRoutes, { prefix: "/api/developer-apps" });
     await app.register(telegramRoutes, { prefix: "/api/telegram" });
     await app.register(crmRoutes, { prefix: "/api/crm" });
+    await app.register(notificationRoutes, { prefix: "/api/notifications" });
     await app.register(websocketRoutes);
   } catch (error) {
     await app.close();

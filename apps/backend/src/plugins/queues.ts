@@ -6,6 +6,7 @@ declare module "fastify" {
     queues: {
       auditEvents: Queue;
       telegramOutbound: Queue;
+      pushNotifications: Queue;
     };
   }
 }
@@ -17,11 +18,13 @@ export const queuesPlugin = fp(async (app) => {
   const connection = app.redis.duplicate();
   const auditEvents = new Queue("audit-events", { connection });
   const telegramOutbound = new Queue("telegram-outbound", { connection });
+  const pushNotifications = new Queue("push-notifications", { connection });
 
-  app.decorate("queues", { auditEvents, telegramOutbound });
+  app.decorate("queues", { auditEvents, telegramOutbound, pushNotifications });
   app.addHook("onClose", async () => {
     await auditEvents.close();
     await telegramOutbound.close();
+    await pushNotifications.close();
     await connection.quit();
   });
 });

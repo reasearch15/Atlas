@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState, type ReactNode } from "react";
-import { LogOut, MessageSquare, MessagesSquare, MoreHorizontal, UserRound } from "lucide-react";
+import { Bell, LogOut, MessageSquare, MessagesSquare, MoreHorizontal, UserRound } from "lucide-react";
 import type { Route } from "next";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -18,12 +18,14 @@ import { useAuthStore } from "@/stores/auth-store";
 
 const navItems = [
   { label: "Inbox", href: "/staff/inbox", icon: MessageSquare },
-  { label: "Team Messages", href: "/staff/team-messages", icon: MessagesSquare }
+  { label: "Team Messages", href: "/staff/team-messages", icon: MessagesSquare },
+  { label: "Notifications", href: "/staff/notifications", icon: Bell }
 ] as const;
 
 function pageTitle(pathname: string): string {
   if (pathname.startsWith("/staff/inbox")) return "Inbox";
   if (pathname.startsWith("/staff/team-messages")) return "Team Messages";
+  if (pathname.startsWith("/staff/notifications")) return "Notifications";
   return "Atlas Staff";
 }
 

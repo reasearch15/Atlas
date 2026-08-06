@@ -255,6 +255,8 @@ export async function staffChangePassword(payload: {
  * Clears the active API session on the server and client.
  */
 export async function logout(): Promise<void> {
+  const { unregisterLocalPushDevice } = await import("@/features/notifications/push-client");
+  await unregisterLocalPushDevice().catch(() => undefined);
   await apiRequest<{ success: true }>("/api/auth/logout", { method: "POST" }).catch(() => ({ success: true }));
   clearRoleAuthBootstrap();
   useAuthStore.getState().clearSession();
@@ -273,6 +275,8 @@ export async function adminLogout(): Promise<void> {
  * Clears the active Coadmin session on the server and client.
  */
 export async function coadminLogout(): Promise<void> {
+  const { unregisterLocalPushDevice } = await import("@/features/notifications/push-client");
+  await unregisterLocalPushDevice().catch(() => undefined);
   await apiRequest<{ success: true }>("/api/coadmin-auth/logout", { method: "POST" }).catch(() => ({ success: true }));
   clearRoleAuthBootstrap();
   useAuthStore.getState().clearSession();
@@ -282,6 +286,8 @@ export async function coadminLogout(): Promise<void> {
  * Clears the active Staff session on the server and client.
  */
 export async function staffLogout(): Promise<void> {
+  const { unregisterLocalPushDevice } = await import("@/features/notifications/push-client");
+  await unregisterLocalPushDevice().catch(() => undefined);
   await apiRequest<{ success: true }>("/api/staff-auth/logout", { method: "POST" }).catch(() => ({ success: true }));
   clearRoleAuthBootstrap();
   useAuthStore.getState().clearSession();
