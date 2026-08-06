@@ -5,15 +5,12 @@ import {
 } from "@atlas/shared";
 import type { FastifyBaseLogger } from "fastify";
 import type { Env } from "../../config/env";
-import { isFcmConfigured, normalizeFirebasePrivateKey } from "./fcm.config";
+import { isFcmConfigured } from "./fcm.config";
+import { getFirebaseMessaging } from "./firebase-admin.client";
 
 export type FcmSendResult =
   | { readonly ok: true; readonly messageId: string }
   | { readonly ok: false; readonly invalidToken: boolean; readonly retryable: boolean; readonly code: string; readonly message: string };
-
-type MessagingLike = {
-  send: (message: Record<string, unknown>) => Promise<string>;
-};
 
 export type DispatchableNotification = {
   readonly id: string;
@@ -39,8 +36,6 @@ export type DispatchableNotification = {
 export class NotificationDispatcher {
   private readonly env: Env;
   private readonly log: FastifyBaseLogger;
-  private messaging: MessagingLike | null = null;
-  private initAttempted = false;
 
   public constructor(env: Env, log: FastifyBaseLogger) {
     this.env = env;
@@ -52,8 +47,8 @@ export class NotificationDispatcher {
   }
 
   public async send(notification: DispatchableNotification, token: string): Promise<FcmSendResult> {
-    const messaging = await this.getMessaging();
-    if (!messaging) {
+    const messagingResult = await getFirebaseMessaging(this.env);
+    if (messagingResult.status === "not_configured") {
       return {
         ok: false,
         invalidToken: false,
@@ -62,6 +57,21 @@ export class NotificationDispatcher {
         message: "FCM is not configured — will retry until enabled or expired"
       };
     }
+    if (messagingResult.status === "init_failed") {
+      const message =
+        messagingResult.error instanceof Error
+          ? messagingResult.error.message
+          : String(messagingResult.error);
+      this.log.error({ error: messagingResult.error }, "Failed to initialize Firebase Admin");
+      return {
+        ok: false,
+        invalidToken: false,
+        retryable: true,
+        code: "FCM_INIT_FAILED",
+        message: message.slice(0, 500)
+      };
+    }
+    const messaging = messagingResult.messaging;
 
     const androidPriority = notification.priority === "HIGH" ? "high" : "normal";
     const urgency = notification.priority === "HIGH" ? "high" : notification.priority === "LOW" ? "low" : "normal";
@@ -155,44 +165,6 @@ export class NotificationDispatcher {
     return new Date(Date.now() + nextNotificationRetryDelayMs(attemptAfterFailure));
   }
 
-  private async getMessaging(): Promise<MessagingLike | null> {
-    if (!this.isReady()) return null;
-    if (this.messaging) return this.messaging;
-    if (this.initAttempted) return this.messaging;
-    this.initAttempted = true;
-
-    try {
-      const mod = (await import("firebase-admin")) as unknown as {
-        apps: unknown[];
-        initializeApp: (options: Record<string, unknown>) => unknown;
-        credential: { cert: (serviceAccount: Record<string, string>) => unknown };
-        messaging: () => MessagingLike;
-        default?: {
-          apps: unknown[];
-          initializeApp: (options: Record<string, unknown>) => unknown;
-          credential: { cert: (serviceAccount: Record<string, string>) => unknown };
-          messaging: () => MessagingLike;
-        };
-      };
-      const admin = mod.default ?? mod;
-      if (!admin.apps.length) {
-        admin.initializeApp({
-          credential: admin.credential.cert({
-            projectId: this.env.FIREBASE_PROJECT_ID!,
-            clientEmail: this.env.FIREBASE_CLIENT_EMAIL!,
-            privateKey: normalizeFirebasePrivateKey(this.env.FIREBASE_PRIVATE_KEY!)
-          })
-        });
-      }
-      this.messaging = admin.messaging();
-      this.log.info("Firebase Admin messaging initialized");
-      return this.messaging;
-    } catch (error) {
-      this.log.error({ error }, "Failed to initialize Firebase Admin");
-      return null;
-    }
-  }
-
   private mapError(error: unknown): FcmSendResult {
     const code = String(
       (error as { code?: string; errorInfo?: { code?: string } } | null)?.code ??
@@ -205,7 +177,7 @@ export class NotificationDispatcher {
       /not a valid FCM registration token/i.test(message);
     const retryable =
       !invalidToken &&
-      (/unavailable|internal|resource-exhausted|deadline-exceeded|quota|FCM_NOT_CONFIGURED/i.test(code) ||
+      (/unavailable|internal|resource-exhausted|deadline-exceeded|quota|FCM_NOT_CONFIGURED|FCM_INIT_FAILED/i.test(code) ||
         /UNAVAILABLE|INTERNAL|RESOURCE_EXHAUSTED/i.test(message));
 
     this.log.warn({ code, message, invalidToken, retryable }, "FCM send failed");

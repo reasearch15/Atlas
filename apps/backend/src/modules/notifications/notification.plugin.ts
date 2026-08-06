@@ -1,6 +1,8 @@
 import fp from "fastify-plugin";
 import type { FastifyInstance } from "fastify";
 import type { TelegramMessageCreatedEvent, TelegramMessageUpdatedEvent } from "@atlas/shared";
+import { isFcmConfigured } from "./fcm.config";
+import { getFirebaseMessaging } from "./firebase-admin.client";
 import { NotificationService } from "./notification.service";
 import { startPushNotificationWorker } from "./notification.worker";
 
@@ -18,6 +20,18 @@ export const notificationPlugin = fp(async (app) => {
   const notifications = new NotificationService(app);
   app.decorate("notifications", notifications);
   startPushNotificationWorker(app);
+
+  if (isFcmConfigured(app.env)) {
+    void getFirebaseMessaging(app.env).then((result) => {
+      if (result.status === "ready") {
+        app.log.info("Firebase Admin messaging initialized at startup");
+        return;
+      }
+      if (result.status === "init_failed") {
+        app.log.error({ error: result.error }, "Firebase Admin messaging failed at startup");
+      }
+    });
+  }
 
   // Resume durable queue after crash/restart; expire overdue rows periodically.
   setTimeout(() => {
