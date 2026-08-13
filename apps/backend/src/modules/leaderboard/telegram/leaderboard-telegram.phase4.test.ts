@@ -398,8 +398,13 @@ describe("Phase 4 integration + outbox + processor", () => {
     await processor.processJob(job.id);
     expect(job.status).toBe("SUCCEEDED");
     const chat = tgState.chats.get(-1001)!;
-    expect(chat.messages.some((m) => m.text.includes("Alice") && m.text.includes("$10.00"))).toBe(true);
-    expect(chat.messages.some((m) => /2%|rateBps/i.test(m.text))).toBe(false);
+    expect(chat.messages.some((m) => m.photo === true && !m.deleted)).toBe(true);
+    expect(
+      (prisma._state.integrations[0].lastPublicTop10Json as Array<{ displayName: string; totalPoints: number }>).some(
+        (r) => r.displayName.includes("Alice") && r.totalPoints === 100
+      )
+    ).toBe(true);
+    expect(prisma._state.competitions[0].prizePoolCents).toBe(1000);
 
     // Edit path
     await outboxSvc.enqueueRefresh(workspaceA, ownerA, competitionA);
@@ -550,7 +555,7 @@ describe("Phase 4 integration + outbox + processor", () => {
     const failOutbox = new LeaderboardTelegramOutboxService(prisma, async () => undefined);
     tgState.failures = new Map([
       [
-        "token-a:sendMessage",
+        "token-a:sendPhoto",
         new LeaderboardTelegramApiError({
           httpStatus: 429,
           telegramErrorCode: 429,
@@ -575,7 +580,7 @@ describe("Phase 4 integration + outbox + processor", () => {
 
     tgState.failures = new Map([
       [
-        "token-a:sendMessage",
+        "token-a:sendPhoto",
         new LeaderboardTelegramApiError({
           httpStatus: 403,
           telegramErrorCode: 403,
@@ -717,7 +722,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
     );
 
     const channel = tgState.chats.get(-1001)!;
-    const board = channel.messages.find((m) => m.text.includes("BIWEEKLY LEADERBOARD"));
+    const board = channel.messages.find((m) => (m.photo === true || (typeof m.text === "string" && m.text.includes("BIWEEKLY LEADERBOARD"))));
     expect(board).toBeTruthy();
     expect(String(board!.messageId)).toBe(result.telegramMessageId);
     expect(prisma._state.integrations[0].persistentMessageId).toBe(result.telegramMessageId);
@@ -728,10 +733,10 @@ describe("sendLatestLeaderboard manual refresh", () => {
     const { service, tgState } = await readyIntegration(prisma);
     seedActiveCompetition(prisma);
     const boardBefore = (tgState.chats.get(-1001)!.messages ?? []).filter((m) =>
-      m.text.includes("BIWEEKLY LEADERBOARD")
+      (m.photo === true || (typeof m.text === "string" && m.text.includes("BIWEEKLY LEADERBOARD")))
     ).length;
     tgState.failures!.set(
-      "token-a:sendMessage",
+      "token-a:sendPhoto",
       new LeaderboardTelegramApiError({
         httpStatus: 400,
         telegramErrorCode: 400,
@@ -745,7 +750,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
       statusCode: 502
     });
     const boardAfter = (tgState.chats.get(-1001)!.messages ?? []).filter((m) =>
-      m.text.includes("BIWEEKLY LEADERBOARD")
+      (m.photo === true || (typeof m.text === "string" && m.text.includes("BIWEEKLY LEADERBOARD")))
     ).length;
     expect(boardAfter).toBe(boardBefore);
     expect(prisma._state.integrations[0].lastError).toContain("chat not found");
@@ -770,8 +775,8 @@ describe("sendLatestLeaderboard manual refresh", () => {
     const board = tgState.chats
       .get(-1001)!
       .messages.find((m) => String(m.messageId) === result.telegramMessageId);
-    expect(board?.text).toContain("BIWEEKLY LEADERBOARD");
-    expect(board?.text).toMatch(/\$0(\.00)?/);
+    expect(board?.photo).toBe(true);
+    expect(board?.caption).toContain("Competition is live");
   });
 
   it("D: existing canonical message is replaced (send new + delete old) on manual Send", async () => {
@@ -790,7 +795,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
 
     const channel = tgState.chats.get(-1001)!;
     expect(channel.messages.find((m) => m.messageId === 42)?.deleted).toBe(true);
-    expect(channel.messages.find((m) => m.messageId === 43)?.text).toContain("BIWEEKLY LEADERBOARD");
+    expect(channel.messages.find((m) => m.messageId === 43)?.photo).toBe(true);
   });
 
   it("E: channel change clears old message id and never reuses it", async () => {
@@ -846,7 +851,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
     expect(prisma._state.integrations[0].persistentMessageId).not.toBeNull();
     const board = tgState.chats
       .get(-1002)!
-      .messages.find((m) => m.text.includes("BIWEEKLY LEADERBOARD"));
+      .messages.find((m) => (m.photo === true || (typeof m.text === "string" && m.text.includes("BIWEEKLY LEADERBOARD"))));
     expect(board).toBeTruthy();
     expect(String(board!.messageId)).toBe(result.telegramMessageId);
     expect(prisma._state.integrations[0].persistentMessageId).toBe(result.telegramMessageId);
@@ -910,14 +915,17 @@ describe("sendLatestLeaderboard manual refresh", () => {
     ).toHaveLength(0);
 
     const board = tgState.chats.get(-1001)!.messages.find((m) => m.messageId === 8);
-    expect(board?.text).toContain("BIWEEKLY LEADERBOARD");
-    expect(board?.text).toContain("Climber");
-    expect(board?.text).not.toMatch(/moved from unranked/i);
+    expect(board?.photo).toBe(true);
+    expect(
+      (prisma._state.integrations[0].lastPublicTop10Json as Array<{ displayName: string }>).some(
+        (r) => r.displayName === "Climber"
+      )
+    ).toBe(true);
     // Previous full board deleted; rank announcements are separate and untouched by this path.
     expect(tgState.chats.get(-1001)!.messages.find((m) => m.messageId === 7)?.deleted).toBe(true);
   });
 
-  it("G: automatic refresh replaces canonical board (send + delete), manual uses same semantics", async () => {
+  it("G: automatic refresh edits photo in place; manual Send uses same living message", async () => {
     const prisma = createMemoryPrisma();
     const { service, outboxSvc, client, tgState } = await readyIntegration(prisma);
     seedActiveCompetition(prisma, 1000);
@@ -944,7 +952,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
     expect(job1.status).toBe("SUCCEEDED");
     const boards = () =>
       (tgState.chats.get(-1001)!.messages ?? []).filter(
-        (m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD")
+        (m) => !m.deleted && (m.photo === true || (typeof m.text === "string" && m.text.includes("BIWEEKLY LEADERBOARD")))
       );
     expect(boards()).toHaveLength(1);
     const canonicalId = prisma._state.integrations[0].persistentMessageId;
@@ -957,11 +965,12 @@ describe("sendLatestLeaderboard manual refresh", () => {
     await processor.processJob(job2.id);
     expect(job2.status).toBe("SUCCEEDED");
     expect(boards()).toHaveLength(1);
-    expect(prisma._state.integrations[0].persistentMessageId).not.toBe(canonicalId);
+    expect(prisma._state.integrations[0].persistentMessageId).toBe(canonicalId);
 
     const manual = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
-    expect(manual.deliveryAction).toBe("SENT_NEW");
+    expect(manual.deliveryAction).toBe("UPDATED_EXISTING");
     expect(manual.telegramMessageId).toBe(prisma._state.integrations[0].persistentMessageId);
+    expect(manual.telegramMessageId).toBe(canonicalId);
     expect(boards()).toHaveLength(1);
   });
 
@@ -1032,15 +1041,17 @@ describe("sendLatestLeaderboard manual refresh", () => {
     const first = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
     const second = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
     expect(first.deliveryAction).toBe("SENT_NEW");
-    expect(second.deliveryAction).toBe("SENT_NEW");
-    expect(second.telegramMessageId).not.toBe(first.telegramMessageId);
+    expect(second.deliveryAction).toBe("UPDATED_EXISTING");
+    expect(second.telegramMessageId).toBe(first.telegramMessageId);
 
     const boardMessages = (tgState.chats.get(-1001)?.messages ?? []).filter(
-      (m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD")
+      (m) => !m.deleted && (m.photo === true || (typeof m.text === "string" && m.text.includes("BIWEEKLY LEADERBOARD")))
     );
     expect(boardMessages).toHaveLength(1);
-    expect(boardMessages.some((m) => m.text.includes("🥇 1."))).toBe(true);
-    expect(boardMessages.some((m) => /moved from unranked/i.test(m.text))).toBe(false);
+    expect(boardMessages[0]!.photo).toBe(true);
+    expect(
+      (prisma._state.integrations[0].lastPublicTop10Json as unknown[]).length
+    ).toBeGreaterThan(0);
     expect(
       prisma._state.outbox.filter((r: any) => r.jobType === "POST_RANK_ANNOUNCEMENT")
     ).toHaveLength(eventsBefore);

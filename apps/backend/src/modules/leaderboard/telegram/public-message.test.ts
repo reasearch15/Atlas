@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPublicLeaderboardKeyboard,
+  formatPublicLeaderboardCaption,
   formatPublicLeaderboardMessage,
   formatPublicResultsMessage,
   formatRankAnnouncement,
@@ -177,5 +179,20 @@ describe("formatRankAnnouncement", () => {
         pointsBehindNext: 18
       })
     ).toBe("🔥 Homer moved #6 → #3!\n+35 points\nNow only 18 points behind #2.");
+  });
+});
+
+describe("public leaderboard caption + keyboard", () => {
+  it("keeps caption short", () => {
+    expect(formatPublicLeaderboardCaption()).toBe("🔥 Competition is live. Keep climbing.");
+    expect(formatPublicLeaderboardCaption({ competitionStatus: "FROZEN" })).toContain("frozen");
+  });
+
+  it("builds My Rank URL button only", () => {
+    const kb = buildPublicLeaderboardKeyboard("AtlasBoardBot");
+    expect(kb).toEqual({
+      inline_keyboard: [[{ text: "🏆 My Rank", url: "https://t.me/AtlasBoardBot?start=rank" }]]
+    });
+    expect(buildPublicLeaderboardKeyboard(null)).toBeNull();
   });
 });

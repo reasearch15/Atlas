@@ -276,9 +276,9 @@ export interface LeaderboardTelegramSendLatestDto {
   /** Verified channel title when available (for UI success copy). */
   readonly channelTitle: string | null;
   readonly telegramMessageId: string;
-  /** Manual send always posts a fresh message. */
-  readonly deliveryAction: "SENT_NEW";
-  readonly mode: "send";
+  /** SENT_NEW on first/replace publish; UPDATED_EXISTING when living photo board is edited. */
+  readonly deliveryAction: "SENT_NEW" | "UPDATED_EXISTING";
+  readonly mode: "send" | "edit";
   readonly message: string;
 }
 

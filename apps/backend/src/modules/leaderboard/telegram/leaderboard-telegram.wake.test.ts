@@ -318,8 +318,8 @@ describe("processJob atomic claim under duplicate wakes", () => {
       chats: new Map([[Number(channelId), makeChannel(42)]])
     };
     const client = createFakeLeaderboardTelegramClient(tgState);
-    const editSpy = vi.spyOn(client, "editMessageText");
-    const sendSpy = vi.spyOn(client, "sendMessage");
+    const editMediaSpy = vi.spyOn(client, "editMessageMedia");
+    const sendPhotoSpy = vi.spyOn(client, "sendPhoto");
 
     const processor = new LeaderboardTelegramProcessor({
       prisma: prisma as never,
@@ -334,7 +334,8 @@ describe("processJob atomic claim under duplicate wakes", () => {
       processor.processJob(outboxId)
     ]);
 
-    expect(editSpy.mock.calls.length + sendSpy.mock.calls.length).toBe(1);
+    expect(sendPhotoSpy).toHaveBeenCalledTimes(1);
+    expect(editMediaSpy.mock.calls.length).toBeLessThanOrEqual(1);
     expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
     expect(prisma._state.outbox[0].attemptCount).toBe(1);
     expect(prisma._state.integrations[0].persistentMessageId).toBeTruthy();

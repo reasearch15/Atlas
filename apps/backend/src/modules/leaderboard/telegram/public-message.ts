@@ -1,6 +1,7 @@
 import { formatPrizePoolDisplay } from "../leaderboard.standing-helpers";
 import type { AnnouncementKind } from "./announcement-policy";
 import { formatCompetitionEndDisplay } from "./competition-end-display";
+import type { TelegramInlineKeyboardMarkup } from "./leaderboard-telegram.client";
 import { toPublicLeaderboardDisplayName } from "./public-display-name";
 
 const RULE_LINE = "━━━━━━━━━━━━━━━━━━";
@@ -173,6 +174,32 @@ function medalForRank(rank: number): string {
 }
 
 export const PUBLIC_LEADERBOARD_SUBSCRIPTION_REMINDER = SUBSCRIPTION_REMINDER;
+
+/** Concise caption for the premium image board (no prize/top10/links duplication). */
+export function formatPublicLeaderboardCaption(input?: {
+  readonly competitionStatus?: string;
+}): string {
+  const status = (input?.competitionStatus ?? "ACTIVE").trim().toUpperCase();
+  if (status === "FROZEN") return "🧊 Standings are frozen. Results coming soon.";
+  if (status === "FINALIZED" || status === "COMPLETED" || status === "ENDED") {
+    return "🏆 Competition complete.";
+  }
+  return "🔥 Competition is live. Keep climbing.";
+}
+
+/**
+ * Public channel inline keyboard. Phase 1: My Rank deep-link only.
+ * Earn Points / Prize Rules omitted until safe existing callbacks exist.
+ */
+export function buildPublicLeaderboardKeyboard(
+  botUsername: string | null | undefined
+): TelegramInlineKeyboardMarkup | null {
+  const user = normalizeBotUsername(botUsername);
+  if (!user) return null;
+  return {
+    inline_keyboard: [[{ text: "🏆 My Rank", url: `https://t.me/${user}?start=rank` }]]
+  };
+}
 
 function normalizeBotUsername(username: string | null | undefined): string | null {
   if (!username) return null;

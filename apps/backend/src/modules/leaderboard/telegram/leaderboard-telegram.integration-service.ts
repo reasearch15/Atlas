@@ -449,6 +449,7 @@ export class LeaderboardTelegramIntegrationService {
         integrationId: row.id,
         channelId: row.channelId,
         botUsername: row.botUsername,
+        brandName: row.channelTitle ?? null,
         // Replace previous canonical board after successful send.
         persistentMessageId: row.persistentMessageId,
         persistentMessageCompetitionId: row.persistentMessageCompetitionId,
@@ -498,9 +499,12 @@ export class LeaderboardTelegramIntegrationService {
       channelId: published.channelId,
       channelTitle: row.channelTitle?.trim() || null,
       telegramMessageId: published.messageId,
-      deliveryAction: "SENT_NEW",
-      mode: "send",
-      message: `Leaderboard sent to ${channelLabel}`
+      deliveryAction: published.deliveryAction,
+      mode: published.deliveryAction === "UPDATED_EXISTING" ? "edit" : "send",
+      message:
+        published.deliveryAction === "UPDATED_EXISTING"
+          ? `Leaderboard updated in ${channelLabel}`
+          : `Leaderboard sent to ${channelLabel}`
     };
   }
 

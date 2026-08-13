@@ -27,15 +27,21 @@ export interface TelegramMessage {
   readonly messageId: number;
   readonly chat: TelegramChat;
   readonly text?: string;
+  readonly caption?: string;
   readonly date: number;
 }
 
 export type TelegramParseMode = "HTML" | "Markdown" | "MarkdownV2";
 
-export interface TelegramInlineKeyboardButton {
-  readonly text: string;
-  readonly callback_data: string;
-}
+export type TelegramInlineKeyboardButton =
+  | {
+      readonly text: string;
+      readonly callback_data: string;
+    }
+  | {
+      readonly text: string;
+      readonly url: string;
+    };
 
 export interface TelegramInlineKeyboardMarkup {
   readonly inline_keyboard: ReadonlyArray<ReadonlyArray<TelegramInlineKeyboardButton>>;
@@ -44,6 +50,28 @@ export interface TelegramInlineKeyboardMarkup {
 export type SendMessageOptions = {
   readonly parseMode?: TelegramParseMode;
   readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+};
+
+export type SendPhotoOptions = {
+  readonly caption?: string;
+  readonly parseMode?: TelegramParseMode;
+  readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+  /** Multipart filename hint (never logged as a path). */
+  readonly filename?: string;
+};
+
+export type EditMessageMediaOptions = {
+  readonly caption?: string;
+  readonly parseMode?: TelegramParseMode;
+  readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+  readonly filename?: string;
+};
+
+export type TelegramInputMediaPhoto = {
+  readonly type: "photo";
+  readonly media: "attach://leaderboard.png" | string;
+  readonly caption?: string;
+  readonly parse_mode?: TelegramParseMode;
 };
 
 export interface TelegramWebhookInfo {
@@ -89,12 +117,38 @@ export interface LeaderboardTelegramClient {
     text: string,
     parseModeOrOptions?: TelegramParseMode | SendMessageOptions
   ): Promise<TelegramMessage>;
+  sendPhoto(
+    token: string,
+    chatId: string | number,
+    photo: Buffer,
+    options?: SendPhotoOptions
+  ): Promise<TelegramMessage>;
   editMessageText(
     token: string,
     chatId: string | number,
     messageId: number,
     text: string,
     parseMode?: TelegramParseMode
+  ): Promise<TelegramMessage | true>;
+  editMessageMedia(
+    token: string,
+    chatId: string | number,
+    messageId: number,
+    photo: Buffer,
+    options?: EditMessageMediaOptions
+  ): Promise<TelegramMessage | true>;
+  editMessageCaption?(
+    token: string,
+    chatId: string | number,
+    messageId: number,
+    caption: string,
+    options?: { readonly parseMode?: TelegramParseMode; readonly replyMarkup?: TelegramInlineKeyboardMarkup }
+  ): Promise<TelegramMessage | true>;
+  editMessageReplyMarkup?(
+    token: string,
+    chatId: string | number,
+    messageId: number,
+    replyMarkup: TelegramInlineKeyboardMarkup
   ): Promise<TelegramMessage | true>;
   deleteMessage(token: string, chatId: string | number, messageId: number): Promise<boolean>;
   setWebhook?(
@@ -216,6 +270,25 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
     return mapMessage(raw);
   }
 
+  async sendPhoto(
+    token: string,
+    chatId: string | number,
+    photo: Buffer,
+    options?: SendPhotoOptions
+  ): Promise<TelegramMessage> {
+    const filename = sanitizeUploadFilename(options?.filename ?? "leaderboard.png");
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("photo", new Blob([new Uint8Array(photo)], { type: "image/png" }), filename);
+    if (options?.caption != null) form.append("caption", options.caption);
+    if (options?.parseMode) form.append("parse_mode", options.parseMode);
+    if (options?.replyMarkup) {
+      form.append("reply_markup", JSON.stringify(options.replyMarkup));
+    }
+    const raw = await this.callTelegramMultipart<Record<string, unknown>>(token, "sendPhoto", form);
+    return mapMessage(raw);
+  }
+
   async editMessageText(
     token: string,
     chatId: string | number,
@@ -230,6 +303,76 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
     };
     if (parseMode) body.parse_mode = parseMode;
     const raw = await this.callTelegram<Record<string, unknown> | true>(token, "editMessageText", body);
+    if (raw === true) return true;
+    return mapMessage(raw);
+  }
+
+  async editMessageMedia(
+    token: string,
+    chatId: string | number,
+    messageId: number,
+    photo: Buffer,
+    options?: EditMessageMediaOptions
+  ): Promise<TelegramMessage | true> {
+    const filename = sanitizeUploadFilename(options?.filename ?? "leaderboard.png");
+    const attachName = "leaderboard.png";
+    const media: TelegramInputMediaPhoto = {
+      type: "photo",
+      media: `attach://${attachName}`,
+      ...(options?.caption != null ? { caption: options.caption } : {}),
+      ...(options?.parseMode ? { parse_mode: options.parseMode } : {})
+    };
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("message_id", String(messageId));
+    form.append("media", JSON.stringify(media));
+    form.append(attachName, new Blob([new Uint8Array(photo)], { type: "image/png" }), filename);
+    if (options?.replyMarkup) {
+      form.append("reply_markup", JSON.stringify(options.replyMarkup));
+    }
+    const raw = await this.callTelegramMultipart<Record<string, unknown> | true>(
+      token,
+      "editMessageMedia",
+      form
+    );
+    if (raw === true) return true;
+    return mapMessage(raw);
+  }
+
+  async editMessageCaption(
+    token: string,
+    chatId: string | number,
+    messageId: number,
+    caption: string,
+    options?: { readonly parseMode?: TelegramParseMode; readonly replyMarkup?: TelegramInlineKeyboardMarkup }
+  ): Promise<TelegramMessage | true> {
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      message_id: messageId,
+      caption
+    };
+    if (options?.parseMode) body.parse_mode = options.parseMode;
+    if (options?.replyMarkup) body.reply_markup = options.replyMarkup;
+    const raw = await this.callTelegram<Record<string, unknown> | true>(
+      token,
+      "editMessageCaption",
+      body
+    );
+    if (raw === true) return true;
+    return mapMessage(raw);
+  }
+
+  async editMessageReplyMarkup(
+    token: string,
+    chatId: string | number,
+    messageId: number,
+    replyMarkup: TelegramInlineKeyboardMarkup
+  ): Promise<TelegramMessage | true> {
+    const raw = await this.callTelegram<Record<string, unknown> | true>(token, "editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: replyMarkup
+    });
     if (raw === true) return true;
     return mapMessage(raw);
   }
@@ -301,6 +444,34 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
       });
     }
 
+    return this.parseTelegramResponse<T>(method, response);
+  }
+
+  private async callTelegramMultipart<T>(
+    token: string,
+    method: string,
+    form: FormData
+  ): Promise<T> {
+    const url = `https://api.telegram.org/bot${token}/${method}`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "POST",
+        body: form
+      });
+    } catch (err) {
+      const description = err instanceof Error ? err.message : "network error";
+      throw new LeaderboardTelegramApiError({
+        httpStatus: 0,
+        telegramErrorCode: null,
+        description: `Telegram ${method} network failure: ${description}`,
+        permanent: false
+      });
+    }
+    return this.parseTelegramResponse<T>(method, response);
+  }
+
+  private async parseTelegramResponse<T>(method: string, response: Response): Promise<T> {
     let payload: TelegramApiResponse<T> | null = null;
     try {
       payload = (await response.json()) as TelegramApiResponse<T>;
@@ -395,10 +566,21 @@ function mapMessage(raw: Record<string, unknown>): TelegramMessage {
     chat: mapChat(chatRaw),
     date: Number(raw.date ?? 0)
   };
+  if (raw.text != null && raw.caption != null) {
+    return { ...message, text: String(raw.text), caption: String(raw.caption) };
+  }
   if (raw.text != null) {
     return { ...message, text: String(raw.text) };
   }
+  if (raw.caption != null) {
+    return { ...message, caption: String(raw.caption) };
+  }
   return message;
+}
+
+function sanitizeUploadFilename(name: string): string {
+  const base = name.trim().replace(/[^A-Za-z0-9._-]/g, "_") || "leaderboard.png";
+  return base.toLowerCase().endsWith(".png") ? base : `${base}.png`;
 }
 
 export interface FakeTelegramChatState {
@@ -410,7 +592,11 @@ export interface FakeTelegramChatState {
   members: Map<number, string>;
   messages: Array<{
     messageId: number;
-    text: string;
+    text?: string;
+    caption?: string;
+    /** Present when message is a photo board. */
+    photo?: boolean;
+    photoBytes?: number;
     deleted?: boolean;
     replyMarkup?: TelegramInlineKeyboardMarkup;
   }>;
@@ -534,6 +720,44 @@ export function createFakeLeaderboardTelegramClient(
         date: Math.floor(Date.now() / 1000)
       };
     },
+    async sendPhoto(token, chatId, photo, options) {
+      fail(token, "sendPhoto");
+      requireBot(token);
+      if (!Buffer.isBuffer(photo) || photo.length === 0) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: photo must be non-empty",
+          permanent: true
+        });
+      }
+      const id = Number(chatId);
+      let chat = state.chats.get(id);
+      if (!chat) {
+        chat = {
+          id,
+          type: "channel",
+          members: new Map(),
+          messages: [],
+          nextMessageId: 1
+        };
+        state.chats.set(id, chat);
+      }
+      const messageId = chat.nextMessageId++;
+      chat.messages.push({
+        messageId,
+        photo: true,
+        photoBytes: photo.byteLength,
+        ...(options?.caption != null ? { caption: options.caption } : {}),
+        ...(options?.replyMarkup ? { replyMarkup: options.replyMarkup } : {})
+      });
+      return {
+        messageId,
+        chat: mapFakeChat(chat),
+        ...(options?.caption != null ? { caption: options.caption } : {}),
+        date: Math.floor(Date.now() / 1000)
+      };
+    },
     async editMessageText(token, chatId, messageId, text) {
       fail(token, "editMessageText");
       requireBot(token);
@@ -547,12 +771,105 @@ export function createFakeLeaderboardTelegramClient(
           permanent: true
         });
       }
+      if (msg.photo) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: there is no text in the message to edit",
+          permanent: true
+        });
+      }
       if (msg.text === text) return true;
       msg.text = text;
       return {
         messageId,
         chat: mapFakeChat(chat),
         text,
+        date: Math.floor(Date.now() / 1000)
+      };
+    },
+    async editMessageMedia(token, chatId, messageId, photo, options) {
+      fail(token, "editMessageMedia");
+      requireBot(token);
+      const chat = requireChat(chatId);
+      const msg = chat.messages.find((m) => m.messageId === messageId && !m.deleted);
+      if (!msg) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: message to edit not found",
+          permanent: true
+        });
+      }
+      if (!msg.photo) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: there is no media in the message to edit",
+          permanent: true
+        });
+      }
+      if (!Buffer.isBuffer(photo) || photo.length === 0) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: photo must be non-empty",
+          permanent: true
+        });
+      }
+      msg.photo = true;
+      msg.photoBytes = photo.byteLength;
+      if (options?.caption != null) msg.caption = options.caption;
+      if (options?.replyMarkup) msg.replyMarkup = options.replyMarkup;
+      delete msg.text;
+      return {
+        messageId,
+        chat: mapFakeChat(chat),
+        ...(msg.caption != null ? { caption: msg.caption } : {}),
+        date: Math.floor(Date.now() / 1000)
+      };
+    },
+    async editMessageCaption(token, chatId, messageId, caption, options) {
+      fail(token, "editMessageCaption");
+      requireBot(token);
+      const chat = requireChat(chatId);
+      const msg = chat.messages.find((m) => m.messageId === messageId && !m.deleted);
+      if (!msg || !msg.photo) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: message to edit not found",
+          permanent: true
+        });
+      }
+      msg.caption = caption;
+      if (options?.replyMarkup) msg.replyMarkup = options.replyMarkup;
+      return {
+        messageId,
+        chat: mapFakeChat(chat),
+        caption,
+        date: Math.floor(Date.now() / 1000)
+      };
+    },
+    async editMessageReplyMarkup(token, chatId, messageId, replyMarkup) {
+      fail(token, "editMessageReplyMarkup");
+      requireBot(token);
+      const chat = requireChat(chatId);
+      const msg = chat.messages.find((m) => m.messageId === messageId && !m.deleted);
+      if (!msg) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: message to edit not found",
+          permanent: true
+        });
+      }
+      msg.replyMarkup = replyMarkup;
+      return {
+        messageId,
+        chat: mapFakeChat(chat),
+        ...(msg.text != null ? { text: msg.text } : {}),
+        ...(msg.caption != null ? { caption: msg.caption } : {}),
         date: Math.floor(Date.now() / 1000)
       };
     },

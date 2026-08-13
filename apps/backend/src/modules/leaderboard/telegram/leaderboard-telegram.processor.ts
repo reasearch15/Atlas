@@ -239,6 +239,7 @@ export class LeaderboardTelegramProcessor {
       id: string;
       postingEnabled: boolean;
       channelId: string | null;
+      channelTitle?: string | null;
       persistentMessageId: string | null;
       persistentMessageCompetitionId: string | null;
       lastPublicTop10Json: unknown;
@@ -274,6 +275,7 @@ export class LeaderboardTelegramProcessor {
         integrationId: integration.id,
         channelId: integration.channelId,
         botUsername: integration.botUsername,
+        brandName: integration.channelTitle ?? null,
         persistentMessageId: integration.persistentMessageId,
         persistentMessageCompetitionId: integration.persistentMessageCompetitionId,
         lastPublicTop10Json: integration.lastPublicTop10Json,
