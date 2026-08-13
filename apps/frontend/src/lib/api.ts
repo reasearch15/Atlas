@@ -597,10 +597,14 @@ export const api = {
   leaderboardDepositHistory: (opts?: {
     readonly cursor?: string;
     readonly limit?: number;
+    readonly actorUserId?: string;
+    readonly crmContactId?: string;
   }) => {
     const query = new URLSearchParams();
     if (opts?.cursor) query.set("cursor", opts.cursor);
     if (opts?.limit != null) query.set("limit", String(opts.limit));
+    if (opts?.actorUserId) query.set("actorUserId", opts.actorUserId);
+    if (opts?.crmContactId) query.set("crmContactId", opts.crmContactId);
     const suffix = query.toString() ? `?${query.toString()}` : "";
     return apiRequest<LeaderboardDepositHistoryPageDto>(
       `/api/leaderboard/deposits/history${suffix}`

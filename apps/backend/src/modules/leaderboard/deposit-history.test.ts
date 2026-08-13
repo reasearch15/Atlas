@@ -4,6 +4,7 @@ import {
   DEPOSIT_HISTORY_PAGE_SIZE,
   depositHistoryOlderThanCursor,
   encodeDepositHistoryCursor,
+  formatDepositHistoryRecordedBy,
   sliceDepositHistoryPage
 } from "./deposit-history";
 
@@ -96,5 +97,17 @@ describe("sliceDepositHistoryPage", () => {
         page.items[i]!.createdAt.getTime()
       );
     }
+  });
+});
+
+describe("formatDepositHistoryRecordedBy", () => {
+  it("formats staff, coadmin, and missing actors", () => {
+    expect(formatDepositHistoryRecordedBy({ name: "Bella", role: "STAFF" }).recordedByDisplayName).toBe(
+      "Bella"
+    );
+    expect(
+      formatDepositHistoryRecordedBy({ name: "Charlie", role: "COADMIN" }).recordedByDisplayName
+    ).toBe("Charlie (Coadmin)");
+    expect(formatDepositHistoryRecordedBy(null).recordedByDisplayName).toBe("Unknown");
   });
 });

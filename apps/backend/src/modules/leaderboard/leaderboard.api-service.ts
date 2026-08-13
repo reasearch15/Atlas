@@ -53,6 +53,7 @@ import {
   decodeDepositHistoryCursor,
   DEPOSIT_HISTORY_PAGE_SIZE,
   depositHistoryOlderThanCursor,
+  formatDepositHistoryRecordedBy,
   sliceDepositHistoryPage
 } from "./deposit-history";
 import {
@@ -729,13 +730,21 @@ export class LeaderboardApiService {
    * Paginated deposit history for Staff/Coadmin.
    * STAFF: only events where actorUserId = self (never another staff member).
    * COADMIN: all DEPOSIT events owned by this coadmin (existing board ownership).
+   * Optional Coadmin filters (actorUserId / crmContactId) are validated server-side;
+   * client-supplied owner/workspace identity is never trusted for authorization.
    */
   public async listDepositHistory(
     user: RequestUser,
-    query: { readonly cursor?: string | undefined; readonly limit?: number | undefined }
+    query: {
+      readonly cursor?: string | undefined;
+      readonly limit?: number | undefined;
+      readonly actorUserId?: string | undefined;
+      readonly crmContactId?: string | undefined;
+    }
   ): Promise<LeaderboardDepositHistoryPageDto> {
     this.assertStaffOrCoadmin(user);
     const workspaceId = this.requireWorkspaceId(user);
+    const caps = customerPrivacyCapabilities(user.role as Role);
     const limit = Math.min(
       Math.max(1, query.limit ?? DEPOSIT_HISTORY_PAGE_SIZE),
       DEPOSIT_HISTORY_PAGE_SIZE
@@ -750,39 +759,134 @@ export class LeaderboardApiService {
       }
     }
 
-    // Ownership is enforced here — never accept client-supplied actor/owner filters.
+    // Authorization scope comes only from the authenticated session.
     const ownershipWhere =
       user.role === "STAFF"
         ? { actorUserId: user.id }
         : { ownerCoadminUserId: user.id };
+
+    const filterWhere: {
+      actorUserId?: string;
+      crmContactId?: string;
+    } = {};
+
+    if (user.role === "COADMIN" && query.actorUserId) {
+      await this.assertDepositHistoryActorFilter(workspaceId, user.id, query.actorUserId);
+      filterWhere.actorUserId = query.actorUserId;
+    }
+
+    if (query.crmContactId) {
+      if (user.role === "COADMIN") {
+        await this.assertDepositHistoryContactFilter(workspaceId, user.id, query.crmContactId);
+      }
+      // Staff may filter within their own actor-scoped deposits only.
+      filterWhere.crmContactId = query.crmContactId;
+    }
+
+    const contactIdentitySelect = {
+      displayName: true,
+      username: true,
+      chats: {
+        where: { chatType: "PRIVATE" as const },
+        select: { firstName: true, lastName: true, username: true },
+        orderBy: { updatedAt: "desc" as const },
+        take: 3
+      }
+    };
 
     const rows = await this.app.prisma.leaderboardEvent.findMany({
       where: {
         workspaceId,
         type: "DEPOSIT",
         ...ownershipWhere,
+        ...filterWhere,
         ...(cursorClause ? cursorClause : {})
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: limit + 1,
       include: {
-        crmContact: { select: { displayName: true } }
+        crmContact: { select: contactIdentitySelect },
+        actor: { select: { id: true, name: true, username: true, role: true } }
       }
     });
 
     const sliced = sliceDepositHistoryPage(rows, limit);
     return {
-      items: sliced.items.map((event) => ({
-        id: event.id,
-        crmContactId: event.crmContactId,
-        displayName: event.crmContact.displayName || "Player",
-        amountCents: event.depositAmountCents ?? 0,
-        pointsAdded: event.pointsDelta,
-        createdAt: event.createdAt.toISOString()
-      })),
+      items: sliced.items.map((event) => {
+        const recorded = formatDepositHistoryRecordedBy(event.actor);
+        return {
+          id: event.id,
+          crmContactId: event.crmContactId,
+          displayName: resolveAuthenticatedCrmDisplayNameFromContact(event.crmContact, {
+            allowUsername: caps.canViewTelegramUsername
+          }),
+          amountCents: event.depositAmountCents ?? 0,
+          pointsAdded: event.pointsDelta,
+          createdAt: event.createdAt.toISOString(),
+          actorUserId: event.actorUserId,
+          recordedByDisplayName: recorded.recordedByDisplayName,
+          recordedByIsCoadmin: recorded.recordedByIsCoadmin,
+          competitionId: event.competitionId
+        };
+      }),
       nextCursor: sliced.nextCursor,
       hasMore: sliced.hasMore
     };
+  }
+
+  /** Coadmin may filter by self or by STAFF in the same workspace. */
+  private async assertDepositHistoryActorFilter(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    actorUserId: string
+  ): Promise<void> {
+    if (actorUserId === ownerCoadminUserId) return;
+    const staff = await this.app.prisma.user.findFirst({
+      where: {
+        id: actorUserId,
+        workspaceId,
+        role: "STAFF"
+      },
+      select: { id: true }
+    });
+    if (!staff) {
+      throw new AppError(
+        400,
+        "INVALID_ACTOR_FILTER",
+        "Staff filter must be yourself or a Staff member in your workspace."
+      );
+    }
+  }
+
+  /** Coadmin player filter must target a contact on this coadmin's board. */
+  private async assertDepositHistoryContactFilter(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    crmContactId: string
+  ): Promise<void> {
+    const participant = await this.app.prisma.leaderboardParticipant.findFirst({
+      where: { workspaceId, ownerCoadminUserId, crmContactId },
+      select: { id: true }
+    });
+    if (participant) return;
+
+    // Allow contacts that only appear via historical deposits (no current participant row).
+    const historic = await this.app.prisma.leaderboardEvent.findFirst({
+      where: {
+        workspaceId,
+        ownerCoadminUserId,
+        crmContactId,
+        type: "DEPOSIT"
+      },
+      select: { id: true }
+    });
+    if (!historic) {
+      throw new AppError(
+        400,
+        "INVALID_PLAYER_FILTER",
+        "Player filter must be a contact on your leaderboard."
+      );
+    }
   }
 
   public async setReferral(

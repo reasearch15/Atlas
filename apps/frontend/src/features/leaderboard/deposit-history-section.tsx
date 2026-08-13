@@ -1,10 +1,16 @@
 "use client";
 
-import type { LeaderboardDepositHistoryItemDto } from "@atlas/shared";
+import type {
+  LeaderboardDepositHistoryItemDto,
+  LeaderboardPlayerSearchHitDto,
+  StaffListItem
+} from "@atlas/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { formatMoneyFromCents, mapLeaderboardError } from "./leaderboard-errors";
+import { PlayerSearchAutocomplete } from "./player-search-autocomplete";
 
 function formatDepositHistoryWhen(iso: string): string {
   try {
@@ -20,25 +26,59 @@ function formatDepositHistoryWhen(iso: string): string {
   }
 }
 
+export type DepositHistorySectionProps = {
+  /**
+   * Coadmin view shows who recorded each deposit + staff/player filters.
+   * Staff view omits "Recorded by" (every row is already theirs).
+   */
+  readonly variant: "staff" | "coadmin";
+};
+
 /**
  * Staff/Coadmin deposit history with cursor "Load more" pagination.
  * Fetches only when mounted; never preloads subsequent pages.
+ * Filters (coadmin) are applied server-side.
  */
-export function DepositHistorySection() {
+export function DepositHistorySection({ variant }: DepositHistorySectionProps) {
+  const user = useAuthStore((state) => state.user);
   const [items, setItems] = useState<LeaderboardDepositHistoryItemDto[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [actorUserId, setActorUserId] = useState<string>("");
+  const [selectedPlayer, setSelectedPlayer] = useState<LeaderboardPlayerSearchHitDto | null>(null);
+  const [staffOptions, setStaffOptions] = useState<readonly StaffListItem[]>([]);
   const seenIdsRef = useRef<Set<string>>(new Set());
   const loadMoreInFlightRef = useRef(false);
+
+  const filtersKey = `${actorUserId}|${selectedPlayer?.crmContactId ?? ""}`;
+
+  useEffect(() => {
+    if (variant !== "coadmin") return;
+    let cancelled = false;
+    void api
+      .staffMembers()
+      .then((rows) => {
+        if (!cancelled) setStaffOptions(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setStaffOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [variant]);
 
   const resetAndLoadFirst = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError(null);
     try {
-      const page = await api.leaderboardDepositHistory();
+      const page = await api.leaderboardDepositHistory({
+        ...(actorUserId ? { actorUserId } : {}),
+        ...(selectedPlayer ? { crmContactId: selectedPlayer.crmContactId } : {})
+      });
       seenIdsRef.current = new Set(page.items.map((row) => row.id));
       setItems([...page.items]);
       setNextCursor(page.nextCursor);
@@ -51,11 +91,11 @@ export function DepositHistorySection() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [actorUserId, selectedPlayer]);
 
   useEffect(() => {
     void resetAndLoadFirst();
-  }, [resetAndLoadFirst]);
+  }, [resetAndLoadFirst, filtersKey]);
 
   async function loadMore(): Promise<void> {
     if (!hasMore || !nextCursor || loadMoreInFlightRef.current) return;
@@ -63,7 +103,11 @@ export function DepositHistorySection() {
     setLoadingMore(true);
     setError(null);
     try {
-      const page = await api.leaderboardDepositHistory({ cursor: nextCursor });
+      const page = await api.leaderboardDepositHistory({
+        cursor: nextCursor,
+        ...(actorUserId ? { actorUserId } : {}),
+        ...(selectedPlayer ? { crmContactId: selectedPlayer.crmContactId } : {})
+      });
       setItems((prev) => {
         const appended: LeaderboardDepositHistoryItemDto[] = [];
         for (const row of page.items) {
@@ -83,10 +127,53 @@ export function DepositHistorySection() {
     }
   }
 
+  const showRecordedBy = variant === "coadmin";
+
   return (
     <section className="rounded-lg border bg-white p-4 md:p-5">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <h2 className="sr-only">Deposit records</h2>
+        {variant === "coadmin" ? (
+          <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="min-w-0 flex-1">
+              <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="deposit-history-player">
+                Player
+              </label>
+              <PlayerSearchAutocomplete
+                id="deposit-history-player"
+                selected={selectedPlayer}
+                onSelect={setSelectedPlayer}
+                onClear={() => setSelectedPlayer(null)}
+                placeholder="Search player…"
+              />
+            </div>
+            <div className="w-full sm:w-48">
+              <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="deposit-history-staff">
+                Staff
+              </label>
+              <select
+                id="deposit-history-staff"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={actorUserId}
+                onChange={(event) => setActorUserId(event.target.value)}
+              >
+                <option value="">All Staff</option>
+                {user ? (
+                  <option value={user.id}>
+                    {user.name?.trim() || "You"} (Coadmin)
+                  </option>
+                ) : null}
+                {staffOptions.map((staff) => (
+                  <option key={staff.id} value={staff.id}>
+                    {staff.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        ) : (
+          <div />
+        )}
         <Button
           type="button"
           variant="secondary"
@@ -110,14 +197,18 @@ export function DepositHistorySection() {
         <ul className="mt-3 divide-y divide-border/70">
           {items.map((row) => (
             <li key={row.id} className="py-3 first:pt-1">
-              <p className="text-sm font-semibold text-foreground">{row.displayName}</p>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                {formatMoneyFromCents(row.amountCents)}
-                {" · "}
-                <span className="font-medium text-emerald-700">
-                  +{row.pointsAdded} pts
-                </span>
-              </p>
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-sm font-semibold text-foreground">{row.displayName}</p>
+                <p className="shrink-0 text-sm font-medium tabular-nums text-foreground">
+                  {formatMoneyFromCents(row.amountCents)}
+                </p>
+              </div>
+              <p className="mt-0.5 text-sm text-emerald-700">+{row.pointsAdded} pts</p>
+              {showRecordedBy ? (
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Recorded by: {row.recordedByDisplayName}
+                </p>
+              ) : null}
               <p className="mt-0.5 text-xs text-muted-foreground">
                 {formatDepositHistoryWhen(row.createdAt)}
               </p>

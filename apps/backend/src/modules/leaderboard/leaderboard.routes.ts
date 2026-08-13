@@ -206,7 +206,9 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
       const query = leaderboardDepositHistoryQuerySchema.parse(request.query);
       return service.listDepositHistory(request.user!, {
         ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
-        limit: query.limit
+        limit: query.limit,
+        ...(query.actorUserId !== undefined ? { actorUserId: query.actorUserId } : {}),
+        ...(query.crmContactId !== undefined ? { crmContactId: query.crmContactId } : {})
       });
     })
   );

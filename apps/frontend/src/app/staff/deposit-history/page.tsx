@@ -13,7 +13,7 @@ export default function StaffDepositHistoryPage() {
             Deposits you recorded, newest first. Load more to see older entries.
           </p>
         </div>
-        <DepositHistorySection />
+        <DepositHistorySection variant="staff" />
       </main>
     </StaffShell>
   );

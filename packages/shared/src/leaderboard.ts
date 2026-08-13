@@ -214,10 +214,23 @@ export interface LeaderboardEventsPageDto {
 export interface LeaderboardDepositHistoryItemDto {
   readonly id: string;
   readonly crmContactId: string;
+  /** Player CRM/Telegram display identity (never a raw UUID). */
   readonly displayName: string;
   readonly amountCents: number;
   readonly pointsAdded: number;
   readonly createdAt: string;
+  /** Actor user id when known; null for historical rows without actor. */
+  readonly actorUserId: string | null;
+  /**
+   * Who recorded the deposit (Atlas user display name).
+   * Coadmin actors are labeled like "Charlie (Coadmin)".
+   * Falls back to "Unknown" only when actor is missing.
+   */
+  readonly recordedByDisplayName: string;
+  /** True when the actor's role is COADMIN. */
+  readonly recordedByIsCoadmin: boolean;
+  /** Competition that received this deposit (history spans competitions). */
+  readonly competitionId: string;
 }
 
 export interface LeaderboardDepositHistoryPageDto {

@@ -5,6 +5,29 @@
 
 export const DEPOSIT_HISTORY_PAGE_SIZE = 30;
 
+export type DepositHistoryActorRole = "COADMIN" | "STAFF" | "PLATFORM_ADMIN" | string;
+
+/**
+ * Formats who recorded a deposit for history UI.
+ * Coadmins are labeled with "(Coadmin)"; Staff show display name only.
+ */
+export function formatDepositHistoryRecordedBy(
+  actor: { readonly name?: string | null; readonly username?: string | null; readonly role?: DepositHistoryActorRole | null } | null | undefined
+): { readonly recordedByDisplayName: string; readonly recordedByIsCoadmin: boolean } {
+  if (!actor) {
+    return { recordedByDisplayName: "Unknown", recordedByIsCoadmin: false };
+  }
+  const name = (actor.name ?? "").trim() || (actor.username ?? "").trim() || null;
+  const isCoadmin = actor.role === "COADMIN";
+  if (!name) {
+    return { recordedByDisplayName: "Unknown", recordedByIsCoadmin: isCoadmin };
+  }
+  return {
+    recordedByDisplayName: isCoadmin ? `${name} (Coadmin)` : name,
+    recordedByIsCoadmin: isCoadmin
+  };
+}
+
 export interface DepositHistoryCursor {
   readonly createdAt: Date;
   readonly id: string;

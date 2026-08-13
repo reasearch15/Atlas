@@ -63,7 +63,17 @@ export const leaderboardEventsQuerySchema = z.object({
 export const leaderboardDepositHistoryQuerySchema = z.object({
   /** Opaque keyset cursor from a previous page's nextCursor. */
   cursor: z.string().trim().min(1).max(512).optional(),
-  limit: z.coerce.number().int().min(1).max(30).default(30)
+  limit: z.coerce.number().int().min(1).max(30).default(30),
+  /**
+   * Coadmin-only: filter to deposits recorded by this Atlas user.
+   * Ignored for Staff (Staff is always scoped to self).
+   */
+  actorUserId: z.string().uuid().optional(),
+  /**
+   * Coadmin-only: filter to deposits for this CRM contact under the coadmin board.
+   * Ignored for Staff authorization scope (still applied only within Staff's own deposits).
+   */
+  crmContactId: z.string().uuid().optional()
 });
 
 export const leaderboardReverseEventBodySchema = z.object({
