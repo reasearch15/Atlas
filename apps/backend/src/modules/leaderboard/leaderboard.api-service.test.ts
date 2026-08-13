@@ -167,3 +167,85 @@ describe("LeaderboardApiService owner resolution", () => {
     );
   });
 });
+
+describe("LeaderboardApiService.searchPlayers", () => {
+  const contactSelf = "a1111111-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+  const contactPic = "a2222222-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+  const contactOtherOwner = "a3333333-aaaa-4aaa-8aaa-aaaaaaaaaaa3";
+  const contactChannel = "a4444444-aaaa-4aaa-8aaa-aaaaaaaaaaa4";
+
+  function searchPrisma(captured: { where: unknown[] }) {
+    return {
+      leaderboardParticipant: {
+        findMany: async ({ where }: { where: unknown }) => {
+          captured.where.push(where);
+          // Simulate DB already scoped; return only owner PRIVATE rows matching OR loosely.
+          const rows = [
+            {
+              crmContact: {
+                id: contactPic,
+                displayName: "Other Label",
+                username: "Piccaso47",
+                chats: [{ firstName: "Pic", lastName: null, username: "Piccaso47" }]
+              }
+            },
+            {
+              crmContact: {
+                id: contactSelf,
+                displayName: "Self Player",
+                username: "selfuser",
+                chats: []
+              }
+            }
+          ];
+          // Channel / other-owner never returned by this mock (scoped out by where).
+          void contactOtherOwner;
+          void contactChannel;
+          return rows.filter((row) => {
+            const w = where as {
+              ownerCoadminUserId?: string;
+              crmContactId?: { not?: string };
+              crmContact?: { kind?: string };
+            };
+            if (w.ownerCoadminUserId !== coadminId) return false;
+            if (w.crmContact?.kind !== "PRIVATE") return false;
+            if (w.crmContactId?.not && row.crmContact.id === w.crmContactId.not) return false;
+            return true;
+          });
+        }
+      }
+    };
+  }
+
+  it("accepts 1-char query, matches username, excludes self, returns crmContactId", async () => {
+    const captured: { where: unknown[] } = { where: [] };
+    const service = makeService(searchPrisma(captured));
+    const hits = await service.searchPlayers(coadmin, "p", contactSelf, 25);
+    expect(hits.some((h) => h.crmContactId === contactPic)).toBe(true);
+    expect(hits.some((h) => h.crmContactId === contactSelf)).toBe(false);
+    expect(hits[0]?.crmContactId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+    expect(JSON.stringify(captured.where[0])).toContain("PRIVATE");
+    expect(JSON.stringify(captured.where[0])).toContain(coadminId);
+  });
+
+  it("treats @Piccaso47 like Piccaso47", async () => {
+    const service = makeService(searchPrisma({ where: [] }));
+    const withAt = await service.searchPlayers(coadmin, "@Piccaso47", contactSelf, 25);
+    const without = await service.searchPlayers(coadmin, "Piccaso47", contactSelf, 25);
+    expect(withAt.map((h) => h.crmContactId)).toEqual(without.map((h) => h.crmContactId));
+  });
+
+  it("scopes STAFF search to primary coadmin owner only", async () => {
+    const captured: { where: unknown[] } = { where: [] };
+    const service = makeService({
+      workspace: {
+        findUnique: async () => ({ primaryCoadminId: coadminId })
+      },
+      ...searchPrisma(captured)
+    });
+    await service.searchPlayers(staff, "p", undefined, 25);
+    expect((captured.where[0] as { ownerCoadminUserId: string }).ownerCoadminUserId).toBe(coadminId);
+  });
+});

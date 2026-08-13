@@ -47,6 +47,11 @@ import {
 import { leaderboardOwnerUnresolved } from "./leaderboard.http-errors";
 import { PrismaLeaderboardService } from "./leaderboard.prisma-service";
 import { computeStandingGaps } from "./leaderboard.standing-helpers";
+import {
+  normalizePlayerSearchQuery,
+  playerMatchesSearchQuery,
+  selectPlayerSearchHits
+} from "./player-search";
 import { selectPrizeWinnersFromEligibility } from "./prize-eligibility";
 import { withRanks } from "./ranking";
 import { tryAutoBindForActingCoadmin, tryAutoBindParticipant } from "./auto-bind";
@@ -422,35 +427,90 @@ export class LeaderboardApiService {
     user: RequestUser,
     q: string,
     excludeContactId?: string,
-    limit = 10
+    limit = 25
   ): Promise<readonly LeaderboardPlayerSearchHitDto[]> {
     const workspaceId = this.requireWorkspaceId(user);
     const owner = await this.resolveBoardOwner(user);
     const caps = customerPrivacyCapabilities(user.role as Role);
+    const needle = normalizePlayerSearchQuery(q);
+    const take = Math.max(1, Math.min(limit, 50));
 
+    // Pull owner-scoped PRIVATE participants; rank/filter in memory so username,
+    // chat names, and combined first+last are searchable with 1-char contains.
     const participants = await this.app.prisma.leaderboardParticipant.findMany({
       where: {
         workspaceId,
         ownerCoadminUserId: owner,
         ...(excludeContactId ? { crmContactId: { not: excludeContactId } } : {}),
         crmContact: {
-          displayName: { contains: q.trim(), mode: "insensitive" }
+          kind: "PRIVATE",
+          ...(needle
+            ? {
+                OR: [
+                  { displayName: { contains: needle, mode: "insensitive" } },
+                  { username: { contains: needle, mode: "insensitive" } },
+                  {
+                    chats: {
+                      some: {
+                        OR: [
+                          { firstName: { contains: needle, mode: "insensitive" } },
+                          { lastName: { contains: needle, mode: "insensitive" } },
+                          { username: { contains: needle, mode: "insensitive" } }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            : {})
         }
       },
-      take: limit,
+      // Over-fetch slightly so ranking can prefer exact/startsWith before slice.
+      take: Math.min(200, Math.max(take * 4, 40)),
       orderBy: { crmContact: { displayName: "asc" } },
       include: {
         crmContact: {
-          select: { id: true, displayName: true, username: true }
+          select: {
+            id: true,
+            displayName: true,
+            username: true,
+            chats: {
+              select: { firstName: true, lastName: true, username: true },
+              orderBy: { updatedAt: "desc" },
+              take: 3
+            }
+          }
         }
       }
     });
 
-    return participants.map((row) => ({
+    const sources = participants.map((row) => ({
       crmContactId: row.crmContact.id,
       displayName: row.crmContact.displayName,
-      telegramUsername: caps.canViewTelegramUsername ? row.crmContact.username : null,
-      shortId: row.crmContact.id.slice(0, 8)
+      username: row.crmContact.username,
+      chatFirstNames: row.crmContact.chats
+        .map((c) => c.firstName)
+        .filter((v): v is string => Boolean(v)),
+      chatLastNames: row.crmContact.chats
+        .map((c) => c.lastName)
+        .filter((v): v is string => Boolean(v)),
+      chatUsernames: row.crmContact.chats
+        .map((c) => c.username)
+        .filter((v): v is string => Boolean(v))
+    }));
+
+    // Combined first+last may match only after in-memory filter when DB OR missed it.
+    const matched = needle
+      ? sources.filter((row) => playerMatchesSearchQuery(row, needle))
+      : sources;
+
+    const ranked = selectPlayerSearchHits(matched, needle, take);
+
+    return ranked.map((row) => ({
+      crmContactId: row.crmContactId,
+      displayName: row.displayName,
+      telegramUsername: caps.canViewTelegramUsername ? row.username : null,
+      shortId: row.crmContactId.slice(0, 8)
     }));
   }
 

@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { formatMoneyFromCents, mapLeaderboardError, newIdempotencyKey } from "./leaderboard-errors";
+import { PlayerSearchAutocomplete } from "./player-search-autocomplete";
 import { WheelCoadminControls } from "./wheel-coadmin-controls";
 
 const POOL_RATE_OPTIONS = [
@@ -64,10 +65,7 @@ export function LeaderboardCoadminControls() {
   const [reverseReason, setReverseReason] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
   const [overrideReferralId, setOverrideReferralId] = useState<string | null>(null);
-  const [overrideQuery, setOverrideQuery] = useState("");
-  const [overrideHits, setOverrideHits] = useState<readonly LeaderboardPlayerSearchHitDto[]>([]);
   const [selectedReferrer, setSelectedReferrer] = useState<LeaderboardPlayerSearchHitDto | null>(null);
-  const [searchingOverride, setSearchingOverride] = useState(false);
   const [payoutNotes, setPayoutNotes] = useState("");
   const [poolReason, setPoolReason] = useState("");
   const [telegram, setTelegram] = useState<LeaderboardTelegramIntegrationDto | null>(null);
@@ -125,39 +123,6 @@ export function LeaderboardCoadminControls() {
   useEffect(() => {
     void refreshCore();
   }, [refreshCore]);
-
-  useEffect(() => {
-    if (!overrideReferralId || overrideQuery.trim().length < 1) {
-      setOverrideHits([]);
-      return;
-    }
-    const referral = referrals.find((row) => row.id === overrideReferralId);
-    let cancelled = false;
-    const handle = window.setTimeout(() => {
-      setSearchingOverride(true);
-      void api
-        .leaderboardPlayersSearch({
-          q: overrideQuery.trim(),
-          limit: 8,
-          ...(referral?.referredCrmContactId
-            ? { excludeContactId: referral.referredCrmContactId }
-            : {})
-        })
-        .then((hits) => {
-          if (!cancelled) setOverrideHits(hits);
-        })
-        .catch(() => {
-          if (!cancelled) setOverrideHits([]);
-        })
-        .finally(() => {
-          if (!cancelled) setSearchingOverride(false);
-        });
-    }, 250);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(handle);
-    };
-  }, [overrideQuery, overrideReferralId, referrals]);
 
   async function runAction(action: () => Promise<void>): Promise<void> {
     setPending(true);
@@ -251,7 +216,6 @@ export function LeaderboardCoadminControls() {
       toast.success("Referral override applied.");
       setOverrideReason("");
       setSelectedReferrer(null);
-      setOverrideQuery("");
       setOverrideReferralId(null);
       overrideKeyRef.current = newIdempotencyKey();
       await refreshCore();
@@ -1062,7 +1026,6 @@ export function LeaderboardCoadminControls() {
                             onClick={() => {
                               setOverrideReferralId(row.id);
                               setSelectedReferrer(null);
-                              setOverrideQuery("");
                               setOverrideReason("");
                               setConfirming(null);
                             }}
@@ -1073,60 +1036,15 @@ export function LeaderboardCoadminControls() {
                       </div>
                       {overriding ? (
                         <div className="mt-2 space-y-2 border-t pt-2">
-                          {selectedReferrer ? (
-                            <div className="flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-2 py-1.5 text-xs">
-                              <span>
-                                New referrer: {selectedReferrer.displayName}
-                                {selectedReferrer.telegramUsername
-                                  ? ` (@${selectedReferrer.telegramUsername})`
-                                  : ""}
-                              </span>
-                              <button
-                                type="button"
-                                className="text-muted-foreground hover:text-foreground"
-                                disabled={pending}
-                                onClick={() => setSelectedReferrer(null)}
-                              >
-                                Clear
-                              </button>
-                            </div>
-                          ) : (
-                            <>
-                              <Input
-                                value={overrideQuery}
-                                onChange={(event) => setOverrideQuery(event.target.value)}
-                                placeholder="Search new referrer…"
-                                disabled={pending}
-                                className="h-8 text-sm"
-                              />
-                              {searchingOverride ? (
-                                <p className="text-[11px] text-muted-foreground">Searching…</p>
-                              ) : overrideHits.length > 0 ? (
-                                <ul className="max-h-36 overflow-y-auto rounded-md border">
-                                  {overrideHits.map((hit) => (
-                                    <li key={hit.crmContactId}>
-                                      <button
-                                        type="button"
-                                        className="flex w-full flex-col items-start gap-0.5 px-2 py-1.5 text-left text-xs hover:bg-muted"
-                                        disabled={pending}
-                                        onClick={() => {
-                                          setSelectedReferrer(hit);
-                                          setOverrideQuery("");
-                                          setOverrideHits([]);
-                                        }}
-                                      >
-                                        <span className="font-medium">{hit.displayName}</span>
-                                        <span className="text-muted-foreground">
-                                          {hit.telegramUsername ? `@${hit.telegramUsername} · ` : ""}
-                                          {hit.shortId}
-                                        </span>
-                                      </button>
-                                    </li>
-                                  ))}
-                                </ul>
-                              ) : null}
-                            </>
-                          )}
+                          <PlayerSearchAutocomplete
+                            excludeContactId={row.referredCrmContactId}
+                            disabled={pending}
+                            selected={selectedReferrer}
+                            onSelect={setSelectedReferrer}
+                            onClear={() => setSelectedReferrer(null)}
+                            placeholder="Search new referrer…"
+                            limit={25}
+                          />
                           <Input
                             value={overrideReason}
                             onChange={(event) => setOverrideReason(event.target.value)}
@@ -1168,7 +1086,6 @@ export function LeaderboardCoadminControls() {
                                 onClick={() => {
                                   setOverrideReferralId(null);
                                   setSelectedReferrer(null);
-                                  setOverrideQuery("");
                                   setOverrideReason("");
                                 }}
                               >

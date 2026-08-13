@@ -13,6 +13,7 @@ import {
   newIdempotencyKey,
   parseDollarsToCents
 } from "./leaderboard-errors";
+import { PlayerSearchAutocomplete } from "./player-search-autocomplete";
 import { WheelSpinPanel } from "./wheel-spin-panel";
 
 const SUBSCRIPTION_REMINDER =
@@ -41,10 +42,7 @@ export function CrmGiveawaySection({ chatId, crmContactId, role }: CrmGiveawaySe
 
   const [depositDollars, setDepositDollars] = useState("");
   const [depositFieldError, setDepositFieldError] = useState<string | null>(null);
-  const [referralQuery, setReferralQuery] = useState("");
-  const [referralHits, setReferralHits] = useState<readonly LeaderboardPlayerSearchHitDto[]>([]);
   const [selectedReferred, setSelectedReferred] = useState<LeaderboardPlayerSearchHitDto | null>(null);
-  const [searching, setSearching] = useState(false);
 
   const depositKeyRef = useRef(newIdempotencyKey());
   const promotionKeyRef = useRef(newIdempotencyKey());
@@ -83,8 +81,6 @@ export function CrmGiveawaySection({ chatId, crmContactId, role }: CrmGiveawaySe
     setConfirming(null);
     setDepositDollars("");
     setDepositFieldError(null);
-    setReferralQuery("");
-    setReferralHits([]);
     setSelectedReferred(null);
     depositKeyRef.current = newIdempotencyKey();
     promotionKeyRef.current = newIdempotencyKey();
@@ -92,36 +88,6 @@ export function CrmGiveawaySection({ chatId, crmContactId, role }: CrmGiveawaySe
     giveInfoKeyRef.current = newIdempotencyKey();
     void refresh();
   }, [refresh]);
-
-  useEffect(() => {
-    if (!crmContactId || !caps.canReferral || referralQuery.trim().length < 1) {
-      setReferralHits([]);
-      return;
-    }
-    let cancelled = false;
-    const handle = window.setTimeout(() => {
-      setSearching(true);
-      void api
-        .leaderboardPlayersSearch({
-          q: referralQuery.trim(),
-          excludeContactId: crmContactId,
-          limit: 8
-        })
-        .then((hits) => {
-          if (!cancelled) setReferralHits(hits);
-        })
-        .catch(() => {
-          if (!cancelled) setReferralHits([]);
-        })
-        .finally(() => {
-          if (!cancelled) setSearching(false);
-        });
-    }, 250);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(handle);
-    };
-  }, [caps.canReferral, crmContactId, referralQuery]);
 
   if (!caps.canRead) {
     return null;
@@ -190,8 +156,6 @@ export function CrmGiveawaySection({ chatId, crmContactId, role }: CrmGiveawaySe
       setSuccess("Referral linked");
       toast.success("Referral linked");
       setSelectedReferred(null);
-      setReferralQuery("");
-      setReferralHits([]);
       referralKeyRef.current = newIdempotencyKey();
       await refresh();
     });
@@ -385,66 +349,16 @@ export function CrmGiveawaySection({ chatId, crmContactId, role }: CrmGiveawaySe
               <label className="block text-xs font-semibold text-foreground" htmlFor={referralInputId}>
                 Referred player
               </label>
-              {selectedReferred ? (
-                <div className="flex items-start justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50/80 px-2.5 py-2">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-foreground">{selectedReferred.displayName}</p>
-                    <p className="truncate text-[11px] text-muted-foreground">
-                      {selectedReferred.telegramUsername
-                        ? `@${selectedReferred.telegramUsername} · `
-                        : ""}
-                      {selectedReferred.shortId}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-white hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    disabled={pending}
-                    onClick={() => setSelectedReferred(null)}
-                  >
-                    Clear
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <Input
-                    id={referralInputId}
-                    placeholder="Search player by name..."
-                    value={referralQuery}
-                    disabled={pending}
-                    onChange={(event) => setReferralQuery(event.target.value)}
-                    className="h-10 text-sm"
-                    autoComplete="off"
-                  />
-                  {searching ? (
-                    <p className="text-[11px] text-muted-foreground">Searching…</p>
-                  ) : referralHits.length > 0 ? (
-                    <ul className="max-h-40 overflow-y-auto rounded-md border bg-white" role="listbox">
-                      {referralHits.map((hit) => (
-                        <li key={hit.crmContactId}>
-                          <button
-                            type="button"
-                            role="option"
-                            className="flex w-full flex-col items-start gap-0.5 px-2.5 py-2 text-left text-xs hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
-                            disabled={pending}
-                            onClick={() => {
-                              setSelectedReferred(hit);
-                              setReferralQuery("");
-                              setReferralHits([]);
-                            }}
-                          >
-                            <span className="font-medium text-foreground">{hit.displayName}</span>
-                            <span className="text-muted-foreground">
-                              {hit.telegramUsername ? `@${hit.telegramUsername} · ` : ""}
-                              {hit.shortId}
-                            </span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </>
-              )}
+              <PlayerSearchAutocomplete
+                id={referralInputId}
+                excludeContactId={crmContactId ?? undefined}
+                disabled={pending}
+                selected={selectedReferred}
+                onSelect={setSelectedReferred}
+                onClear={() => setSelectedReferred(null)}
+                placeholder="Search player by name or username…"
+                limit={25}
+              />
               <ConfirmAction
                 label="Link Referral"
                 confirmLabel="Confirm referral"

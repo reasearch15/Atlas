@@ -33,9 +33,10 @@ export const leaderboardStandingsQuerySchema = z.object({
 });
 
 export const leaderboardPlayerSearchQuerySchema = z.object({
-  q: z.string().trim().min(1).max(120),
+  /** Empty string browses eligible players; 1+ chars runs contains search. */
+  q: z.string().trim().max(120).default(""),
   excludeContactId: z.string().uuid().optional(),
-  limit: z.coerce.number().int().min(1).max(25).default(10)
+  limit: z.coerce.number().int().min(1).max(50).default(25)
 });
 
 export const leaderboardContactParamsSchema = z.object({
