@@ -21,7 +21,7 @@ import {
   formatPublicResultsMessage,
   formatRankAnnouncement
 } from "./public-message";
-import { toPublicLeaderboardDisplayName } from "./public-display-name";
+import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
 import {
   formatPersonalAnnouncementDm,
   formatPersonalFinalResultMessage
@@ -179,7 +179,19 @@ export class LeaderboardTelegramProcessor {
 
     const standings = await this.prisma.leaderboardStanding.findMany({
       where: { competitionId: competition.id, ownerCoadminUserId: row.ownerCoadminUserId },
-      include: { crmContact: { select: { displayName: true } } }
+      include: {
+        crmContact: {
+          select: {
+            displayName: true,
+            username: true,
+            chats: {
+              select: { firstName: true, lastName: true, username: true, updatedAt: true },
+              orderBy: { updatedAt: "desc" },
+              take: 1
+            }
+          }
+        }
+      }
     });
     const ranked = withRanks(
       standings.map((s) => ({
@@ -189,11 +201,24 @@ export class LeaderboardTelegramProcessor {
       }))
     ).slice(0, 10);
 
-    const displayById = new Map(standings.map((s) => [s.crmContactId, s.crmContact.displayName] as const));
+    const displayById = new Map(
+      standings.map((s) => {
+        const chat = Array.isArray(s.crmContact.chats) ? s.crmContact.chats[0] : undefined;
+        return [
+          s.crmContactId,
+          resolvePublicLeaderboardDisplayName({
+            displayName: s.crmContact.displayName,
+            firstName: chat?.firstName ?? null,
+            lastName: chat?.lastName ?? null,
+            username: s.crmContact.username ?? chat?.username ?? null
+          })
+        ] as const;
+      })
+    );
     const nextTop10 = ranked.map((r) => ({
       crmContactId: r.crmContactId,
       rank: r.rank,
-      displayName: toPublicLeaderboardDisplayName(displayById.get(r.crmContactId) ?? "Player"),
+      displayName: displayById.get(r.crmContactId) ?? "Player",
       totalPoints: r.totalPoints
     }));
 
@@ -484,16 +509,36 @@ export class LeaderboardTelegramProcessor {
     const payouts = await this.prisma.giveawayPayout.findMany({
       where: { competitionId: competition.id, ownerCoadminUserId: row.ownerCoadminUserId },
       orderBy: { prizeRank: "asc" },
-      include: { crmContact: { select: { displayName: true } } }
+      include: {
+        crmContact: {
+          select: {
+            displayName: true,
+            username: true,
+            chats: {
+              select: { firstName: true, lastName: true, username: true, updatedAt: true },
+              orderBy: { updatedAt: "desc" },
+              take: 1
+            }
+          }
+        }
+      }
     });
 
     const text = formatPublicResultsMessage({
       prizePoolCents: competition.prizePoolCents,
-      winners: payouts.map((p) => ({
-        prizeRank: p.prizeRank as 1 | 2 | 3,
-        displayName: toPublicLeaderboardDisplayName(p.crmContact.displayName),
-        payoutCents: p.payoutCents
-      }))
+      winners: payouts.map((p) => {
+        const chat = Array.isArray(p.crmContact.chats) ? p.crmContact.chats[0] : undefined;
+        return {
+          prizeRank: p.prizeRank as 1 | 2 | 3,
+          displayName: resolvePublicLeaderboardDisplayName({
+            displayName: p.crmContact.displayName,
+            firstName: chat?.firstName ?? null,
+            lastName: chat?.lastName ?? null,
+            username: p.crmContact.username ?? chat?.username ?? null
+          }),
+          payoutCents: p.payoutCents
+        };
+      })
     });
 
     await this.client.sendMessage(token, integration.channelId, text);

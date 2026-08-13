@@ -27,11 +27,11 @@ describe("formatPublicLeaderboardMessage", () => {
     expect(text).toContain("🏆 BIWEEKLY LEADERBOARD");
     expect(text.indexOf("💰 PRIZE POOL")).toBeLessThan(text.indexOf("🥇 1."));
     expect(text.indexOf("💵 $620.00")).toBeLessThan(text.indexOf("🥇 1."));
-    expect(text).toContain("🥇 1. John — 720 pts");
-    expect(text).toContain("🥈 2. Sarah — 681 pts");
-    expect(text).toContain("🥉 3. Mike — 640 pts");
-    expect(text).toContain("4. Alex — 610 pts");
-    expect(text).toContain("10. David — 390 pts");
+    expect(text).toContain("🥇 1. John Smith — 720 pts");
+    expect(text).toContain("🥈 2. Sarah Connor — 681 pts");
+    expect(text).toContain("🥉 3. Mike Jones — 640 pts");
+    expect(text).toContain("4. Alex Reed — 610 pts");
+    expect(text).toContain("10. David Lee — 390 pts");
     expect(text).toContain(PUBLIC_LEADERBOARD_SUBSCRIPTION_REMINDER);
     expect(text).toContain("🔥 Keep climbing.");
     expect(text).not.toMatch(/\b2%\b/);
@@ -91,6 +91,21 @@ describe("formatPublicLeaderboardMessage", () => {
     expect(text).not.toContain("@secretuser");
   });
 
+  it("preserves initials that previously collapsed to Player", () => {
+    const text = formatPublicLeaderboardMessage({
+      title: "BIWEEKLY LEADERBOARD",
+      top10: [
+        { rank: 1, displayName: "L. J.", points: 0 },
+        { rank: 2, displayName: "S F", points: 0 }
+      ],
+      prizePoolCents: 0,
+      endsAt,
+      timezone: "America/Chicago"
+    });
+    expect(text).toContain("🥇 1. L. J. — 0 pts");
+    expect(text).toContain("🥈 2. S F — 0 pts");
+  });
+
   it("renders intentional zero-point board copy", () => {
     const text = formatPublicLeaderboardMessage({
       title: "BIWEEKLY LEADERBOARD",
@@ -126,9 +141,9 @@ describe("formatPublicResultsMessage", () => {
     });
 
     expect(text).toContain("COMPETITION RESULTS");
-    expect(text).toContain("🥇 1. Sarah — $250.00");
-    expect(text).toContain("🥈 2. Mike — $150.00");
-    expect(text).toContain("🥉 3. Alex — $100.00");
+    expect(text).toContain("🥇 1. Sarah Connor — $250.00");
+    expect(text).toContain("🥈 2. Mike Jones — $150.00");
+    expect(text).toContain("🥉 3. Alex Reed — $100.00");
     expect(text).toContain("💵 $500.00");
     expect(text).not.toMatch(/not subscribed|ineligible|NOT_ELIGIBLE/i);
     expect(text).not.toMatch(/\b2%\b|rateBps/i);
@@ -146,7 +161,7 @@ describe("formatRankAnnouncement", () => {
         kind: "REACHED_NUMBER_1",
         totalPoints: 742
       })
-    ).toBe("👑 NEW #1\nSarah just took the top spot with 742 points.");
+    ).toBe("👑 NEW #1\nSarah Connor just took the top spot with 742 points.");
   });
 
   it("formats climb announcements with optional gap copy", () => {

@@ -164,7 +164,7 @@ function createMemoryPrisma() {
           )
           .map((s) => ({
             ...s,
-            crmContact: s.crmContact ?? { displayName: "Player" }
+            crmContact: s.crmContact ?? { displayName: "Player", chats: [] }
           }))
     },
     leaderboardSettings: {
