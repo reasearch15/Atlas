@@ -5,6 +5,7 @@ import type {
   LeaderboardCompetitionSummaryDto,
   LeaderboardCurrentBoardDto,
   LeaderboardDepositResultDto,
+  LeaderboardDepositHistoryPageDto,
   LeaderboardEligibilityCandidateDto,
   LeaderboardEventRowDto,
   LeaderboardEventsPageDto,
@@ -48,6 +49,12 @@ import {
 import { leaderboardOwnerUnresolved } from "./leaderboard.http-errors";
 import { PrismaLeaderboardService } from "./leaderboard.prisma-service";
 import { computeStandingGaps } from "./leaderboard.standing-helpers";
+import {
+  decodeDepositHistoryCursor,
+  DEPOSIT_HISTORY_PAGE_SIZE,
+  depositHistoryOlderThanCursor,
+  sliceDepositHistoryPage
+} from "./deposit-history";
 import {
   normalizePlayerSearchQuery,
   playerMatchesSearchQuery,
@@ -715,6 +722,66 @@ export class LeaderboardApiService {
       previousRank,
       newRank: standing.rank,
       competitionEndsAt: competition.endsAt.toISOString()
+    };
+  }
+
+  /**
+   * Paginated deposit history for Staff/Coadmin.
+   * STAFF: only events where actorUserId = self (never another staff member).
+   * COADMIN: all DEPOSIT events owned by this coadmin (existing board ownership).
+   */
+  public async listDepositHistory(
+    user: RequestUser,
+    query: { readonly cursor?: string | undefined; readonly limit?: number | undefined }
+  ): Promise<LeaderboardDepositHistoryPageDto> {
+    this.assertStaffOrCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    const limit = Math.min(
+      Math.max(1, query.limit ?? DEPOSIT_HISTORY_PAGE_SIZE),
+      DEPOSIT_HISTORY_PAGE_SIZE
+    );
+
+    let cursorClause: ReturnType<typeof depositHistoryOlderThanCursor> | undefined;
+    if (query.cursor) {
+      try {
+        cursorClause = depositHistoryOlderThanCursor(decodeDepositHistoryCursor(query.cursor));
+      } catch {
+        throw new AppError(400, "INVALID_CURSOR", "Invalid deposit history cursor.");
+      }
+    }
+
+    // Ownership is enforced here — never accept client-supplied actor/owner filters.
+    const ownershipWhere =
+      user.role === "STAFF"
+        ? { actorUserId: user.id }
+        : { ownerCoadminUserId: user.id };
+
+    const rows = await this.app.prisma.leaderboardEvent.findMany({
+      where: {
+        workspaceId,
+        type: "DEPOSIT",
+        ...ownershipWhere,
+        ...(cursorClause ? cursorClause : {})
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+      include: {
+        crmContact: { select: { displayName: true } }
+      }
+    });
+
+    const sliced = sliceDepositHistoryPage(rows, limit);
+    return {
+      items: sliced.items.map((event) => ({
+        id: event.id,
+        crmContactId: event.crmContactId,
+        displayName: event.crmContact.displayName || "Player",
+        amountCents: event.depositAmountCents ?? 0,
+        pointsAdded: event.pointsDelta,
+        createdAt: event.createdAt.toISOString()
+      })),
+      nextCursor: sliced.nextCursor,
+      hasMore: sliced.hasMore
     };
   }
 

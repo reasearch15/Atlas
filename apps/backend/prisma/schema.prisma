@@ -1221,6 +1221,8 @@ model LeaderboardEvent {
   @@index([ownerCoadminUserId, competitionId, occurredAt])
   @@index([competitionId, crmContactId, occurredAt])
   @@index([competitionId, type])
+  @@index([workspaceId, actorUserId, type, createdAt])
+  @@index([workspaceId, ownerCoadminUserId, type, createdAt])
   @@map("leaderboard_events")
 }
 

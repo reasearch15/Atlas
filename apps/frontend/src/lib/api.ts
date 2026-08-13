@@ -27,6 +27,7 @@ import type {
   LeaderboardCompetitionSummaryDto,
   LeaderboardCurrentBoardDto,
   LeaderboardDepositResultDto,
+  LeaderboardDepositHistoryPageDto,
   LeaderboardEventsPageDto,
   LeaderboardGiveInfoResultDto,
   LeaderboardPayoutDto,
@@ -592,6 +593,19 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+
+  leaderboardDepositHistory: (opts?: {
+    readonly cursor?: string;
+    readonly limit?: number;
+  }) => {
+    const query = new URLSearchParams();
+    if (opts?.cursor) query.set("cursor", opts.cursor);
+    if (opts?.limit != null) query.set("limit", String(opts.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return apiRequest<LeaderboardDepositHistoryPageDto>(
+      `/api/leaderboard/deposits/history${suffix}`
+    );
+  },
 
   leaderboardSetReferral: (payload: {
     readonly referrerCrmContactId: string;

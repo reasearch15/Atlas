@@ -4,6 +4,7 @@ import {
   leaderboardCompetitionParamsSchema,
   leaderboardContactParamsSchema,
   leaderboardDepositBodySchema,
+  leaderboardDepositHistoryQuerySchema,
   leaderboardEligibilityBodySchema,
   leaderboardEnabledBodySchema,
   leaderboardEnsureAutoBindBodySchema,
@@ -196,6 +197,16 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
         amountCents: body.amountCents,
         idempotencyKey: body.idempotencyKey,
         ...(body.reason !== undefined ? { reason: body.reason } : {})
+      });
+    })
+  );
+
+  app.get("/deposits/history", { preHandler: [leaderboardDepositGuard(app)] }, async (request) =>
+    handle(async () => {
+      const query = leaderboardDepositHistoryQuerySchema.parse(request.query);
+      return service.listDepositHistory(request.user!, {
+        ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+        limit: query.limit
       });
     })
   );

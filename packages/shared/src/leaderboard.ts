@@ -210,6 +210,22 @@ export interface LeaderboardEventsPageDto {
   readonly rows: readonly LeaderboardEventRowDto[];
 }
 
+/** Staff/Coadmin deposit history row (paginated). */
+export interface LeaderboardDepositHistoryItemDto {
+  readonly id: string;
+  readonly crmContactId: string;
+  readonly displayName: string;
+  readonly amountCents: number;
+  readonly pointsAdded: number;
+  readonly createdAt: string;
+}
+
+export interface LeaderboardDepositHistoryPageDto {
+  readonly items: readonly LeaderboardDepositHistoryItemDto[];
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
+}
+
 export interface LeaderboardReferralAdminRowDto {
   readonly id: string;
   readonly referrerCrmContactId: string;

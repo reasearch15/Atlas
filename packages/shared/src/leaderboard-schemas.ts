@@ -60,6 +60,12 @@ export const leaderboardEventsQuerySchema = z.object({
   crmContactId: z.string().uuid().optional()
 });
 
+export const leaderboardDepositHistoryQuerySchema = z.object({
+  /** Opaque keyset cursor from a previous page's nextCursor. */
+  cursor: z.string().trim().min(1).max(512).optional(),
+  limit: z.coerce.number().int().min(1).max(30).default(30)
+});
+
 export const leaderboardReverseEventBodySchema = z.object({
   reason: z.string().trim().min(3).max(500),
   idempotencyKey: z.string().min(8).max(160)

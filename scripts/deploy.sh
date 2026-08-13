@@ -189,6 +189,7 @@ main() {
 
   log "atomic symlink switch"
   ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
+  chmod +x "${CURRENT_LINK}/scripts/"*.sh 2>/dev/null || true
 
   # Install/refresh systemd unit templates from the release so GitHub deploys
   # never require manual VPS unit edits (e.g. frontend 127.0.0.1:3200).
@@ -212,7 +213,8 @@ main() {
   HEALTHCHECK="${CURRENT_LINK}/scripts/healthcheck.sh"
   export ATLAS_FRONTEND_URL="${ATLAS_FRONTEND_URL:-http://127.0.0.1:3200}"
   export ATLAS_BACKEND_URL="${ATLAS_BACKEND_URL:-http://127.0.0.1:4000}"
-  if [[ -x "$HEALTHCHECK" ]]; then
+  if [[ -f "$HEALTHCHECK" ]]; then
+    chmod +x "$HEALTHCHECK" || true
     if ! bash "$HEALTHCHECK"; then
       if [[ -n "$previous" ]]; then
         rollback_on_failure "$previous"
