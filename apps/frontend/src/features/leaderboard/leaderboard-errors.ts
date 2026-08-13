@@ -15,7 +15,10 @@ const LEADERBOARD_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   LEADERBOARD_OWNER_UNRESOLVED:
     "This workspace has no primary coadmin, so the leaderboard cannot be resolved.",
   IDEMPOTENCY_CONFLICT: "This request was already submitted with different details. Try again.",
-  COMPETITION_NOT_FOUND: "No active leaderboard competition was found.",
+  TELEGRAM_CHANNEL_NOT_VERIFIED: "Verify the channel before enabling public posting.",
+  TELEGRAM_POSTING_DISABLED: "Enable posting first.",
+  TELEGRAM_CHANNEL_REQUIRED: "Set a channel before sending the leaderboard.",
+  COMPETITION_NOT_FOUND: "No active leaderboard competition is available.",
   CHAT_NOT_FOUND: "Chat was not found in this workspace.",
   FORBIDDEN: "You do not have permission for this leaderboard action.",
   CONFIRM_DISABLE_REQUIRED:

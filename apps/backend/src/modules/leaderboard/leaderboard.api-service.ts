@@ -1291,6 +1291,12 @@ export class LeaderboardApiService {
     );
   }
 
+  public async sendLatestTelegramLeaderboard(user: RequestUser) {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    return this.requireTelegramIntegration().sendLatestLeaderboard(workspaceId, user.id, user.id);
+  }
+
   public async disconnectTelegram(user: RequestUser, confirm: true) {
     this.assertCoadmin(user);
     const workspaceId = this.requireWorkspaceId(user);

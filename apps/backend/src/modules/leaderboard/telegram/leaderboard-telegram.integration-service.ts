@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
-import type { LeaderboardTelegramIntegrationDto } from "@atlas/shared";
+import type { LeaderboardTelegramIntegrationDto, LeaderboardTelegramSendLatestDto } from "@atlas/shared";
 import {
   decryptSecret,
   encryptSecret,
@@ -380,6 +380,82 @@ export class LeaderboardTelegramIntegrationService {
     });
 
     return toDto(updated, await this.disconnectWarning(workspaceId, ownerCoadminUserId));
+  }
+
+  /**
+   * Manually queue a public leaderboard refresh for the Coadmin's verified channel.
+   * Reuses REFRESH_PUBLIC_LEADERBOARD outbox coalescing (edit persistent message when present).
+   */
+  public async sendLatestLeaderboard(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    actorUserId: string
+  ): Promise<LeaderboardTelegramSendLatestDto> {
+    const row = await this.requireConnected(workspaceId, ownerCoadminUserId);
+
+    if (!row.channelId) {
+      throw new AppError(400, "TELEGRAM_CHANNEL_REQUIRED", "Set a channel before sending the leaderboard.");
+    }
+    if (!row.lastChannelVerifiedAt) {
+      throw new AppError(
+        400,
+        "TELEGRAM_CHANNEL_NOT_VERIFIED",
+        "Verify the channel before sending the leaderboard."
+      );
+    }
+    if (!row.postingEnabled) {
+      throw new AppError(
+        400,
+        "TELEGRAM_POSTING_DISABLED",
+        "Enable posting first."
+      );
+    }
+    if (!this.outbox) {
+      throw new AppError(503, "TELEGRAM_OUTBOX_UNAVAILABLE", "Leaderboard Telegram outbox is not available.");
+    }
+
+    const competition = await this.prisma.leaderboardCompetition.findFirst({
+      where: {
+        workspaceId,
+        ownerCoadminUserId,
+        status: "ACTIVE"
+      },
+      orderBy: { sequence: "desc" }
+    });
+    if (!competition) {
+      throw new AppError(
+        404,
+        "COMPETITION_NOT_FOUND",
+        "No active leaderboard competition is available."
+      );
+    }
+
+    const jobId = await this.outbox.enqueueRefresh(workspaceId, ownerCoadminUserId, competition.id);
+    const mode = row.persistentMessageId ? "edit" : "send";
+
+    await this.audit.record({
+      workspaceId,
+      actorId: actorUserId,
+      action: "leaderboard.telegram.send_latest",
+      metadata: {
+        ownerCoadminUserId,
+        competitionId: competition.id,
+        jobId,
+        mode,
+        channelId: row.channelId
+      }
+    });
+
+    return {
+      queued: true,
+      jobId,
+      competitionId: competition.id,
+      mode,
+      message:
+        mode === "edit"
+          ? "Leaderboard refresh queued — the existing channel message will be updated."
+          : "Leaderboard refresh queued — a new channel message will be sent."
+    };
   }
 
   public async disconnect(

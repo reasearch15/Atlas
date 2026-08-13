@@ -438,6 +438,12 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
       })
   );
 
+  app.post(
+    "/telegram-integration/send-latest",
+    { preHandler: [leaderboardTelegramManageGuard(app)] },
+    async (request) => handle(() => service.sendLatestTelegramLeaderboard(request.user!))
+  );
+
   app.delete(
     "/telegram-integration",
     { preHandler: [leaderboardTelegramManageGuard(app)] },

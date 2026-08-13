@@ -40,6 +40,7 @@ import type {
   LeaderboardStandingFilter,
   LeaderboardStandingsPageDto,
   LeaderboardTelegramIntegrationDto,
+  LeaderboardTelegramSendLatestDto,
   LeaderboardWheelConfigVersionDto,
   LeaderboardWheelSettingsDto,
   LeaderboardWheelSpinResultDto,
@@ -742,6 +743,12 @@ export const api = {
     apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration/posting", {
       method: "PATCH",
       body: JSON.stringify(payload)
+    }),
+
+  leaderboardTelegramSendLatest: () =>
+    apiRequest<LeaderboardTelegramSendLatestDto>("/api/leaderboard/telegram-integration/send-latest", {
+      method: "POST",
+      body: JSON.stringify({})
     }),
 
   leaderboardTelegramDisconnect: (payload: { readonly confirm: true }) =>

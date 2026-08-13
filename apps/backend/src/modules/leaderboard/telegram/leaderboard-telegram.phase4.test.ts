@@ -606,3 +606,250 @@ describe("Phase 4 integration + outbox + processor", () => {
     expect(encryptSecret("secret", encryptionKey).ciphertext).not.toContain("secret");
   });
 });
+
+describe("sendLatestLeaderboard manual refresh", () => {
+  async function readyIntegration(prisma: ReturnType<typeof createMemoryPrisma>) {
+    const wakes: string[] = [];
+    const outboxSvc = new LeaderboardTelegramOutboxService(prisma as never, async (id) => {
+      wakes.push(id);
+    });
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["token-a", { id: 101, isBot: true, firstName: "BotA", username: "bot_a" }]]),
+      chats: new Map([
+        [
+          -1001,
+          {
+            id: -1001,
+            type: "channel",
+            title: "LB Channel",
+            members: new Map([[101, "administrator"]]),
+            messages: [],
+            nextMessageId: 1
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    const service = new LeaderboardTelegramIntegrationService({
+      prisma: prisma as never,
+      encryptionKey,
+      client,
+      outbox: outboxSvc
+    });
+    await service.connect(workspaceA, ownerA, "token-a", ownerA);
+    await service.setChannel(workspaceA, ownerA, "-1001", ownerA);
+    await service.verifyChannel(workspaceA, ownerA, ownerA);
+    await service.setPostingEnabled(workspaceA, ownerA, true, ownerA);
+    return { service, outboxSvc, wakes, tgState, client };
+  }
+
+  it("queues refresh for verified posting-enabled integration with ACTIVE competition", async () => {
+    const prisma = createMemoryPrisma();
+    const { service } = await readyIntegration(prisma);
+    prisma._state.competitions.push({
+      id: competitionA,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      sequence: 1,
+      prizePoolCents: 0,
+      endsAt: new Date("2026-08-18T02:00:00.000Z")
+    });
+    prisma._state.standings.push({
+      competitionId: competitionA,
+      ownerCoadminUserId: ownerA,
+      crmContactId: contact1,
+      totalPoints: 0,
+      pointsReachedAt: new Date(),
+      crmContact: { displayName: "Zero Player", chats: [] }
+    });
+
+    const result = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+    expect(result.queued).toBe(true);
+    expect(result.competitionId).toBe(competitionA);
+    expect(result.mode).toBe("send");
+    expect(result.message).toMatch(/queued/i);
+    expect(JSON.stringify(result)).not.toContain("token-a");
+    expect(prisma._state.outbox.some((r: any) => r.jobType === "REFRESH_PUBLIC_LEADERBOARD")).toBe(true);
+  });
+
+  it("reports edit mode when persistent message exists", async () => {
+    const prisma = createMemoryPrisma();
+    const { service } = await readyIntegration(prisma);
+    prisma._state.competitions.push({
+      id: competitionA,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      sequence: 1,
+      prizePoolCents: 0,
+      endsAt: new Date("2026-08-18T02:00:00.000Z")
+    });
+    prisma._state.integrations[0].persistentMessageId = "42";
+
+    const result = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+    expect(result.mode).toBe("edit");
+  });
+
+  it("coalesces repeated send-latest into one pending refresh job", async () => {
+    const prisma = createMemoryPrisma();
+    const { service } = await readyIntegration(prisma);
+    prisma._state.competitions.push({
+      id: competitionA,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      sequence: 1,
+      prizePoolCents: 0,
+      endsAt: new Date("2026-08-18T02:00:00.000Z")
+    });
+    const before = prisma._state.outbox.filter(
+      (r: any) => r.jobType === "REFRESH_PUBLIC_LEADERBOARD"
+    ).length;
+    const a = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+    const b = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+    const c = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+    expect(a.jobId).toBe(b.jobId);
+    expect(b.jobId).toBe(c.jobId);
+    const after = prisma._state.outbox.filter(
+      (r: any) => r.jobType === "REFRESH_PUBLIC_LEADERBOARD"
+    ).length;
+    expect(after - before).toBe(1);
+  });
+
+  it("rejects posting disabled / unverified / no ACTIVE competition", async () => {
+    const prisma = createMemoryPrisma();
+    const { service } = await readyIntegration(prisma);
+
+    await service.setPostingEnabled(workspaceA, ownerA, false, ownerA);
+    await expect(service.sendLatestLeaderboard(workspaceA, ownerA, ownerA)).rejects.toMatchObject({
+      code: "TELEGRAM_POSTING_DISABLED"
+    });
+
+    await service.setPostingEnabled(workspaceA, ownerA, true, ownerA);
+    prisma._state.integrations[0].lastChannelVerifiedAt = null;
+    await expect(service.sendLatestLeaderboard(workspaceA, ownerA, ownerA)).rejects.toMatchObject({
+      code: "TELEGRAM_CHANNEL_NOT_VERIFIED"
+    });
+
+    prisma._state.integrations[0].lastChannelVerifiedAt = new Date();
+    await expect(service.sendLatestLeaderboard(workspaceA, ownerA, ownerA)).rejects.toMatchObject({
+      code: "COMPETITION_NOT_FOUND",
+      message: "No active leaderboard competition is available."
+    });
+  });
+
+  it("cannot send for another Coadmin and Staff lack telegram manage permission", async () => {
+    expect(hasPermission("STAFF", "leaderboard:telegram:manage")).toBe(false);
+    const prisma = createMemoryPrisma();
+    const { service } = await readyIntegration(prisma);
+    prisma._state.competitions.push({
+      id: competitionA,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      sequence: 1,
+      prizePoolCents: 0,
+      endsAt: new Date("2026-08-18T02:00:00.000Z")
+    });
+
+    await expect(service.sendLatestLeaderboard(workspaceB, ownerB, ownerB)).rejects.toMatchObject({
+      code: "TELEGRAM_INTEGRATION_NOT_FOUND"
+    });
+    // Owner B cannot use owner A's workspace/integration pair.
+    await expect(service.sendLatestLeaderboard(workspaceA, ownerB, ownerB)).rejects.toMatchObject({
+      code: "TELEGRAM_INTEGRATION_NOT_FOUND"
+    });
+  });
+
+  it("channel change clears persistent message so next send uses new-message mode", async () => {
+    const prisma = createMemoryPrisma();
+    const { service } = await readyIntegration(prisma);
+    prisma._state.competitions.push({
+      id: competitionA,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      sequence: 1,
+      prizePoolCents: 0,
+      endsAt: new Date("2026-08-18T02:00:00.000Z")
+    });
+    prisma._state.integrations[0].persistentMessageId = "99";
+    expect((await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA)).mode).toBe("edit");
+
+    await service.setChannel(workspaceA, ownerA, "-1002", ownerA);
+    expect(prisma._state.integrations[0].persistentMessageId).toBeNull();
+    expect(prisma._state.integrations[0].postingEnabled).toBe(false);
+
+    // Re-verify + enable for new channel id stored after setChannel
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["token-a", { id: 101, isBot: true, firstName: "BotA", username: "bot_a" }]]),
+      chats: new Map([
+        [
+          -1002,
+          {
+            id: -1002,
+            type: "channel",
+            title: "New Channel",
+            members: new Map([[101, "administrator"]]),
+            messages: [],
+            nextMessageId: 1
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    const outboxSvc = new LeaderboardTelegramOutboxService(prisma as never, async () => undefined);
+    const service2 = new LeaderboardTelegramIntegrationService({
+      prisma: prisma as never,
+      encryptionKey,
+      client,
+      outbox: outboxSvc
+    });
+    await service2.verifyChannel(workspaceA, ownerA, ownerA);
+    await service2.setPostingEnabled(workspaceA, ownerA, true, ownerA);
+    const result = await service2.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+    expect(result.mode).toBe("send");
+  });
+
+  it("zero-point ACTIVE board can still be queued", async () => {
+    const prisma = createMemoryPrisma();
+    const { service, outboxSvc, client } = await readyIntegration(prisma);
+    prisma._state.competitions.push({
+      id: competitionA,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      sequence: 1,
+      prizePoolCents: 0,
+      endsAt: new Date("2026-08-18T02:00:00.000Z")
+    });
+    prisma._state.standings.push({
+      competitionId: competitionA,
+      ownerCoadminUserId: ownerA,
+      crmContactId: contact1,
+      totalPoints: 0,
+      pointsReachedAt: new Date(),
+      crmContact: { displayName: "Homer", chats: [] }
+    });
+    prisma._state.settings.push({
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      timezone: "America/Chicago"
+    });
+
+    const queued = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+    expect(queued.queued).toBe(true);
+
+    const processor = new LeaderboardTelegramProcessor({
+      prisma: prisma as never,
+      encryptionKey,
+      outbox: outboxSvc,
+      client,
+      domain: { setMembershipEligibility: vi.fn() } as never
+    });
+    const job = prisma._state.outbox.find((r: any) => r.id === queued.jobId);
+    await processor.processJob(job.id);
+    expect(job.status).toBe("SUCCEEDED");
+  });
+});

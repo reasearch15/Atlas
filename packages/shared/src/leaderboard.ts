@@ -268,6 +268,16 @@ export interface LeaderboardTelegramIntegrationDto {
   readonly webhookConfigured: boolean;
 }
 
+/** Result of Coadmin manual "Send Latest Leaderboard" (queues existing outbox refresh). */
+export interface LeaderboardTelegramSendLatestDto {
+  readonly queued: true;
+  readonly jobId: string;
+  readonly competitionId: string;
+  /** edit = persistent message exists for this channel; send = new message path */
+  readonly mode: "edit" | "send";
+  readonly message: string;
+}
+
 export interface LeaderboardCompetitionReviewDto {
   readonly competition: LeaderboardAdminCompetitionDto;
   readonly frozenAt: string | null;
