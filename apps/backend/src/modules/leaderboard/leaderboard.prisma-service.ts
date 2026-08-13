@@ -1613,29 +1613,38 @@ export class PrismaLeaderboardService {
     }
   }
 
+  /**
+   * Concurrent-safe settings init.
+   * Uses upsert (INSERT … ON CONFLICT) — never create→catch P2002→query in the same tx
+   * (PostgreSQL aborts the transaction on unique violation → 25P02 on recovery queries).
+   */
   private async ensureSettingsTx(
     tx: Tx,
     workspaceId: string,
     ownerCoadminUserId: string,
     actorUserId?: string
   ) {
-    const existing = await tx.leaderboardSettings.findUnique({ where: { ownerCoadminUserId } });
-    if (existing) {
-      if (existing.workspaceId !== workspaceId) throw ownerMismatch();
-      return existing;
-    }
     const now = new Date();
-    try {
-      const created = await tx.leaderboardSettings.create({
-        data: {
-          workspaceId,
-          ownerCoadminUserId,
-          enabled: false,
-          poolRateBps: DEFAULT_POOL_RATE_BPS,
-          timezone: LEADERBOARD_TIMEZONE,
-          updatedByUserId: actorUserId ?? null
-        }
-      });
+    const settings = await tx.leaderboardSettings.upsert({
+      where: { ownerCoadminUserId },
+      create: {
+        workspaceId,
+        ownerCoadminUserId,
+        enabled: false,
+        poolRateBps: DEFAULT_POOL_RATE_BPS,
+        timezone: LEADERBOARD_TIMEZONE,
+        updatedByUserId: actorUserId ?? null
+      },
+      // No business-field mutation on conflict — preserve existing defaults/config.
+      // Prisma requires a non-empty update; self-assign the unique key is a no-op.
+      update: { ownerCoadminUserId }
+    });
+    if (settings.workspaceId !== workspaceId) throw ownerMismatch();
+
+    const existingHistory = await tx.poolRateHistory.findFirst({
+      where: { ownerCoadminUserId }
+    });
+    if (!existingHistory) {
       await tx.poolRateHistory.create({
         data: {
           workspaceId,
@@ -1646,13 +1655,8 @@ export class PrismaLeaderboardService {
           reason: "initial_default"
         }
       });
-      return created;
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      const raced = await tx.leaderboardSettings.findUniqueOrThrow({ where: { ownerCoadminUserId } });
-      if (raced.workspaceId !== workspaceId) throw ownerMismatch();
-      return raced;
     }
+    return settings;
   }
 
   private async requireEnabledSettings(tx: Tx, workspaceId: string, ownerCoadminUserId: string) {
