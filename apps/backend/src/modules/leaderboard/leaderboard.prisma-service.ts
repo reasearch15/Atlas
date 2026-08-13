@@ -66,6 +66,13 @@ import type {
 
 type Tx = Prisma.TransactionClient;
 
+type PendingLeaderboardAudit = {
+  readonly workspaceId: string | null;
+  readonly actorId: string | null;
+  readonly action: string;
+  readonly metadata?: Prisma.InputJsonObject;
+};
+
 /**
  * Prisma-backed Phase 1.2 leaderboard domain service (per-coadmin ownership).
  * Uses interactive transactions + SELECT FOR UPDATE for concurrency safety.
@@ -89,10 +96,24 @@ export class PrismaLeaderboardService {
     this.projectionHooks = options.projectionHooks;
   }
 
+  private async flushPendingAudits(pending: readonly PendingLeaderboardAudit[]): Promise<void> {
+    for (const entry of pending) {
+      try {
+        await this.audit.record(entry);
+      } catch (error) {
+        console.error(`${entry.action} audit failed after commit`, {
+          workspaceId: entry.workspaceId,
+          error
+        });
+      }
+    }
+  }
+
   public async bindParticipant(input: BindParticipantInput) {
     await this.assertContact(input.workspaceId, input.crmContactId);
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.lockContact(tx, input.crmContactId);
       const existing = await tx.leaderboardParticipant.findMany({
         where: { workspaceId: input.workspaceId, crmContactId: input.crmContactId }
@@ -111,7 +132,7 @@ export class PrismaLeaderboardService {
               createdByUserId: input.createdByUserId ?? null
             }
           });
-          await this.audit.record({
+          pendingAudits.push({
             workspaceId: input.workspaceId,
             actorId: input.createdByUserId ?? null,
             action: "leaderboard.participant_bound",
@@ -139,8 +160,10 @@ export class PrismaLeaderboardService {
         input.crmContactId,
         now
       );
-      return row;
+      return { row, pendingAudits };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.row;
   }
 
   public async resolveLeaderboardOwner(workspaceId: string, crmContactId: string): Promise<string> {
@@ -169,7 +192,8 @@ export class PrismaLeaderboardService {
     now = new Date()
   ) {
     const newlyFrozen: string[] = [];
-    const updated = await this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.ensureSettingsTx(tx, workspaceId, ownerCoadminUserId, actorUserId);
       const settings = await tx.leaderboardSettings.update({
         where: { ownerCoadminUserId },
@@ -185,7 +209,8 @@ export class PrismaLeaderboardService {
           ownerCoadminUserId,
           now,
           false,
-          newlyFrozen
+          newlyFrozen,
+          pendingAudits
         );
         await this.ensureZeroPointStandingsForOwnerTx(
           tx,
@@ -196,23 +221,32 @@ export class PrismaLeaderboardService {
         );
       }
 
-      return settings;
+      return { settings, pendingAudits };
     });
 
-    await this.audit.record({
-      workspaceId,
-      actorId: actorUserId,
-      action: enabled ? "leaderboard.enabled" : "leaderboard.disabled",
-      metadata: { ownerCoadminUserId }
-    });
+    await this.flushPendingAudits(result.pendingAudits);
+    try {
+      await this.audit.record({
+        workspaceId,
+        actorId: actorUserId,
+        action: enabled ? "leaderboard.enabled" : "leaderboard.disabled",
+        metadata: { ownerCoadminUserId }
+      });
+    } catch (error) {
+      console.error(
+        `${enabled ? "leaderboard.enabled" : "leaderboard.disabled"} audit failed after commit`,
+        { workspaceId, ownerCoadminUserId, error }
+      );
+    }
     await this.emitFrozen(workspaceId, ownerCoadminUserId, newlyFrozen);
-    return updated;
+    return result.settings;
   }
 
   public async setPoolRate(input: SetPoolRateInput) {
     assertAllowedPoolRate(input.poolRateBps);
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.lockWorkspace(tx, input.workspaceId);
       const settings = await this.ensureSettingsTx(
         tx,
@@ -220,13 +254,17 @@ export class PrismaLeaderboardService {
         input.ownerCoadminUserId,
         input.actorUserId
       );
-      if (settings.poolRateBps === input.poolRateBps) return settings;
+      if (settings.poolRateBps === input.poolRateBps) {
+        return { settings, pendingAudits };
+      }
       const competition = await this.ensureCurrentCompetitionTx(
         tx,
         input.workspaceId,
         input.ownerCoadminUserId,
         now,
-        true
+        true,
+        undefined,
+        pendingAudits
       );
       const updated = await tx.leaderboardSettings.update({
         where: { ownerCoadminUserId: input.ownerCoadminUserId },
@@ -243,7 +281,7 @@ export class PrismaLeaderboardService {
           reason: input.reason ?? null
         }
       });
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.pool_rate_changed",
@@ -254,8 +292,10 @@ export class PrismaLeaderboardService {
           reason: input.reason ?? null
         }
       });
-      return updated;
+      return { settings: updated, pendingAudits };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.settings;
   }
 
   public async ensureCurrentCompetition(
@@ -264,11 +304,22 @@ export class PrismaLeaderboardService {
     now = new Date()
   ) {
     const newlyFrozen: string[] = [];
-    const competition = await this.prisma.$transaction(async (tx) =>
-      this.ensureCurrentCompetitionTx(tx, workspaceId, ownerCoadminUserId, now, false, newlyFrozen)
-    );
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
+      const competition = await this.ensureCurrentCompetitionTx(
+        tx,
+        workspaceId,
+        ownerCoadminUserId,
+        now,
+        false,
+        newlyFrozen,
+        pendingAudits
+      );
+      return { competition, pendingAudits };
+    });
+    await this.flushPendingAudits(result.pendingAudits);
     await this.emitFrozen(workspaceId, ownerCoadminUserId, newlyFrozen);
-    return competition;
+    return result.competition;
   }
 
   public async recordDeposit(input: DepositInput) {
@@ -278,9 +329,10 @@ export class PrismaLeaderboardService {
     // Audit MUST run after commit. AuditService uses the root Prisma client; calling it
     // inside an interactive $transaction blocks until the ~5s timeout (prod HTTP 500).
     const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       const existing = await tx.leaderboardEvent.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
       if (existing) {
-        return { event: existing, created: false as const };
+        return { event: existing, created: false as const, pendingAudits };
       }
 
       await this.assertContactTx(tx, input.workspaceId, input.crmContactId);
@@ -293,7 +345,9 @@ export class PrismaLeaderboardService {
         input.workspaceId,
         ownerCoadminUserId,
         now,
-        true
+        true,
+        undefined,
+        pendingAudits
       );
       await this.lockContact(tx, input.crmContactId);
       await this.lockCompetition(tx, competition.id);
@@ -355,49 +409,41 @@ export class PrismaLeaderboardService {
         ownerCoadminUserId,
         input.crmContactId,
         now,
-        input.actorUserId
+        input.actorUserId,
+        pendingAudits
       );
+
+      pendingAudits.push({
+        workspaceId: input.workspaceId,
+        actorId: input.actorUserId,
+        action: "leaderboard.deposit",
+        metadata: {
+          eventId: event.id,
+          ownerCoadminUserId,
+          amountCents: input.amountCents,
+          pointsDelta,
+          poolContributionCents: contribution,
+          competitionId: competition.id
+        }
+      });
 
       return {
         event,
         created: true as const,
-        audit: {
-          workspaceId: input.workspaceId,
-          actorId: input.actorUserId,
-          action: "leaderboard.deposit" as const,
-          metadata: {
-            eventId: event.id,
-            ownerCoadminUserId,
-            amountCents: input.amountCents,
-            pointsDelta,
-            poolContributionCents: contribution,
-            competitionId: competition.id
-          }
-        }
+        pendingAudits
       };
     });
 
-    if (result.created) {
-      try {
-        await this.audit.record(result.audit);
-      } catch (error) {
-        // Deposit already committed — never roll back or surface failure for audit alone.
-        console.error("leaderboard.deposit audit failed after commit", {
-          eventId: result.event.id,
-          workspaceId: input.workspaceId,
-          error
-        });
-      }
-    }
-
+    await this.flushPendingAudits(result.pendingAudits);
     return result.event;
   }
 
   public async reverseDeposit(input: ReverseDepositInput) {
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       const existing = await tx.leaderboardEvent.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
-      if (existing) return existing;
+      if (existing) return { event: existing, pendingAudits };
 
       const original = await tx.leaderboardEvent.findFirst({
         where: { id: input.depositEventId, workspaceId: input.workspaceId }
@@ -472,9 +518,10 @@ export class PrismaLeaderboardService {
         ownerCoadminUserId,
         original.crmContactId,
         now,
-        input.actorUserId
+        input.actorUserId,
+        pendingAudits
       );
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.deposit_reversal",
@@ -486,8 +533,10 @@ export class PrismaLeaderboardService {
           poolContributionCents: contribution
         }
       });
-      return event;
+      return { event, pendingAudits };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.event;
   }
 
   public async setReferral(input: SetReferralInput) {
@@ -497,6 +546,7 @@ export class PrismaLeaderboardService {
     // Audit MUST run after commit. AuditService uses the root Prisma client; calling it
     // inside an interactive $transaction blocks until the ~5s timeout (prod HTTP 500).
     const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.assertContactTx(tx, input.workspaceId, input.referrerCrmContactId);
       await this.assertContactTx(tx, input.workspaceId, input.referredCrmContactId);
       await this.lockContact(tx, input.referredCrmContactId);
@@ -525,44 +575,44 @@ export class PrismaLeaderboardService {
             originalReferrerCrmContactId: input.referrerCrmContactId
           }
         });
-        await this.ensureCurrentCompetitionTx(tx, input.workspaceId, ownerCoadminUserId, now, true);
+        await this.ensureCurrentCompetitionTx(
+          tx,
+          input.workspaceId,
+          ownerCoadminUserId,
+          now,
+          true,
+          undefined,
+          pendingAudits
+        );
         await this.syncReferralMilestonesTx(
           tx,
           input.workspaceId,
           ownerCoadminUserId,
           input.referredCrmContactId,
           now,
-          input.actorUserId
+          input.actorUserId,
+          pendingAudits
         );
-        return { row, ownerCoadminUserId };
+        pendingAudits.push({
+          workspaceId: input.workspaceId,
+          actorId: input.actorUserId,
+          action: "leaderboard.referral_set",
+          metadata: {
+            referralId: row.id,
+            ownerCoadminUserId,
+            referrerCrmContactId: row.referrerCrmContactId,
+            referredCrmContactId: row.referredCrmContactId,
+            idempotencyKey: input.idempotencyKey
+          }
+        });
+        return { row, pendingAudits };
       } catch (error) {
         if (isUniqueViolation(error)) throw referralAlreadyExists();
         throw error;
       }
     });
 
-    try {
-      await this.audit.record({
-        workspaceId: input.workspaceId,
-        actorId: input.actorUserId,
-        action: "leaderboard.referral_set",
-        metadata: {
-          referralId: result.row.id,
-          ownerCoadminUserId: result.ownerCoadminUserId,
-          referrerCrmContactId: result.row.referrerCrmContactId,
-          referredCrmContactId: result.row.referredCrmContactId,
-          idempotencyKey: input.idempotencyKey
-        }
-      });
-    } catch (error) {
-      // Referral already committed — never roll back or surface failure for audit alone.
-      console.error("leaderboard.referral_set audit failed after commit", {
-        referralId: result.row.id,
-        workspaceId: input.workspaceId,
-        error
-      });
-    }
-
+    await this.flushPendingAudits(result.pendingAudits);
     return result.row;
   }
 
@@ -572,6 +622,7 @@ export class PrismaLeaderboardService {
 
     // Audit MUST run after commit (same root-client / interactive-tx hazard as deposit + setReferral).
     const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.assertContactTx(tx, input.workspaceId, input.newReferrerCrmContactId);
       await this.assertContactTx(tx, input.workspaceId, input.referredCrmContactId);
       await this.lockContact(tx, input.referredCrmContactId);
@@ -609,48 +660,50 @@ export class PrismaLeaderboardService {
           overrideReason: input.reason
         }
       });
-      await this.ensureCurrentCompetitionTx(tx, input.workspaceId, ownerCoadminUserId, now, true);
+      await this.ensureCurrentCompetitionTx(
+        tx,
+        input.workspaceId,
+        ownerCoadminUserId,
+        now,
+        true,
+        undefined,
+        pendingAudits
+      );
       await this.syncReferralMilestonesTx(
         tx,
         input.workspaceId,
         ownerCoadminUserId,
         input.referredCrmContactId,
         now,
-        input.actorUserId
+        input.actorUserId,
+        pendingAudits
       );
-      return { updated, ownerCoadminUserId, previous };
-    });
-
-    try {
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.referral_override",
         metadata: {
-          referralId: result.updated.id,
-          ownerCoadminUserId: result.ownerCoadminUserId,
-          previousReferrerCrmContactId: result.previous,
+          referralId: updated.id,
+          ownerCoadminUserId,
+          previousReferrerCrmContactId: previous,
           newReferrerCrmContactId: input.newReferrerCrmContactId,
           reason: input.reason,
           idempotencyKey: input.idempotencyKey
         }
       });
-    } catch (error) {
-      console.error("leaderboard.referral_override audit failed after commit", {
-        referralId: result.updated.id,
-        workspaceId: input.workspaceId,
-        error
-      });
-    }
+      return { updated, pendingAudits };
+    });
 
+    await this.flushPendingAudits(result.pendingAudits);
     return result.updated;
   }
 
   public async recordPromotion(input: PromotionInput) {
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       const existing = await tx.leaderboardEvent.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
-      if (existing) return existing;
+      if (existing) return { event: existing, created: false as const, pendingAudits };
       await this.assertContactTx(tx, input.workspaceId, input.crmContactId);
       await this.lockContact(tx, input.crmContactId);
       const ownerCoadminUserId = await this.resolveLeaderboardOwnerTx(tx, input.workspaceId, input.crmContactId);
@@ -660,7 +713,9 @@ export class PrismaLeaderboardService {
         input.workspaceId,
         ownerCoadminUserId,
         now,
-        true
+        true,
+        undefined,
+        pendingAudits
       );
       const prior = await tx.promotionAward.findMany({
         where: { ownerCoadminUserId, crmContactId: input.crmContactId },
@@ -720,21 +775,24 @@ export class PrismaLeaderboardService {
           lastEventReason: event.reason
         }
       });
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.promotion",
         metadata: { eventId: event.id, ownerCoadminUserId, points, competitionId: competition.id }
       });
-      return event;
+      return { event, created: true as const, pendingAudits };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.event;
   }
 
   public async reversePromotion(input: ReversePromotionInput) {
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       const existing = await tx.leaderboardEvent.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
-      if (existing) return existing;
+      if (existing) return { event: existing, pendingAudits };
       const original = await tx.leaderboardEvent.findFirst({
         where: { id: input.promotionEventId, workspaceId: input.workspaceId }
       });
@@ -782,7 +840,7 @@ export class PrismaLeaderboardService {
           lastEventReason: event.reason
         }
       });
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.promotion_reversal",
@@ -793,19 +851,22 @@ export class PrismaLeaderboardService {
           points
         }
       });
-      return event;
+      return { event, pendingAudits };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.event;
   }
 
   public async finalizeCompetition(input: FinalizeInput) {
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       const byKey = await tx.leaderboardCompetition.findFirst({
         where: { finalizationIdempotencyKey: input.idempotencyKey }
       });
       if (byKey) {
         if (byKey.ownerCoadminUserId !== input.ownerCoadminUserId) throw ownerMismatch();
-        return byKey;
+        return { competition: byKey, pendingAudits };
       }
 
       await this.lockCompetition(tx, input.competitionId);
@@ -818,10 +879,11 @@ export class PrismaLeaderboardService {
         ) {
           throw competitionAlreadyFinalized();
         }
-        return tx.leaderboardCompetition.update({
+        const stamped = await tx.leaderboardCompetition.update({
           where: { id: competition.id },
           data: { finalizationIdempotencyKey: input.idempotencyKey }
         });
+        return { competition: stamped, pendingAudits };
       }
       if (competition.status !== "FROZEN") throw competitionNotFrozen();
 
@@ -880,11 +942,13 @@ export class PrismaLeaderboardService {
       });
       if (updated.count === 0) {
         const again = await tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competition.id } });
-        if (again.finalizationIdempotencyKey === input.idempotencyKey) return again;
+        if (again.finalizationIdempotencyKey === input.idempotencyKey) {
+          return { competition: again, pendingAudits };
+        }
         throw competitionAlreadyFinalized();
       }
       const finalized = await tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competition.id } });
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.competition_finalized",
@@ -894,15 +958,18 @@ export class PrismaLeaderboardService {
           winners: winnersPayload
         }
       });
-      return finalized;
+      return { competition: finalized, pendingAudits };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.competition;
   }
 
   public async setMembershipEligibility(input: SetMembershipEligibilityInput) {
     const allowed: PrizeMembershipStatus[] = ["ELIGIBLE", "NOT_ELIGIBLE", "PENDING_REVIEW"];
     if (!allowed.includes(input.membershipStatus)) throw invalidMembershipStatus();
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.lockCompetition(tx, input.competitionId);
       const competition = await this.requireCompetitionTx(tx, input.competitionId, input.ownerCoadminUserId);
       if (competition.workspaceId !== input.workspaceId) throw ownerMismatch();
@@ -973,7 +1040,7 @@ export class PrismaLeaderboardService {
                 : candidate.verificationErrorMessage
         }
       });
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.membership_eligibility_set",
@@ -989,13 +1056,16 @@ export class PrismaLeaderboardService {
           idempotencyKey: input.idempotencyKey
         }
       });
-      return updated;
+      return { updated, pendingAudits };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.updated;
   }
 
   public async markPayout(input: MarkPayoutInput) {
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.lockWorkspace(tx, input.workspaceId);
       const payout = await tx.giveawayPayout.findUnique({ where: { id: input.payoutId } });
       if (!payout) throw payoutNotFound();
@@ -1006,7 +1076,7 @@ export class PrismaLeaderboardService {
       if (competition.status !== "FINALIZED") throw competitionNotFinalized();
 
       if (payout.status === input.status) {
-        return payout;
+        return { payout, pendingAudits };
       }
       if (payout.status === "PAID" || payout.status === "VOID") {
         throw payoutAlreadySettled();
@@ -1030,7 +1100,7 @@ export class PrismaLeaderboardService {
               }
       });
 
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.payout_marked",
@@ -1043,8 +1113,10 @@ export class PrismaLeaderboardService {
           idempotencyKey: input.idempotencyKey
         }
       });
-      return updated;
+      return { payout: updated, pendingAudits };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.payout;
   }
 
   /**
@@ -1055,7 +1127,8 @@ export class PrismaLeaderboardService {
     input: ReconcileActiveDepositScoringInput
   ): Promise<DepositScoringReconciliationResult> {
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
       if (input.competitionId) {
         await this.lockCompetition(tx, input.competitionId);
         const target = await tx.leaderboardCompetition.findUnique({ where: { id: input.competitionId } });
@@ -1063,12 +1136,15 @@ export class PrismaLeaderboardService {
         if (target.ownerCoadminUserId !== input.ownerCoadminUserId) throw ownerMismatch();
         if (target.status !== "ACTIVE") {
           return {
-            competitionsProcessed: 0,
-            playersVisited: 0,
-            playersAdjusted: 0,
-            playersAlreadyCorrect: 0,
-            playersSkippedIdempotent: 0,
-            adjustments: []
+            summary: {
+              competitionsProcessed: 0,
+              playersVisited: 0,
+              playersAdjusted: 0,
+              playersAlreadyCorrect: 0,
+              playersSkippedIdempotent: 0,
+              adjustments: []
+            },
+            pendingAudits
           };
         }
       }
@@ -1256,7 +1332,7 @@ export class PrismaLeaderboardService {
         }
       }
 
-      await this.audit.record({
+      pendingAudits.push({
         workspaceId: competitions[0]?.workspaceId ?? null,
         actorId: input.actorUserId ?? null,
         action: "leaderboard.active_deposit_scoring_reconciled",
@@ -1272,14 +1348,19 @@ export class PrismaLeaderboardService {
       });
 
       return {
-        competitionsProcessed: competitions.length,
-        playersVisited,
-        playersAdjusted,
-        playersAlreadyCorrect,
-        playersSkippedIdempotent,
-        adjustments
+        summary: {
+          competitionsProcessed: competitions.length,
+          playersVisited,
+          playersAdjusted,
+          playersAlreadyCorrect,
+          playersSkippedIdempotent,
+          adjustments
+        },
+        pendingAudits
       };
     });
+    await this.flushPendingAudits(result.pendingAudits);
+    return result.summary;
   }
 
   private async emitFrozen(
@@ -1303,7 +1384,8 @@ export class PrismaLeaderboardService {
     ownerCoadminUserId: string,
     now: Date,
     skipEnabledCheck: boolean,
-    newlyFrozen?: string[]
+    newlyFrozen?: string[],
+    pendingAudits?: PendingLeaderboardAudit[]
   ) {
     await this.lockWorkspace(tx, workspaceId);
     await this.ensureSettingsTx(tx, workspaceId, ownerCoadminUserId);
@@ -1318,7 +1400,7 @@ export class PrismaLeaderboardService {
       }
     });
     for (const competition of expired) {
-      const frozen = await this.freezeCompetitionTx(tx, competition.id, now);
+      const frozen = await this.freezeCompetitionTx(tx, competition.id, now, pendingAudits);
       if (frozen.status === "FROZEN") newlyFrozen?.push(frozen.id);
     }
 
@@ -1383,7 +1465,12 @@ export class PrismaLeaderboardService {
     }
   }
 
-  private async freezeCompetitionTx(tx: Tx, competitionId: string, now: Date) {
+  private async freezeCompetitionTx(
+    tx: Tx,
+    competitionId: string,
+    now: Date,
+    pendingAudits?: PendingLeaderboardAudit[]
+  ) {
     await this.lockCompetition(tx, competitionId);
     const competition = await tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
     if (competition.status !== "ACTIVE") return competition;
@@ -1461,7 +1548,7 @@ export class PrismaLeaderboardService {
     if (frozen.count === 0) {
       return tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
     }
-    await this.audit.record({
+    pendingAudits?.push({
       workspaceId: competition.workspaceId,
       actorId: null,
       action: "leaderboard.competition_frozen",
@@ -1480,7 +1567,8 @@ export class PrismaLeaderboardService {
     ownerCoadminUserId: string,
     referredCrmContactId: string,
     now: Date,
-    actorUserId: string | null
+    actorUserId: string | null,
+    pendingAudits?: PendingLeaderboardAudit[]
   ) {
     const referral = await tx.leaderboardReferral.findUnique({
       where: {
@@ -1574,7 +1662,9 @@ export class PrismaLeaderboardService {
         workspaceId,
         ownerCoadminUserId,
         now,
-        true
+        true,
+        undefined,
+        pendingAudits
       );
       const priorGens = await tx.referralMilestoneAward.count({
         where: { referralId: referral.id, milestoneCode: milestone.code }
