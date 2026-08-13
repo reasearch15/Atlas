@@ -291,7 +291,7 @@ function edgeDecor(): string {
     )
     .join("");
 
-  const sparks = [
+  const sparks: ReadonlyArray<readonly [number, number]> = [
     [140, 240],
     [920, 260],
     [160, 780],
@@ -301,7 +301,8 @@ function edgeDecor(): string {
     [540, 430],
     [480, 700],
     [620, 690]
-  ]
+  ];
+  const sparkSvg = sparks
     .map(
       ([x, y], i) =>
         `<g opacity="${0.35 + (i % 3) * 0.12}">
@@ -311,7 +312,7 @@ function edgeDecor(): string {
     )
     .join("");
 
-  return `${chipSvg}${sparks}`;
+  return `${chipSvg}${sparkSvg}`;
 }
 
 function lightBeams(): string {
