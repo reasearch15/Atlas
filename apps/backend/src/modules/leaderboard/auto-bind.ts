@@ -6,7 +6,14 @@ import {
   resolveDeterministicLeaderboardOwner
 } from "./ownership-resolution";
 
-export type AutoBindSource = "CRM" | "BACKFILL" | "BOT_START" | "DEPOSIT_RETRY" | "PROMOTION_RETRY";
+export type AutoBindSource =
+  | "CRM"
+  | "BACKFILL"
+  | "BOT_START"
+  | "DEPOSIT_RETRY"
+  | "PROMOTION_RETRY"
+  | "LIVE_SYNC"
+  | "PLAYER_STATUS";
 
 export interface TryAutoBindParticipantInput {
   readonly workspaceId: string;
@@ -134,4 +141,71 @@ export async function tryAutoBindForActingCoadmin(
     source: "DEPOSIT_RETRY",
     actorUserId: input.actingCoadminUserId
   });
+}
+
+/**
+ * Resolves the sole ACTIVE Coadmin and binds a PRIVATE numeric contact.
+ * Used by CRM ensure, player-status heal, and any workspace-scoped lifecycle hook.
+ * Never guesses when ownership is ambiguous.
+ */
+export async function tryAutoBindForDeterministicOwner(
+  prisma: PrismaClient,
+  input: {
+    readonly workspaceId: string;
+    readonly crmContactId: string;
+    readonly source: AutoBindSource;
+    readonly actorUserId?: string;
+    readonly dryRun?: boolean;
+  },
+  domain?: PrismaLeaderboardService
+): Promise<TryAutoBindResult> {
+  const deterministic = await resolveDeterministicLeaderboardOwner(prisma, input.workspaceId);
+  if (deterministic == null) {
+    return { status: "SKIPPED", reason: "AMBIGUOUS_OWNER" };
+  }
+  return tryAutoBindParticipant(
+    prisma,
+    {
+      workspaceId: input.workspaceId,
+      crmContactId: input.crmContactId,
+      ownerCoadminUserId: deterministic,
+      source: input.source,
+      ...(input.actorUserId !== undefined ? { actorUserId: input.actorUserId } : {}),
+      ...(input.dryRun !== undefined ? { dryRun: input.dryRun } : {})
+    },
+    domain
+  );
+}
+
+/**
+ * Fire-and-forget safe side effect after CRM contact create/link.
+ * Never throws — Telegram/CRM ingestion must not fail because of leaderboard binding.
+ */
+export async function ensurePrivateContactParticipantSideEffect(
+  prisma: PrismaClient,
+  input: {
+    readonly workspaceId: string;
+    readonly crmContactId: string;
+    readonly source?: AutoBindSource;
+    readonly actorUserId?: string;
+  },
+  domain?: PrismaLeaderboardService
+): Promise<TryAutoBindResult> {
+  try {
+    return await tryAutoBindForDeterministicOwner(
+      prisma,
+      {
+        workspaceId: input.workspaceId,
+        crmContactId: input.crmContactId,
+        source: input.source ?? "LIVE_SYNC",
+        ...(input.actorUserId !== undefined ? { actorUserId: input.actorUserId } : {})
+      },
+      domain
+    );
+  } catch (error) {
+    return {
+      status: "FAILED",
+      reason: error instanceof Error ? error.message : "AUTO_BIND_SIDE_EFFECT_FAILED"
+    };
+  }
 }

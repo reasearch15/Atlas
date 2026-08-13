@@ -54,7 +54,7 @@ import {
 } from "./player-search";
 import { selectPrizeWinnersFromEligibility } from "./prize-eligibility";
 import { withRanks } from "./ranking";
-import { tryAutoBindForActingCoadmin, tryAutoBindParticipant } from "./auto-bind";
+import { tryAutoBindForActingCoadmin, tryAutoBindForDeterministicOwner } from "./auto-bind";
 import { backfillLeaderboardParticipants } from "./backfill-participants";
 import { resolveDeterministicLeaderboardOwner } from "./ownership-resolution";
 import { decidePlayerNotification } from "./telegram/player-notification-policy";
@@ -281,11 +281,25 @@ export class LeaderboardApiService {
   ): Promise<LeaderboardPlayerStatusDto> {
     const workspaceId = this.requireWorkspaceId(user);
 
-    let owner: string;
+    let owner: string | null = null;
     try {
       owner = await this.domain.resolveLeaderboardOwner(workspaceId, crmContactId);
     } catch (error) {
-      if (error instanceof LeaderboardError && error.code === "PARTICIPANT_NOT_BOUND") {
+      if (!(error instanceof LeaderboardError) || error.code !== "PARTICIPANT_NOT_BOUND") {
+        throw error;
+      }
+
+      // Heal missing binds for sole-owner workspaces (Staff + Coadmin). Safe no-op when ambiguous.
+      const healed = await tryAutoBindForDeterministicOwner(this.app.prisma, {
+        workspaceId,
+        crmContactId,
+        source: "PLAYER_STATUS",
+        actorUserId: user.id
+      });
+
+      if (healed.status === "BOUND" || healed.status === "ALREADY_BOUND") {
+        owner = await this.domain.resolveLeaderboardOwner(workspaceId, crmContactId);
+      } else {
         return {
           bound: false,
           crmContactId,
@@ -300,11 +314,13 @@ export class LeaderboardApiService {
           successfulReferralCount: null,
           lastEventAt: null,
           lastEventReason: null,
-          unboundReason: "PARTICIPANT_NOT_BOUND",
+          unboundReason:
+            healed.status === "SKIPPED" && healed.reason === "AMBIGUOUS_OWNER"
+              ? "PARTICIPANT_OWNER_AMBIGUOUS"
+              : "PARTICIPANT_NOT_BOUND",
           wheel: null
         };
       }
-      throw error;
     }
 
     await this.assertActorMayMutatePlayer(user, owner);
@@ -536,22 +552,29 @@ export class LeaderboardApiService {
   }
 
   /**
-   * Coadmin CRM hook: try deterministic auto-bind for a contact (never transfers).
+   * Staff/Coadmin CRM hook: try deterministic auto-bind for a contact (never transfers).
    */
   public async ensureAutoBindForContact(user: RequestUser, crmContactId: string) {
-    this.assertCoadmin(user);
+    this.assertStaffOrCoadmin(user);
     const workspaceId = this.requireWorkspaceId(user);
-    const result = await tryAutoBindParticipant(this.app.prisma, {
-      workspaceId,
-      crmContactId,
-      ownerCoadminUserId: user.id,
-      source: "CRM",
-      actorUserId: user.id
-    }, this.domain);
+    const result = await tryAutoBindForDeterministicOwner(
+      this.app.prisma,
+      {
+        workspaceId,
+        crmContactId,
+        source: "CRM",
+        actorUserId: user.id
+      },
+      this.domain
+    );
+    const owner =
+      "ownerCoadminUserId" in result
+        ? result.ownerCoadminUserId
+        : ((await resolveDeterministicLeaderboardOwner(this.app.prisma, workspaceId)) ?? user.id);
     return {
       crmContactId,
       status: result.status,
-      ownerCoadminUserId: "ownerCoadminUserId" in result ? result.ownerCoadminUserId : user.id,
+      ownerCoadminUserId: owner,
       ...(result.status === "SKIPPED" || result.status === "FAILED"
         ? { reason: result.reason }
         : {}),

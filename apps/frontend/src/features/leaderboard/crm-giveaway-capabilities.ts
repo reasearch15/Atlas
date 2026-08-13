@@ -14,6 +14,8 @@ export interface CrmGiveawayCapabilities {
   readonly canWheelSpin: boolean;
   /** Coadmin-only: bind / auto-bind (backend requires COADMIN). */
   readonly canBind: boolean;
+  /** Staff + Coadmin: call ensure-auto-bind heal. */
+  readonly canEnsureAutoBind: boolean;
   /** Coadmin-only admin surface — must never appear in CRM player ops. */
   readonly canAdminSettings: boolean;
   readonly canReverse: boolean;
@@ -35,6 +37,7 @@ export function crmGiveawayCapabilities(role: Role | null | undefined): CrmGivea
       canGiveInfo: false,
       canWheelSpin: false,
       canBind: false,
+      canEnsureAutoBind: false,
       canAdminSettings: false,
       canReverse: false,
       canReferralOverride: false,
@@ -54,8 +57,10 @@ export function crmGiveawayCapabilities(role: Role | null | undefined): CrmGivea
     canPromotion: hasPermission(role, "leaderboard:promotion"),
     canGiveInfo: hasPermission(role, "leaderboard:give-info"),
     canWheelSpin: hasPermission(role, "leaderboard:wheel:spin"),
-    // Bind is Coadmin-only on the API; settings is the permission Staff intentionally lacks.
+    // Manual bind remains Coadmin recovery tooling; auto-heal uses leaderboard:read.
     canBind: canAdminSettings && hasPermission(role, "leaderboard:deposit"),
+    /** Staff + Coadmin: deterministic ensure-auto-bind on CRM open. */
+    canEnsureAutoBind: hasPermission(role, "leaderboard:read"),
     canAdminSettings,
     canReverse: hasPermission(role, "leaderboard:reverse"),
     canReferralOverride: hasPermission(role, "leaderboard:referral:override"),

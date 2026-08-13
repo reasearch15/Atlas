@@ -85,7 +85,7 @@ export interface LeaderboardPlayerStatusDto {
   readonly successfulReferralCount: number | null;
   readonly lastEventAt: string | null;
   readonly lastEventReason: string | null;
-  readonly unboundReason?: "PARTICIPANT_NOT_BOUND" | null;
+  readonly unboundReason?: "PARTICIPANT_NOT_BOUND" | "PARTICIPANT_OWNER_AMBIGUOUS" | null;
   readonly wheel?: LeaderboardWheelStatusDto | null;
 }
 

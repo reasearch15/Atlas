@@ -68,6 +68,17 @@ export function leaderboardBindGuard(app: FastifyInstance) {
 }
 
 /**
+ * Staff + Coadmin: deterministic auto-bind heal (never transfers; never guesses).
+ */
+export function leaderboardEnsureAutoBindGuard(app: FastifyInstance) {
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    await app.authenticate(request, reply);
+    await app.requireRole(["COADMIN", "STAFF"])(request, reply);
+    await app.requirePermission("leaderboard:read")(request, reply);
+  };
+}
+
+/**
  * Coadmin-only settings mutations and settings reads.
  */
 export function leaderboardSettingsGuard(app: FastifyInstance) {

@@ -39,6 +39,7 @@ import { mapLeaderboardError } from "./leaderboard.http-errors";
 import {
   leaderboardAdminReadGuard,
   leaderboardBindGuard,
+  leaderboardEnsureAutoBindGuard,
   leaderboardDepositGuard,
   leaderboardEligibilityReviewGuard,
   leaderboardFinalizeGuard,
@@ -169,7 +170,7 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
 
   app.post(
     "/participants/ensure-auto-bind",
-    { preHandler: [leaderboardBindGuard(app)] },
+    { preHandler: [leaderboardEnsureAutoBindGuard(app)] },
     async (request) =>
       handle(async () => {
         const body = leaderboardEnsureAutoBindBodySchema.parse(request.body);

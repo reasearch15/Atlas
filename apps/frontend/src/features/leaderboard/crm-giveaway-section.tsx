@@ -58,11 +58,11 @@ export function CrmGiveawaySection({ chatId, crmContactId, role }: CrmGiveawaySe
     }
     setLoading(true);
     try {
-      if (caps.canBind) {
+      if (caps.canEnsureAutoBind) {
         try {
           await api.leaderboardEnsureAutoBind(crmContactId);
         } catch {
-          // Non-fatal — fall through to player status.
+          // Non-fatal — fall through to player status (which also heals unbound contacts).
         }
       }
       const next = await api.leaderboardPlayer(crmContactId);
@@ -74,7 +74,7 @@ export function CrmGiveawaySection({ chatId, crmContactId, role }: CrmGiveawaySe
     } finally {
       setLoading(false);
     }
-  }, [caps.canBind, caps.canRead, crmContactId]);
+  }, [caps.canEnsureAutoBind, caps.canRead, crmContactId]);
 
   useEffect(() => {
     setSuccess(null);

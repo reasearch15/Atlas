@@ -13,9 +13,11 @@ export interface BackfillParticipantsInput {
 
 export interface BackfillParticipantsCounts {
   scanned: number;
+  eligible: number;
   bound: number;
   alreadyBound: number;
   ambiguous: number;
+  conflict: number;
   skipped: number;
   failed: number;
   dryRun: boolean;
@@ -37,9 +39,11 @@ export async function backfillLeaderboardParticipants(
 
   const counts: BackfillParticipantsCounts = {
     scanned: 0,
+    eligible: 0,
     bound: 0,
     alreadyBound: 0,
     ambiguous: 0,
+    conflict: 0,
     skipped: 0,
     failed: 0,
     dryRun,
@@ -47,8 +51,15 @@ export async function backfillLeaderboardParticipants(
   };
 
   if (deterministicOwnerId == null) {
-    // Still scan for reporting when scoped owner provided, but never bind.
-    counts.ambiguous = 1;
+    // Still scan eligible contacts for reporting when possible, but never bind.
+    const contacts = await prisma.crmContact.findMany({
+      where: { workspaceId: input.workspaceId, kind: "PRIVATE" },
+      select: { id: true, telegramPeerId: true },
+      ...(input.limit != null ? { take: input.limit } : {})
+    });
+    counts.scanned = contacts.length;
+    counts.eligible = contacts.filter((c) => /^\d+$/.test(c.telegramPeerId)).length;
+    counts.ambiguous = counts.eligible > 0 ? counts.eligible : 1;
     return counts;
   }
 
@@ -74,6 +85,7 @@ export async function backfillLeaderboardParticipants(
       counts.skipped += 1;
       continue;
     }
+    counts.eligible += 1;
 
     const result = await tryAutoBindParticipant(
       prisma,
@@ -96,7 +108,7 @@ export async function backfillLeaderboardParticipants(
         counts.alreadyBound += 1;
         break;
       case "TRANSFER_REJECTED":
-        counts.skipped += 1;
+        counts.conflict += 1;
         break;
       case "SKIPPED":
         if (result.reason === "AMBIGUOUS_OWNER") counts.ambiguous += 1;

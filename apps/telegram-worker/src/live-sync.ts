@@ -15,6 +15,7 @@ import {
 import { decryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
 import type { WorkerEnv } from "./env";
 import { AccountLease } from "./heartbeat";
+import { ensureLeaderboardParticipantBestEffort } from "./leaderboard-participant-side-effect";
 import {
   TelegramClientAdapter,
   type NormalizedDialog,
@@ -539,6 +540,19 @@ async function upsertChat(
   }
 
   const crmContactId = existing?.crmContactId ?? (await linkCrmContact(prisma, workspaceId, message, identity));
+  // Leaderboard bind is a safe side effect — never fail Telegram ingestion on bind errors.
+  void ensureLeaderboardParticipantBestEffort(prisma, workspaceId, crmContactId).then((result) => {
+    if (result.status === "FAILED") {
+      console.warn(
+        JSON.stringify({
+          event: "leaderboard.participant_auto_bind_failed",
+          workspaceId,
+          crmContactId,
+          reason: result.reason
+        })
+      );
+    }
+  });
   const reopenedStatus =
     existing && !message.isOutgoing ? reopenStatusOnInbound(existing.crmStatus as CrmConversationStatus) : null;
   const attentionAt = new Date();
