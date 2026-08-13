@@ -1,6 +1,10 @@
 import fp from "fastify-plugin";
 import type { FastifyInstance } from "fastify";
-import type { TelegramMessageCreatedEvent, TelegramMessageUpdatedEvent } from "@atlas/shared";
+import type {
+  TelegramCallIncomingEvent,
+  TelegramMessageCreatedEvent,
+  TelegramMessageUpdatedEvent
+} from "@atlas/shared";
 import { isFcmConfigured } from "./fcm.config";
 import { getFirebaseMessaging } from "./firebase-admin.client";
 import { NotificationService } from "./notification.service";
@@ -70,6 +74,10 @@ async function handleWorkspaceEvent(app: FastifyInstance, payload: string): Prom
     }
     if (event.type === "telegram.message.updated") {
       await handleFailedOutbound(app, event as TelegramMessageUpdatedEvent);
+      return;
+    }
+    if (event.type === "telegram.call.incoming") {
+      await handleIncomingCall(app, event as TelegramCallIncomingEvent);
     }
   } catch (error) {
     app.log.warn({ error }, "Notification bridge failed to handle workspace event");
@@ -154,6 +162,28 @@ async function handleFailedOutbound(
     recipientUserId: message.internalSenderUserId,
     customerName,
     preview: message.text || message.caption || "Outbound message failed",
+    eventId: event.eventId
+  });
+}
+
+async function handleIncomingCall(app: FastifyInstance, event: TelegramCallIncomingEvent): Promise<void> {
+  if (event.workspaceId.trim().length === 0 || event.telegramAccountId.trim().length === 0) {
+    return;
+  }
+  if (event.callId.trim().length === 0 || event.callerTelegramUserId.trim().length === 0) {
+    return;
+  }
+
+  await app.notifications.notifyIncomingCall({
+    workspaceId: event.workspaceId,
+    telegramAccountId: event.telegramAccountId,
+    callId: event.callId,
+    callerTelegramUserId: event.callerTelegramUserId,
+    callerName: event.callerName,
+    callerUsername: event.callerUsername,
+    video: Boolean(event.video),
+    timestamp: event.timestamp,
+    chatId: event.chatId ?? null,
     eventId: event.eventId
   });
 }

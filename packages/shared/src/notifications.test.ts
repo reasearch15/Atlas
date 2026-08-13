@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildIncomingCallDedupeKey,
   buildNotificationDeepLinkPath,
   buildNotificationIdempotencyKey,
   buildUniqueNotificationTag,
+  formatIncomingCallNotificationBody,
   nextNotificationRetryDelayMs,
   notificationPriorityForType,
   truncateNotificationPreview
@@ -49,6 +51,7 @@ describe("notificationPriorityForType", () => {
   it("marks customer messages as HIGH", () => {
     expect(notificationPriorityForType("INCOMING_MESSAGE")).toBe("HIGH");
     expect(notificationPriorityForType("NEW_CONVERSATION")).toBe("HIGH");
+    expect(notificationPriorityForType("INCOMING_CALL")).toBe("HIGH");
   });
 
   it("marks assignments as DEFAULT", () => {
@@ -57,6 +60,32 @@ describe("notificationPriorityForType", () => {
 
   it("marks SLA as LOW", () => {
     expect(notificationPriorityForType("SLA_WARNING")).toBe("LOW");
+  });
+});
+
+describe("formatIncomingCallNotificationBody", () => {
+  it("formats name with username, name only, and id fallback", () => {
+    expect(
+      formatIncomingCallNotificationBody({
+        callerName: "John Smith",
+        callerUsername: "john",
+        callerTelegramUserId: "42"
+      })
+    ).toBe("John Smith (@john) is calling");
+    expect(
+      formatIncomingCallNotificationBody({
+        callerName: "John Smith",
+        callerUsername: null,
+        callerTelegramUserId: "42"
+      })
+    ).toBe("John Smith is calling");
+    expect(
+      formatIncomingCallNotificationBody({
+        callerName: null,
+        callerUsername: null,
+        callerTelegramUserId: "42"
+      })
+    ).toBe("Telegram user 42 is calling");
   });
 });
 
@@ -79,5 +108,14 @@ describe("retry + uniqueness helpers", () => {
         deviceTokenId: "d1"
       })
     ).toBe("INCOMING_MESSAGE:evt-1:u1:d1");
+    expect(buildIncomingCallDedupeKey("acc-1", "call-9")).toBe("call:acc-1:call-9");
+    expect(
+      buildNotificationIdempotencyKey({
+        type: "INCOMING_CALL",
+        eventKey: buildIncomingCallDedupeKey("acc-1", "call-9"),
+        userId: "u1",
+        deviceTokenId: "d1"
+      })
+    ).toBe("INCOMING_CALL:call:acc-1:call-9:u1:d1");
   });
 });

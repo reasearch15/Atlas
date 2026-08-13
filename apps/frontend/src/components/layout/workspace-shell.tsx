@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState, type ReactNode } from "react";
-import { BarChart3, Bell, Cable, LogOut, MessageSquare, MoreHorizontal, Tags, Users, WalletCards } from "lucide-react";
+import { BarChart3, Bell, Cable, LogOut, MessageSquare, MoreHorizontal, Tags, Trophy, Users, WalletCards } from "lucide-react";
 import type { Route } from "next";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -22,6 +22,7 @@ const navItems = [
   { label: "Developer Apps", href: "/workspace/developer-apps", icon: WalletCards },
   { label: "Staff", href: "/workspace/staff", icon: Users },
   { label: "Inbox", href: "/workspace/inbox", icon: MessageSquare },
+  { label: "Leaderboard", href: "/workspace/leaderboard", icon: Trophy },
   { label: "Tags", href: "/workspace/tags", icon: Tags },
   { label: "Notifications", href: "/workspace/notifications", icon: Bell }
 ] as const;
@@ -31,6 +32,7 @@ function pageTitle(pathname: string): string {
   if (pathname.startsWith("/workspace/telegram")) return "Telegram Accounts";
   if (pathname.startsWith("/workspace/developer-apps")) return "Developer Apps";
   if (pathname.startsWith("/workspace/staff")) return "Staff";
+  if (pathname.startsWith("/workspace/leaderboard")) return "Leaderboard";
   if (pathname.startsWith("/workspace/tags")) return "Tags";
   if (pathname.startsWith("/workspace/notifications")) return "Notifications";
   if (pathname === "/workspace") return "Dashboard";

@@ -2,6 +2,8 @@ export * from "./api";
 export * from "./roles";
 export * from "./schemas";
 export * from "./crm";
+export * from "./leaderboard";
+export * from "./leaderboard-schemas";
 export * from "./customer-privacy";
 export * from "./message-attribution";
 export * from "./telegram-errors";

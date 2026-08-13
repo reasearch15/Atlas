@@ -10,7 +10,9 @@ import type {
 import { PanelRightClose } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { CrmGiveawaySection } from "@/features/leaderboard/crm-giveaway-section";
 import { api } from "@/lib/api";
+import { useAuthStore } from "@/stores/auth-store";
 import type { ContactIdentity } from "./contact-identity";
 import { getCachedCrmAssignees, getCachedCrmTags } from "./crm-catalog-cache";
 import { avatarInitials, crmStatusLabels, crmStatusStyles } from "./inbox-utils";
@@ -136,6 +138,7 @@ interface CrmPanelProps {
 export function CrmPanel({ state, identity, avatarColor, onClose, embedded = false }: CrmPanelProps) {
   const { panel, loading, error, busy, createNote } = state;
   const [noteBody, setNoteBody] = useState("");
+  const user = useAuthStore((auth) => auth.user);
 
   async function submitNote(): Promise<void> {
     const body = noteBody.trim();
@@ -316,6 +319,13 @@ export function CrmPanel({ state, identity, avatarColor, onClose, embedded = fal
                 </ul>
               )}
             </Section>
+
+            <CrmGiveawaySection
+              chatId={panel.chatId}
+              crmContactId={panel.contact?.id ?? null}
+              canBind={user?.role === "COADMIN"}
+              role={user?.role}
+            />
 
             <Section title="Payment">
               <p className="text-sm text-muted-foreground">Not linked</p>

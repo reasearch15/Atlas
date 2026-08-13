@@ -42,6 +42,13 @@ describe("NotificationPreferenceService.shouldSend", () => {
     ).toBe(true);
   });
 
+  it("routes incoming calls through customerMessages preference", () => {
+    expect(service.shouldSend(DEFAULT_NOTIFICATION_PREFERENCES, "INCOMING_CALL", true)).toBe(true);
+    expect(
+      service.shouldSend({ ...DEFAULT_NOTIFICATION_PREFERENCES, customerMessages: false }, "INCOMING_CALL", true)
+    ).toBe(false);
+  });
+
   it("always allows test notifications when enabled", () => {
     expect(service.shouldSend(DEFAULT_NOTIFICATION_PREFERENCES, "TEST", false)).toBe(true);
   });

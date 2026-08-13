@@ -554,11 +554,31 @@ export interface CrmConversationUpdatedEvent {
   readonly reason: string;
 }
 
+/**
+ * Fired when a connected Telegram user account receives an incoming VoIP ring
+ * (`UpdatePhoneCall` → `PhoneCallRequested`). Detection only — no call answer.
+ */
+export interface TelegramCallIncomingEvent {
+  readonly type: "telegram.call.incoming";
+  readonly eventId: string;
+  readonly workspaceId: string;
+  readonly telegramAccountId: string;
+  readonly callId: string;
+  readonly callerTelegramUserId: string;
+  readonly callerName: string | null;
+  readonly callerUsername: string | null;
+  readonly video: boolean;
+  readonly timestamp: string;
+  /** Optional Atlas chat row when the caller is already known in this workspace. */
+  readonly chatId?: string | null;
+}
+
 export type TelegramWorkspaceRealtimeEvent =
   | TelegramMessageCreatedEvent
   | TelegramMessageUpdatedEvent
   | TelegramMessageDeletedEvent
   | TelegramChatUpdatedEvent
+  | TelegramCallIncomingEvent
   | CrmConversationUpdatedEvent
   | InternalMessageCreatedEvent
   | InternalMessageReadEvent

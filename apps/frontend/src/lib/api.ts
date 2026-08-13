@@ -22,6 +22,24 @@ import type {
   CrmNoteDto,
   CrmTagDto,
   DeveloperAppDto,
+  LeaderboardAdminCompetitionDto,
+  LeaderboardCompetitionReviewDto,
+  LeaderboardCompetitionSummaryDto,
+  LeaderboardCurrentBoardDto,
+  LeaderboardDepositResultDto,
+  LeaderboardEventsPageDto,
+  LeaderboardGiveInfoResultDto,
+  LeaderboardPayoutDto,
+  LeaderboardPlayerSearchHitDto,
+  LeaderboardPlayerStatusDto,
+  LeaderboardPoolRateHistoryDto,
+  LeaderboardPromotionResultDto,
+  LeaderboardReferralAdminRowDto,
+  LeaderboardReferralResultDto,
+  LeaderboardSettingsDto,
+  LeaderboardStandingFilter,
+  LeaderboardStandingsPageDto,
+  LeaderboardTelegramIntegrationDto,
   TelegramAccountDto,
   TelegramAccountPermanentDeleteResponse,
   TelegramChatDto,
@@ -492,7 +510,252 @@ export const api = {
   crmRemoveChatTag: (chatId: string, tagId: string) =>
     apiRequest<CrmConversationPanelDto>(`/api/crm/chats/${chatId}/tags/${tagId}`, { method: "DELETE" }),
   crmInboxCounts: () => apiRequest<CrmInboxCountsDto>("/api/crm/inbox/counts"),
-  crmAssignees: () => apiRequest<CrmAssigneeDto[]>("/api/crm/assignees")
+  crmAssignees: () => apiRequest<CrmAssigneeDto[]>("/api/crm/assignees"),
+
+  leaderboardCurrent: () => apiRequest<LeaderboardCurrentBoardDto>("/api/leaderboard/current"),
+
+  leaderboardStandings: (params: {
+    readonly filter?: LeaderboardStandingFilter;
+    readonly q?: string;
+    readonly page?: number;
+    readonly pageSize?: number;
+  } = {}) => {
+    const query = new URLSearchParams();
+    if (params.filter) query.set("filter", params.filter);
+    if (params.q) query.set("q", params.q);
+    if (params.page != null) query.set("page", String(params.page));
+    if (params.pageSize != null) query.set("pageSize", String(params.pageSize));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return apiRequest<LeaderboardStandingsPageDto>(`/api/leaderboard/standings${suffix}`);
+  },
+
+  leaderboardPlayer: (crmContactId: string) =>
+    apiRequest<LeaderboardPlayerStatusDto>(`/api/leaderboard/player/${crmContactId}`),
+
+  leaderboardPlayersSearch: (params: {
+    readonly q: string;
+    readonly excludeContactId?: string;
+    readonly limit?: number;
+  }) => {
+    const query = new URLSearchParams();
+    query.set("q", params.q);
+    if (params.excludeContactId) query.set("excludeContactId", params.excludeContactId);
+    if (params.limit != null) query.set("limit", String(params.limit));
+    return apiRequest<readonly LeaderboardPlayerSearchHitDto[]>(
+      `/api/leaderboard/players/search?${query.toString()}`
+    );
+  },
+
+  leaderboardBindParticipant: (crmContactId: string) =>
+    apiRequest<{ readonly crmContactId: string; readonly ownerCoadminUserId: string }>(
+      "/api/leaderboard/participants/bind",
+      { method: "POST", body: JSON.stringify({ crmContactId }) }
+    ),
+
+  leaderboardDeposit: (payload: {
+    readonly crmContactId: string;
+    readonly amountCents: number;
+    readonly idempotencyKey: string;
+    readonly reason?: string;
+  }) =>
+    apiRequest<LeaderboardDepositResultDto>("/api/leaderboard/deposits", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardSetReferral: (payload: {
+    readonly referrerCrmContactId: string;
+    readonly referredCrmContactId: string;
+    readonly idempotencyKey: string;
+  }) =>
+    apiRequest<LeaderboardReferralResultDto>("/api/leaderboard/referrals", {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardPromotion: (payload: {
+    readonly crmContactId: string;
+    readonly idempotencyKey: string;
+    readonly reason?: string;
+  }) =>
+    apiRequest<LeaderboardPromotionResultDto>("/api/leaderboard/promotions", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardGiveInfo: (payload: {
+    readonly crmContactId: string;
+    readonly chatId: string;
+    readonly idempotencyKey: string;
+  }) =>
+    apiRequest<LeaderboardGiveInfoResultDto>("/api/leaderboard/give-info", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardSettings: () => apiRequest<LeaderboardSettingsDto>("/api/leaderboard/settings"),
+
+  leaderboardSetEnabled: (payload: { readonly enabled: boolean; readonly confirmDisable?: boolean }) =>
+    apiRequest<LeaderboardSettingsDto>("/api/leaderboard/settings/enabled", {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardSetPoolRate: (payload: {
+    readonly poolRateBps: 200 | 300 | 400 | 500;
+    readonly reason?: string;
+  }) =>
+    apiRequest<LeaderboardSettingsDto>("/api/leaderboard/settings/pool-rate", {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardPoolRateHistory: () =>
+    apiRequest<readonly LeaderboardPoolRateHistoryDto[]>("/api/leaderboard/settings/pool-rate-history"),
+
+  leaderboardAdminCompetition: () =>
+    apiRequest<LeaderboardAdminCompetitionDto | null>("/api/leaderboard/admin/competition"),
+
+  leaderboardEvents: (params: {
+    readonly page: number;
+    readonly pageSize: number;
+    readonly type?: string;
+    readonly crmContactId?: string;
+  }) => {
+    const query = new URLSearchParams();
+    query.set("page", String(params.page));
+    query.set("pageSize", String(params.pageSize));
+    if (params.type) query.set("type", params.type);
+    if (params.crmContactId) query.set("crmContactId", params.crmContactId);
+    return apiRequest<LeaderboardEventsPageDto>(`/api/leaderboard/events?${query.toString()}`);
+  },
+
+  leaderboardReverseEvent: (
+    eventId: string,
+    payload: { readonly reason: string; readonly idempotencyKey: string }
+  ) =>
+    apiRequest<unknown>(`/api/leaderboard/events/${eventId}/reverse`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardReferrals: () =>
+    apiRequest<readonly LeaderboardReferralAdminRowDto[]>("/api/leaderboard/referrals"),
+
+  leaderboardOverrideReferral: (
+    referralId: string,
+    payload: {
+      readonly newReferrerCrmContactId: string;
+      readonly reason: string;
+      readonly idempotencyKey: string;
+    }
+  ) =>
+    apiRequest<unknown>(`/api/leaderboard/referrals/${referralId}/override`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardCompetitionReview: (competitionId: string) =>
+    apiRequest<LeaderboardCompetitionReviewDto>(
+      `/api/leaderboard/competitions/${competitionId}/review`
+    ),
+
+  leaderboardSetEligibility: (
+    competitionId: string,
+    crmContactId: string,
+    body: {
+      readonly membershipStatus: "ELIGIBLE" | "NOT_ELIGIBLE" | "PENDING_REVIEW";
+      readonly reason?: string;
+      readonly ineligibilityReason?: string;
+      readonly idempotencyKey: string;
+      readonly explicitOverride?: boolean;
+    }
+  ) =>
+    apiRequest<unknown>(
+      `/api/leaderboard/competitions/${competitionId}/eligibility/${crmContactId}`,
+      { method: "POST", body: JSON.stringify(body) }
+    ),
+
+  leaderboardTelegramIntegration: () =>
+    apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration"),
+
+  leaderboardTelegramConnect: (payload: { readonly token: string }) =>
+    apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration/connect", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardTelegramTest: () =>
+    apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration/test", {
+      method: "POST",
+      body: JSON.stringify({})
+    }),
+
+  leaderboardTelegramRotateToken: (payload: { readonly token: string }) =>
+    apiRequest<LeaderboardTelegramIntegrationDto>(
+      "/api/leaderboard/telegram-integration/rotate-token",
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
+
+  leaderboardTelegramSetChannel: (payload: { readonly channelRef: string }) =>
+    apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration/channel", {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardTelegramVerifyChannel: () =>
+    apiRequest<LeaderboardTelegramIntegrationDto>(
+      "/api/leaderboard/telegram-integration/verify-channel",
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
+  leaderboardTelegramSetPosting: (payload: { readonly postingEnabled: boolean }) =>
+    apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration/posting", {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardTelegramDisconnect: (payload: { readonly confirm: true }) =>
+    apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration", {
+      method: "DELETE",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardVerifyMembership: (competitionId: string) =>
+    apiRequest<{ readonly queued: boolean; readonly jobId: string; readonly competitionId: string }>(
+      `/api/leaderboard/competitions/${competitionId}/verify-membership`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
+  leaderboardFinalize: (
+    competitionId: string,
+    payload: { readonly idempotencyKey: string; readonly confirm: true }
+  ) =>
+    apiRequest<unknown>(`/api/leaderboard/competitions/${competitionId}/finalize`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardPayouts: (competitionId?: string) => {
+    const query = new URLSearchParams();
+    if (competitionId) query.set("competitionId", competitionId);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return apiRequest<readonly LeaderboardPayoutDto[]>(`/api/leaderboard/payouts${suffix}`);
+  },
+
+  leaderboardMarkPayout: (
+    payoutId: string,
+    payload: {
+      readonly status: "PAID" | "VOID";
+      readonly notes?: string;
+      readonly confirm: true;
+      readonly idempotencyKey: string;
+    }
+  ) =>
+    apiRequest<LeaderboardPayoutDto>(`/api/leaderboard/payouts/${payoutId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    })
 };
 
 export const apiBaseUrl = baseUrl;

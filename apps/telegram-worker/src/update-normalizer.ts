@@ -1,10 +1,41 @@
 import type {
+  TelegramCallIncomingEvent,
   TelegramChatUpdatedEvent,
   TelegramMessageCreatedEvent,
   TelegramMessageDto,
   TelegramMessageUpdatedEvent
 } from "@atlas/shared";
-import { isUsableHumanDisplayTitle } from "@atlas/shared";
+import { buildIncomingCallDedupeKey, isUsableHumanDisplayTitle } from "@atlas/shared";
+
+/**
+ * Builds a workspace-scoped event for an incoming Telegram phone call ring.
+ * eventId is stable per account+call so reconnect/replay cannot fan out twice.
+ */
+export function callIncomingEvent(input: {
+  readonly workspaceId: string;
+  readonly telegramAccountId: string;
+  readonly callId: string;
+  readonly callerTelegramUserId: string;
+  readonly callerName: string | null;
+  readonly callerUsername: string | null;
+  readonly video: boolean;
+  readonly timestamp: string;
+  readonly chatId?: string | null;
+}): TelegramCallIncomingEvent {
+  return {
+    type: "telegram.call.incoming",
+    eventId: buildIncomingCallDedupeKey(input.telegramAccountId, input.callId),
+    workspaceId: input.workspaceId,
+    telegramAccountId: input.telegramAccountId,
+    callId: input.callId,
+    callerTelegramUserId: input.callerTelegramUserId,
+    callerName: input.callerName,
+    callerUsername: input.callerUsername,
+    video: input.video,
+    timestamp: input.timestamp,
+    ...(input.chatId !== undefined ? { chatId: input.chatId } : {})
+  };
+}
 
 /**
  * Builds a workspace-scoped realtime event for a persisted message.

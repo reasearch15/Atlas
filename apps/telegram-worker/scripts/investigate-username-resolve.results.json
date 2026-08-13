@@ -1,0 +1,10 @@
+{
+  "startedAt": "2026-08-06T14:33:34.283Z",
+  "library": "telegram (GramJS)",
+  "libraryVersion": "2.26.22",
+  "method": "contacts.ResolveUsername",
+  "account": null,
+  "results": [],
+  "fatalError": "\nInvalid `prisma.telegramAccount.findFirst()` invocation:\n\n\nCan't reach database server at `localhost:5432`\n\nPlease make sure your database server is running at `localhost:5432`.",
+  "finishedAt": "2026-08-06T14:33:38.375Z"
+}

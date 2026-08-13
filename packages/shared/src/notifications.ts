@@ -15,6 +15,7 @@ export const notificationTypes = [
   "URGENT_FLAG",
   "SLA_WARNING",
   "FAILED_MESSAGE",
+  "INCOMING_CALL",
   "TEST"
 ] as const;
 export type NotificationType = (typeof notificationTypes)[number];
@@ -252,6 +253,7 @@ export function notificationPriorityForType(type: NotificationType): Notificatio
     case "URGENT_FLAG":
     case "FAILED_MESSAGE":
     case "MENTION":
+    case "INCOMING_CALL":
       return "HIGH";
     case "CONVERSATION_ASSIGNED":
     case "CONVERSATION_REASSIGNED":
@@ -263,6 +265,32 @@ export function notificationPriorityForType(type: NotificationType): Notificatio
     default:
       return "DEFAULT";
   }
+}
+
+/**
+ * Builds the FCM body for an incoming Telegram call notification.
+ */
+export function formatIncomingCallNotificationBody(input: {
+  readonly callerName: string | null;
+  readonly callerUsername: string | null;
+  readonly callerTelegramUserId: string;
+}): string {
+  const name = input.callerName?.trim() || null;
+  const username = input.callerUsername?.trim().replace(/^@/, "") || null;
+  if (name && username) {
+    return `${name} (@${username}) is calling`;
+  }
+  if (name) {
+    return `${name} is calling`;
+  }
+  return `Telegram user ${input.callerTelegramUserId} is calling`;
+}
+
+/**
+ * Stable dedupe key for one incoming Telegram call on one connected account.
+ */
+export function buildIncomingCallDedupeKey(telegramAccountId: string, callId: string): string {
+  return `call:${telegramAccountId}:${callId}`;
 }
 
 export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferencesDto = {

@@ -2,6 +2,7 @@ import { Prisma, type CrmContactKind, type PrismaClient } from "@prisma/client";
 import Redis from "ioredis";
 import {
   buildCrmContactDisplayTitle,
+  buildIncomingCallDedupeKey,
   contactDisplayTitleQuality,
   isOfficialTelegramServicePeer,
   isTemporaryTelegramUserTitle,
@@ -21,7 +22,7 @@ import {
   type TelegramRuntime,
   isUsableDisplayTitle
 } from "./telegram-client";
-import { messageCreatedEvent, chatUpdatedEvent, chatUpdatedFieldsFromRow } from "./update-normalizer";
+import { messageCreatedEvent, chatUpdatedEvent, chatUpdatedFieldsFromRow, callIncomingEvent } from "./update-normalizer";
 import { toTelegramMessageDto } from "./message-dto";
 import { buildIdentityFillUpdate } from "./chat-identity";
 import { createMediaObjectStore } from "./media-storage";
@@ -35,8 +36,11 @@ import {
   normalizePeerType
 } from "./entity-resolution";
 import { applySoftDeletedMessage } from "./message-deletion";
+import { buildCallerDisplayName } from "./phone-call";
 const activeAccounts = new Map<string, TelegramRuntime>();
-
+/** In-process guard against reconnect/replay of the same PhoneCallRequested. */
+const publishedIncomingCalls = new Set<string>();
+const MAX_PUBLISHED_INCOMING_CALLS = 5_000;
 /**
  * Publishes a workspace realtime event with bounded retries.
  * Persistence already committed — this only closes the publish-after-write gap.
@@ -238,6 +242,59 @@ async function attachConnectedAccounts(
           priorMediaStorageKey: row.mediaStorageKey,
           priorThumbnailStorageKey: row.thumbnailStorageKey
         });
+      }
+    });
+
+    adapter.listenForPhoneCalls(runtime, async (call) => {
+      if (selfTelegramUserId && call.participantTelegramUserId && call.participantTelegramUserId !== selfTelegramUserId) {
+        return;
+      }
+      if (selfTelegramUserId && call.callerTelegramUserId === selfTelegramUserId) {
+        return;
+      }
+
+      const dedupeKey = buildIncomingCallDedupeKey(account.id, call.callId);
+      if (publishedIncomingCalls.has(dedupeKey)) {
+        return;
+      }
+      rememberIncomingCall(dedupeKey);
+
+      const resolved = await resolveIncomingCallCaller(prisma, adapter, runtime, {
+        workspaceId: account.workspaceId,
+        telegramAccountId: account.id,
+        callerTelegramUserId: call.callerTelegramUserId
+      });
+
+      console.info(
+        JSON.stringify({
+          event: "telegram_live.incoming_call",
+          workspaceId: account.workspaceId,
+          telegramAccountId: account.id,
+          callId: call.callId,
+          callerTelegramUserId: call.callerTelegramUserId,
+          video: call.video,
+          state: "PhoneCallRequested"
+        })
+      );
+
+      try {
+        await publishWorkspaceEventWithRetry(
+          redis,
+          callIncomingEvent({
+            workspaceId: account.workspaceId,
+            telegramAccountId: account.id,
+            callId: call.callId,
+            callerTelegramUserId: call.callerTelegramUserId,
+            callerName: resolved.callerName,
+            callerUsername: resolved.callerUsername,
+            video: call.video,
+            timestamp: new Date(call.dateUnix * 1000).toISOString(),
+            chatId: resolved.chatId
+          })
+        );
+      } catch (error) {
+        publishedIncomingCalls.delete(dedupeKey);
+        throw error;
       }
     });
   }
@@ -872,4 +929,94 @@ async function persistInboundMessage(
     chatType: chat?.chatType ?? "UNKNOWN",
     chatUsername: chat?.username ?? null
   });
+}
+
+function rememberIncomingCall(dedupeKey: string): void {
+  publishedIncomingCalls.add(dedupeKey);
+  if (publishedIncomingCalls.size <= MAX_PUBLISHED_INCOMING_CALLS) {
+    return;
+  }
+  const oldest = publishedIncomingCalls.values().next().value;
+  if (typeof oldest === "string") {
+    publishedIncomingCalls.delete(oldest);
+  }
+}
+
+/**
+ * Resolves caller display fields for an incoming call notification.
+ * Prefers persisted chat identity, then GramJS entity resolution; never throws.
+ */
+async function resolveIncomingCallCaller(
+  prisma: PrismaClient,
+  adapter: TelegramClientAdapter,
+  runtime: TelegramRuntime,
+  input: {
+    readonly workspaceId: string;
+    readonly telegramAccountId: string;
+    readonly callerTelegramUserId: string;
+  }
+): Promise<{
+  readonly callerName: string | null;
+  readonly callerUsername: string | null;
+  readonly chatId: string | null;
+}> {
+  const markedId = normalizeMarkedTelegramChatId(input.callerTelegramUserId, "PRIVATE");
+  const chat = await prisma.telegramChat.findFirst({
+    where: {
+      workspaceId: input.workspaceId,
+      telegramAccountId: input.telegramAccountId,
+      telegramChatId: { in: [input.callerTelegramUserId, markedId] }
+    },
+    select: {
+      id: true,
+      title: true,
+      firstName: true,
+      lastName: true,
+      username: true,
+      accessHash: true,
+      peerType: true,
+      chatType: true,
+      peerPhone: true
+    }
+  });
+
+  let callerName = chat
+    ? buildCallerDisplayName({
+        firstName: chat.firstName,
+        lastName: chat.lastName,
+        title: chat.title
+      })
+    : null;
+  let callerUsername = chat?.username?.trim() || null;
+
+  if (callerName && callerUsername) {
+    return { callerName, callerUsername, chatId: chat?.id ?? null };
+  }
+
+  try {
+    const identity = await adapter.resolveChatIdentity(runtime, input.callerTelegramUserId, {
+      peerType: "USER",
+      chatType: chat?.chatType ?? "PRIVATE",
+      accessHash: chat?.accessHash ?? null,
+      username: chat?.username ?? null,
+      phone: chat?.peerPhone ?? null,
+      firstName: chat?.firstName ?? null,
+      lastName: chat?.lastName ?? null
+    });
+    callerName =
+      buildCallerDisplayName({
+        firstName: identity.firstName,
+        lastName: identity.lastName,
+        title: identity.title
+      }) ?? callerName;
+    callerUsername = identity.username?.trim() || callerUsername;
+  } catch {
+    // Entity resolution is best-effort for notifications.
+  }
+
+  return {
+    callerName,
+    callerUsername,
+    chatId: chat?.id ?? null
+  };
 }

@@ -106,7 +106,9 @@ export class NotificationDispatcher {
         ttl: ttlSeconds * 1000,
         notification: {
           channelId:
-            notification.type === "INCOMING_MESSAGE" || notification.type === "NEW_CONVERSATION"
+            notification.type === "INCOMING_MESSAGE" ||
+            notification.type === "NEW_CONVERSATION" ||
+            notification.type === "INCOMING_CALL"
               ? "atlas_messages"
               : "atlas_system",
           tag: uniqueTag,

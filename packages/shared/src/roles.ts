@@ -31,7 +31,21 @@ export const permissions = [
   "customer:external-ids:view",
   "customer:email:view",
   "customer:export",
-  "customer:search-external"
+  "customer:search-external",
+  "leaderboard:read",
+  "leaderboard:deposit",
+  "leaderboard:referral:set",
+  "leaderboard:promotion",
+  "leaderboard:give-info",
+  "leaderboard:settings",
+  "leaderboard:reverse",
+  "leaderboard:referral:override",
+  "leaderboard:finalize",
+  "leaderboard:payout:mark",
+  "leaderboard:eligibility:review",
+  "leaderboard:telegram:manage",
+  "leaderboard:telegram:verify",
+  "leaderboard:eligibility:verify"
 ] as const;
 
 export type Permission = (typeof permissions)[number];
@@ -71,7 +85,21 @@ export const rolePermissions = {
     "crm:tag:apply",
     "crm:note:write",
     "crm:contact:read",
-    ...PRIVILEGED_CUSTOMER_PRIVACY
+    ...PRIVILEGED_CUSTOMER_PRIVACY,
+    "leaderboard:read",
+    "leaderboard:deposit",
+    "leaderboard:referral:set",
+    "leaderboard:promotion",
+    "leaderboard:give-info",
+    "leaderboard:settings",
+    "leaderboard:reverse",
+    "leaderboard:referral:override",
+    "leaderboard:finalize",
+    "leaderboard:payout:mark",
+    "leaderboard:eligibility:review",
+    "leaderboard:telegram:manage",
+    "leaderboard:telegram:verify",
+    "leaderboard:eligibility:verify"
   ],
   STAFF: [
     "workspace:read",
@@ -86,8 +114,13 @@ export const rolePermissions = {
     "crm:conversation:status",
     "crm:tag:apply",
     "crm:note:write",
-    "crm:contact:read"
-    // Staff intentionally has no customer:* direct-contact / export / external-search permissions.
+    "crm:contact:read",
+    "leaderboard:read",
+    "leaderboard:deposit",
+    "leaderboard:referral:set",
+    "leaderboard:promotion",
+    "leaderboard:give-info"
+    // Staff intentionally has no customer:* or Phase 3 leaderboard admin permissions.
   ]
 } satisfies Record<Role, readonly Permission[]>;
 

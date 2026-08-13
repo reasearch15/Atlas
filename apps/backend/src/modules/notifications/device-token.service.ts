@@ -286,6 +286,7 @@ export class NotificationPreferenceService {
       case "NEW_CONVERSATION":
       case "URGENT_FLAG":
       case "FAILED_MESSAGE":
+      case "INCOMING_CALL":
         return prefs.customerMessages;
       case "CONVERSATION_ASSIGNED":
       case "CONVERSATION_REASSIGNED":

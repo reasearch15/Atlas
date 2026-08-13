@@ -1,6 +1,7 @@
 import {
   buildNotificationDeepLinkPath,
   buildNotificationIdempotencyKey,
+  formatIncomingCallNotificationBody,
   isNotificationPendingStatus,
   notificationPriorityForType,
   truncateNotificationPreview,
@@ -21,6 +22,7 @@ import type {
   NotifyAssignmentInput,
   NotifyConversationReopenedInput,
   NotifyFailedMessageInput,
+  NotifyIncomingCallInput,
   NotifyIncomingMessageInput,
   NotifyTestInput,
   NotifyUrgentFlagInput
@@ -191,6 +193,60 @@ export class NotificationService {
     }
   }
 
+  /**
+   * Queues one FCM push per device for an incoming Telegram call ring.
+   * Deduped by eventKey (= call:{telegramAccountId}:{callId}) via push_notifications.idempotency_key.
+   */
+  public async notifyIncomingCall(input: NotifyIncomingCallInput): Promise<void> {
+    try {
+      const recipientIds = await this.resolveCallRecipients(input.workspaceId, input.chatId ?? null);
+      if (recipientIds.length === 0) return;
+
+      const title = "📞 Incoming Telegram Call";
+      const body = truncateNotificationPreview(
+        formatIncomingCallNotificationBody({
+          callerName: input.callerName,
+          callerUsername: input.callerUsername,
+          callerTelegramUserId: input.callerTelegramUserId
+        })
+      );
+      const customerName = input.callerName?.trim() || `Telegram user ${input.callerTelegramUserId}`;
+      const eventKey = input.eventId;
+
+      await this.fanOut({
+        workspaceId: input.workspaceId,
+        userIds: recipientIds,
+        type: "INCOMING_CALL",
+        urgent: true,
+        title,
+        body,
+        customerName,
+        chatId: input.chatId ?? null,
+        messageId: null,
+        imageUrl: null,
+        sentAt: input.timestamp,
+        eventKey,
+        customizeTitle: () => title,
+        customizeBody: (prefs) => {
+          if (!prefs.previewText || !prefs.showCustomerNames) {
+            return "Someone is calling on Telegram";
+          }
+          return body;
+        }
+      });
+    } catch (error) {
+      this.log.warn(
+        {
+          error,
+          workspaceId: input.workspaceId,
+          telegramAccountId: input.telegramAccountId,
+          callId: input.callId
+        },
+        "notifyIncomingCall failed (non-blocking)"
+      );
+    }
+  }
+
   public async notifyTest(user: RequestUser, input?: NotifyTestInput): Promise<{ queued: number }> {
     const workspaceId = input?.workspaceId ?? user.workspaceId;
     if (!workspaceId) return { queued: 0 };
@@ -241,6 +297,24 @@ export class NotificationService {
       return [chat.assignedUserId];
     }
 
+    const users = await this.app.prisma.user.findMany({
+      where: {
+        workspaceId,
+        role: { in: ["COADMIN", "STAFF"] },
+        status: "ACTIVE"
+      },
+      select: { id: true }
+    });
+    return users.map((u) => u.id);
+  }
+
+  /**
+   * Recipients for an incoming call: assigned agent when known chat, else workspace staff.
+   */
+  public async resolveCallRecipients(workspaceId: string, chatId: string | null): Promise<string[]> {
+    if (chatId) {
+      return this.resolveMessageRecipients(workspaceId, chatId);
+    }
     const users = await this.app.prisma.user.findMany({
       where: {
         workspaceId,

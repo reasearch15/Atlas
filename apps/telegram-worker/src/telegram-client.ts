@@ -20,6 +20,7 @@ import {
   type PeerResolutionHints,
   type ResolvedTelegramPeer
 } from "./entity-resolution";
+import { parseIncomingPhoneCallRequested } from "./phone-call";
 
 export interface TelegramApiCredentials {
   readonly apiId: number;
@@ -512,6 +513,42 @@ export class TelegramClientAdapter {
       throw error;
     }
     return { deletedIds: ids.map(String) };
+  }
+
+  /**
+   * Registers a handler for incoming Telegram phone-call ring updates.
+   * Detection only — never answers, declines, or touches VoIP signaling.
+   */
+  public listenForPhoneCalls(
+    runtime: TelegramRuntime,
+    handler: (call: {
+      readonly callId: string;
+      readonly callerTelegramUserId: string;
+      readonly participantTelegramUserId: string;
+      readonly video: boolean;
+      readonly dateUnix: number;
+    }) => Promise<void>
+  ): void {
+    runtime.client.addEventHandler((update: unknown) => {
+      void (async () => {
+        try {
+          const parsed = parseIncomingPhoneCallRequested(update);
+          if (!parsed) {
+            return;
+          }
+          await handler(parsed);
+        } catch (error) {
+          const safe = sanitizeTelegramError(error, false);
+          console.error(
+            JSON.stringify({
+              event: "telegram_live.phone_call_handler_failed",
+              code: safe.code ?? safe.name,
+              message: safe.message
+            })
+          );
+        }
+      })();
+    });
   }
 
   /**

@@ -1,0 +1,132 @@
+import { z } from "zod";
+
+export const leaderboardDepositBodySchema = z.object({
+  crmContactId: z.string().uuid(),
+  amountCents: z.number().int().positive().max(100_000_000),
+  idempotencyKey: z.string().min(8).max(160),
+  reason: z.string().max(500).optional()
+});
+
+export const leaderboardReferralBodySchema = z.object({
+  referrerCrmContactId: z.string().uuid(),
+  referredCrmContactId: z.string().uuid(),
+  idempotencyKey: z.string().min(8).max(160)
+});
+
+export const leaderboardPromotionBodySchema = z.object({
+  crmContactId: z.string().uuid(),
+  idempotencyKey: z.string().min(8).max(160),
+  reason: z.string().max(500).optional()
+});
+
+export const leaderboardGiveInfoBodySchema = z.object({
+  crmContactId: z.string().uuid(),
+  chatId: z.string().uuid(),
+  idempotencyKey: z.string().min(8).max(160)
+});
+
+export const leaderboardStandingsQuerySchema = z.object({
+  filter: z.enum(["TOP_10", "TOP_50", "ALL", "REFERRERS", "RECENTLY_CHANGED"]).default("TOP_50"),
+  q: z.string().trim().max(120).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50)
+});
+
+export const leaderboardPlayerSearchQuerySchema = z.object({
+  q: z.string().trim().min(1).max(120),
+  excludeContactId: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(25).default(10)
+});
+
+export const leaderboardContactParamsSchema = z.object({
+  crmContactId: z.string().uuid()
+});
+
+export const leaderboardEnabledBodySchema = z.object({
+  enabled: z.boolean(),
+  confirmDisable: z.boolean().optional()
+});
+
+export const leaderboardPoolRateBodySchema = z.object({
+  poolRateBps: z.union([z.literal(200), z.literal(300), z.literal(400), z.literal(500)]),
+  reason: z.string().trim().min(1).max(500).optional()
+});
+
+export const leaderboardEventsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+  type: z.string().trim().max(64).optional(),
+  crmContactId: z.string().uuid().optional()
+});
+
+export const leaderboardReverseEventBodySchema = z.object({
+  reason: z.string().trim().min(3).max(500),
+  idempotencyKey: z.string().min(8).max(160)
+});
+
+export const leaderboardReferralOverrideBodySchema = z.object({
+  newReferrerCrmContactId: z.string().uuid(),
+  reason: z.string().trim().min(3).max(500),
+  idempotencyKey: z.string().min(8).max(160)
+});
+
+export const leaderboardFinalizeBodySchema = z.object({
+  idempotencyKey: z.string().min(8).max(160),
+  confirm: z.literal(true)
+});
+
+export const leaderboardEligibilityBodySchema = z.object({
+  membershipStatus: z.enum(["ELIGIBLE", "NOT_ELIGIBLE", "PENDING_REVIEW"]),
+  reason: z.string().trim().min(1).max(500).optional(),
+  ineligibilityReason: z.string().trim().max(120).optional(),
+  idempotencyKey: z.string().min(8).max(160),
+  /** Required to override a prior TELEGRAM_BOT_API ELIGIBLE/NOT_ELIGIBLE decision. */
+  explicitOverride: z.boolean().optional()
+});
+
+export const leaderboardTelegramConnectBodySchema = z.object({
+  token: z.string().trim().min(20).max(200)
+});
+
+export const leaderboardTelegramRotateTokenBodySchema = z.object({
+  token: z.string().trim().min(20).max(200)
+});
+
+export const leaderboardTelegramChannelBodySchema = z.object({
+  channelRef: z.string().trim().min(1).max(120)
+});
+
+export const leaderboardTelegramPostingBodySchema = z.object({
+  postingEnabled: z.boolean()
+});
+
+export const leaderboardTelegramDisconnectBodySchema = z.object({
+  confirm: z.literal(true)
+});
+
+export const leaderboardPayoutMarkBodySchema = z.object({
+  status: z.enum(["PAID", "VOID"]),
+  notes: z.string().trim().max(500).optional(),
+  confirm: z.literal(true),
+  idempotencyKey: z.string().min(8).max(160)
+});
+
+export const leaderboardIdParamsSchema = z.object({
+  id: z.string().uuid()
+});
+
+export const leaderboardEventParamsSchema = z.object({
+  eventId: z.string().uuid()
+});
+
+export const leaderboardCompetitionParamsSchema = z.object({
+  competitionId: z.string().uuid()
+});
+
+export const leaderboardReferralParamsSchema = z.object({
+  referralId: z.string().uuid()
+});
+
+export const leaderboardPayoutParamsSchema = z.object({
+  payoutId: z.string().uuid()
+});

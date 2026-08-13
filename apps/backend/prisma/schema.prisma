@@ -227,6 +227,7 @@ enum NotificationType {
   URGENT_FLAG
   SLA_WARNING
   FAILED_MESSAGE
+  INCOMING_CALL
   TEST
 }
 
@@ -243,6 +244,69 @@ enum NotificationDeliveryStatus {
   CANCELLED
   SKIPPED
   INVALID_TOKEN
+}
+
+enum LeaderboardCompetitionStatus {
+  SCHEDULED
+  ACTIVE
+  FROZEN
+  FINALIZED
+  CANCELLED
+}
+
+enum LeaderboardEventType {
+  DEPOSIT
+  DEPOSIT_REVERSAL
+  REFERRAL_MILESTONE
+  REFERRAL_MILESTONE_REVERSAL
+  PROMOTION
+  PROMOTION_REVERSAL
+  MANUAL_ADJUSTMENT
+}
+
+enum ReferralMilestoneCode {
+  FIRST_10
+  CUM_50
+  CUM_100
+  CUM_250
+}
+
+enum ReferralMilestoneAwardStatus {
+  ACTIVE
+  REVERSED
+}
+
+enum GiveawayPayoutStatus {
+  UNPAID
+  PAID
+  VOID
+}
+
+enum PrizeMembershipStatus {
+  ELIGIBLE
+  NOT_ELIGIBLE
+  PENDING_REVIEW
+}
+
+enum LeaderboardEligibilityVerificationSource {
+  MANUAL
+  TELEGRAM_BOT_API
+}
+
+enum LeaderboardTelegramJobType {
+  REFRESH_PUBLIC_LEADERBOARD
+  POST_RANK_ANNOUNCEMENT
+  VERIFY_MEMBERSHIP
+  POST_PUBLIC_RESULTS
+}
+
+enum LeaderboardTelegramJobStatus {
+  QUEUED
+  DISPATCHING
+  SUCCEEDED
+  RETRY_SCHEDULED
+  FAILED
+  CANCELLED
 }
 
 model Workspace {
@@ -278,6 +342,21 @@ model Workspace {
   notificationPreferences NotificationPreference[]
   notificationDeliveryLogs NotificationDeliveryLog[]
   pushNotifications PushNotification[]
+  leaderboardSettings LeaderboardSettings[]
+  leaderboardCompetitions LeaderboardCompetition[]
+  leaderboardEvents LeaderboardEvent[]
+  leaderboardStandings LeaderboardStanding[]
+  leaderboardReferrals LeaderboardReferral[]
+  leaderboardPlayerStats LeaderboardPlayerStats[]
+  leaderboardParticipants LeaderboardParticipant[]
+  referralMilestoneAwards ReferralMilestoneAward[]
+  promotionAwards PromotionAward[]
+  poolRateHistory PoolRateHistory[]
+  competitionSnapshots CompetitionSnapshot[]
+  giveawayPayouts GiveawayPayout[]
+  giveawayEligibilityCandidates GiveawayEligibilityCandidate[]
+  leaderboardBotIntegrations LeaderboardBotIntegration[]
+  leaderboardTelegramOutbox LeaderboardTelegramOutbox[]
 
   @@map("workspaces")
 }
@@ -324,6 +403,30 @@ model User {
   notificationPreference   NotificationPreference?
   notificationDeliveryLogs NotificationDeliveryLog[]
   pushNotifications        PushNotification[]
+  leaderboardSettingsUpdated LeaderboardSettings[] @relation("LeaderboardSettingsUpdatedBy")
+  leaderboardCompetitionsFinalized LeaderboardCompetition[] @relation("LeaderboardCompetitionFinalizedBy")
+  leaderboardEventsActed   LeaderboardEvent[] @relation("LeaderboardEventActor")
+  leaderboardReferralsCreated LeaderboardReferral[] @relation("LeaderboardReferralCreatedBy")
+  leaderboardReferralsOverridden LeaderboardReferral[] @relation("LeaderboardReferralOverriddenBy")
+  promotionAwardsActed     PromotionAward[] @relation("PromotionAwardActor")
+  poolRateHistoryChanged   PoolRateHistory[] @relation("PoolRateHistoryChangedBy")
+  giveawayPayoutsMarked    GiveawayPayout[] @relation("GiveawayPayoutMarkedBy")
+  giveawayEligibilityResolved GiveawayEligibilityCandidate[] @relation("GiveawayEligibilityResolvedBy")
+  ownedLeaderboardSettings LeaderboardSettings[] @relation("LeaderboardSettingsOwner")
+  ownedLeaderboardCompetitions LeaderboardCompetition[] @relation("LeaderboardCompetitionOwner")
+  ownedLeaderboardEvents LeaderboardEvent[] @relation("LeaderboardEventOwner")
+  ownedLeaderboardStandings LeaderboardStanding[] @relation("LeaderboardStandingOwner")
+  ownedLeaderboardReferrals LeaderboardReferral[] @relation("LeaderboardReferralOwner")
+  ownedLeaderboardPlayerStats LeaderboardPlayerStats[] @relation("LeaderboardPlayerStatsOwner")
+  ownedLeaderboardParticipants LeaderboardParticipant[] @relation("LeaderboardParticipantOwner")
+  createdLeaderboardParticipants LeaderboardParticipant[] @relation("LeaderboardParticipantCreatedBy")
+  ownedPromotionAwards PromotionAward[] @relation("PromotionAwardOwner")
+  ownedPoolRateHistory PoolRateHistory[] @relation("PoolRateHistoryOwner")
+  ownedCompetitionSnapshots CompetitionSnapshot[] @relation("CompetitionSnapshotOwner")
+  ownedGiveawayPayouts GiveawayPayout[] @relation("GiveawayPayoutOwner")
+  ownedGiveawayEligibilityCandidates GiveawayEligibilityCandidate[] @relation("GiveawayEligibilityOwner")
+  ownedLeaderboardBotIntegrations LeaderboardBotIntegration[] @relation("LeaderboardBotIntegrationOwner")
+  ownedLeaderboardTelegramOutbox LeaderboardTelegramOutbox[] @relation("LeaderboardTelegramOutboxOwner")
 
   @@index([username])
   @@index([workspaceId, role])
@@ -548,6 +651,15 @@ model CrmContact {
   updatedAt       DateTime       @updatedAt @map("updated_at")
   workspace       Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   chats           TelegramChat[]
+  leaderboardEvents LeaderboardEvent[]
+  leaderboardStandings LeaderboardStanding[]
+  leaderboardReferralsAsReferrer LeaderboardReferral[] @relation("LeaderboardReferrer")
+  leaderboardReferralsAsReferred LeaderboardReferral[] @relation("LeaderboardReferred")
+  leaderboardPlayerStats LeaderboardPlayerStats[]
+  leaderboardParticipants LeaderboardParticipant[]
+  promotionAwards PromotionAward[]
+  giveawayPayouts GiveawayPayout[]
+  giveawayEligibilityCandidates GiveawayEligibilityCandidate[]
 
   @@unique([workspaceId, telegramPeerId])
   @@index([workspaceId, lastSeenAt])
@@ -967,4 +1079,425 @@ model PushNotification {
   @@index([expiresAt, status])
   @@index([deviceTokenId, status])
   @@map("push_notifications")
+}
+
+/// Coadmin-owned kill switch + pool contribution settings for the giveaway/leaderboard.
+model LeaderboardSettings {
+  id                  String   @id @default(uuid()) @db.Uuid
+  workspaceId         String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId  String   @unique @map("owner_coadmin_user_id") @db.Uuid
+  enabled             Boolean  @default(false)
+  poolRateBps         Int      @default(200) @map("pool_rate_bps")
+  timezone            String   @default("America/Chicago") @db.VarChar(64)
+  updatedByUserId     String?  @map("updated_by_user_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+  workspace           Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin        User      @relation("LeaderboardSettingsOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  updatedBy           User?     @relation("LeaderboardSettingsUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@map("leaderboard_settings")
+}
+
+/// Durable binding: CrmContact participates in exactly one Coadmin leaderboard per workspace.
+/// Transfer between Coadmins is unsupported in Phase 1.2.
+model LeaderboardParticipant {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  crmContactId       String   @map("crm_contact_id") @db.Uuid
+  createdByUserId    String?  @map("created_by_user_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User      @relation("LeaderboardParticipantOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  crmContact         CrmContact @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  createdBy          User?     @relation("LeaderboardParticipantCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([workspaceId, crmContactId])
+  @@unique([ownerCoadminUserId, crmContactId])
+  @@index([workspaceId, ownerCoadminUserId])
+  @@map("leaderboard_participants")
+}
+
+/// Biweekly competition window. Boundaries are UTC instants from America/Chicago; records are per-Coadmin.
+model LeaderboardCompetition {
+  id                         String                       @id @default(uuid()) @db.Uuid
+  workspaceId                String                       @map("workspace_id") @db.Uuid
+  ownerCoadminUserId         String                       @map("owner_coadmin_user_id") @db.Uuid
+  sequence                   Int
+  startsAt                   DateTime                     @map("starts_at")
+  endsAt                     DateTime                     @map("ends_at")
+  status                     LeaderboardCompetitionStatus @default(SCHEDULED)
+  prizePoolCents             Int                          @default(0) @map("prize_pool_cents")
+  frozenAt                   DateTime?                    @map("frozen_at")
+  finalizedAt                DateTime?                    @map("finalized_at")
+  finalizedByUserId          String?                      @map("finalized_by_user_id") @db.Uuid
+  finalizationIdempotencyKey String?                      @unique @map("finalization_idempotency_key") @db.VarChar(160)
+  createdAt                  DateTime                     @default(now()) @map("created_at")
+  updatedAt                  DateTime                     @updatedAt @map("updated_at")
+  workspace                  Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin               User                         @relation("LeaderboardCompetitionOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  finalizedBy                User?                        @relation("LeaderboardCompetitionFinalizedBy", fields: [finalizedByUserId], references: [id], onDelete: SetNull)
+  events                     LeaderboardEvent[]
+  standings                  LeaderboardStanding[]
+  promotionAwards            PromotionAward[]
+  poolRateHistory            PoolRateHistory[]
+  snapshot                   CompetitionSnapshot?
+  payouts                    GiveawayPayout[]
+  eligibilityCandidates      GiveawayEligibilityCandidate[]
+  referralMilestoneAwards    ReferralMilestoneAward[]
+  telegramOutbox             LeaderboardTelegramOutbox[]
+
+  @@unique([ownerCoadminUserId, sequence])
+  @@index([workspaceId, ownerCoadminUserId, status])
+  @@index([ownerCoadminUserId, startsAt, endsAt])
+  @@map("leaderboard_competitions")
+}
+
+/// Append-only leaderboard ledger. Source of truth for points and pool effects.
+model LeaderboardEvent {
+  id                    String               @id @default(uuid()) @db.Uuid
+  workspaceId           String               @map("workspace_id") @db.Uuid
+  ownerCoadminUserId    String               @map("owner_coadmin_user_id") @db.Uuid
+  competitionId         String               @map("competition_id") @db.Uuid
+  crmContactId          String               @map("crm_contact_id") @db.Uuid
+  type                  LeaderboardEventType
+  pointsDelta           Int                  @map("points_delta")
+  depositAmountCents    Int?                 @map("deposit_amount_cents")
+  poolContributionCents Int?                 @map("pool_contribution_cents")
+  poolRateBpsApplied    Int?                 @map("pool_rate_bps_applied")
+  actorUserId           String?              @map("actor_user_id") @db.Uuid
+  reason                String?              @db.VarChar(500)
+  metadataJson          Json                 @default("{}") @map("metadata_json")
+  occurredAt            DateTime             @map("occurred_at")
+  idempotencyKey        String               @unique @map("idempotency_key") @db.VarChar(160)
+  reversesEventId       String?              @unique @map("reverses_event_id") @db.Uuid
+  createdAt             DateTime             @default(now()) @map("created_at")
+  workspace             Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin          User                 @relation("LeaderboardEventOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition           LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  crmContact            CrmContact           @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  actor                 User?                @relation("LeaderboardEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  reversesEvent         LeaderboardEvent?    @relation("LeaderboardEventReversal", fields: [reversesEventId], references: [id], onDelete: Restrict)
+  reversedByEvent       LeaderboardEvent?    @relation("LeaderboardEventReversal")
+  milestoneAwards       ReferralMilestoneAward[] @relation("MilestoneAwardEvent")
+  milestoneReversals    ReferralMilestoneAward[] @relation("MilestoneReversalEvent")
+  promotionAward        PromotionAward?
+  standingLastEvents    LeaderboardStanding[] @relation("StandingLastEvent")
+
+  @@index([ownerCoadminUserId, competitionId, occurredAt])
+  @@index([competitionId, crmContactId, occurredAt])
+  @@index([competitionId, type])
+  @@map("leaderboard_events")
+}
+
+/// Materialized per-competition player standing. Reconstructible from LeaderboardEvent.
+model LeaderboardStanding {
+  id                      String   @id @default(uuid()) @db.Uuid
+  workspaceId             String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId      String   @map("owner_coadmin_user_id") @db.Uuid
+  competitionId           String   @map("competition_id") @db.Uuid
+  crmContactId            String   @map("crm_contact_id") @db.Uuid
+  totalPoints             Int      @default(0) @map("total_points")
+  depositPoints           Int      @default(0) @map("deposit_points")
+  referralPoints          Int      @default(0) @map("referral_points")
+  promotionPoints         Int      @default(0) @map("promotion_points")
+  qualifyingDepositCents  Int      @default(0) @map("qualifying_deposit_cents")
+  successfulReferralCount Int      @default(0) @map("successful_referral_count")
+  pointsReachedAt         DateTime @map("points_reached_at")
+  lastEventId             String?  @map("last_event_id") @db.Uuid
+  lastEventAt             DateTime? @map("last_event_at")
+  lastEventType           LeaderboardEventType? @map("last_event_type")
+  lastEventReason         String?  @map("last_event_reason") @db.VarChar(500)
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
+  workspace               Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin            User      @relation("LeaderboardStandingOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition             LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  crmContact              CrmContact @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  lastEvent               LeaderboardEvent? @relation("StandingLastEvent", fields: [lastEventId], references: [id], onDelete: SetNull)
+
+  @@unique([competitionId, crmContactId])
+  @@index([competitionId, totalPoints, pointsReachedAt])
+  @@index([ownerCoadminUserId, competitionId])
+  @@map("leaderboard_standings")
+}
+
+/// Lifetime referral relationship scoped to one Coadmin. Persists across competitions.
+model LeaderboardReferral {
+  id                           String   @id @default(uuid()) @db.Uuid
+  workspaceId                  String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId           String   @map("owner_coadmin_user_id") @db.Uuid
+  referrerCrmContactId         String   @map("referrer_crm_contact_id") @db.Uuid
+  referredCrmContactId         String   @map("referred_crm_contact_id") @db.Uuid
+  createdByUserId              String?  @map("created_by_user_id") @db.Uuid
+  originalReferrerCrmContactId String?  @map("original_referrer_crm_contact_id") @db.Uuid
+  overriddenAt                 DateTime? @map("overridden_at")
+  overriddenByUserId           String?  @map("overridden_by_user_id") @db.Uuid
+  overrideReason               String?  @map("override_reason") @db.VarChar(500)
+  createdAt                    DateTime @default(now()) @map("created_at")
+  updatedAt                    DateTime @updatedAt @map("updated_at")
+  workspace                    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin                 User      @relation("LeaderboardReferralOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  referrer                     CrmContact @relation("LeaderboardReferrer", fields: [referrerCrmContactId], references: [id], onDelete: Restrict)
+  referred                     CrmContact @relation("LeaderboardReferred", fields: [referredCrmContactId], references: [id], onDelete: Restrict)
+  createdBy                    User? @relation("LeaderboardReferralCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  overriddenBy                 User? @relation("LeaderboardReferralOverriddenBy", fields: [overriddenByUserId], references: [id], onDelete: SetNull)
+  milestoneAwards              ReferralMilestoneAward[]
+
+  @@unique([ownerCoadminUserId, referredCrmContactId])
+  @@index([ownerCoadminUserId, referrerCrmContactId])
+  @@map("leaderboard_referrals")
+}
+
+/// Materialized lifetime qualifying deposits per Coadmin for referral milestones.
+model LeaderboardPlayerStats {
+  id                             String   @id @default(uuid()) @db.Uuid
+  workspaceId                    String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId             String   @map("owner_coadmin_user_id") @db.Uuid
+  crmContactId                   String   @map("crm_contact_id") @db.Uuid
+  lifetimeQualifyingDepositCents Int      @default(0) @map("lifetime_qualifying_deposit_cents")
+  createdAt                      DateTime @default(now()) @map("created_at")
+  updatedAt                      DateTime @updatedAt @map("updated_at")
+  workspace                      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin                   User      @relation("LeaderboardPlayerStatsOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  crmContact                     CrmContact @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+
+  @@unique([ownerCoadminUserId, crmContactId])
+  @@index([workspaceId, ownerCoadminUserId])
+  @@map("leaderboard_player_stats")
+}
+
+/// Milestone award rows support ACTIVE → REVERSED → re-award via new generation row.
+model ReferralMilestoneAward {
+  id               String                       @id @default(uuid()) @db.Uuid
+  workspaceId      String                       @map("workspace_id") @db.Uuid
+  referralId       String                       @map("referral_id") @db.Uuid
+  competitionId    String                       @map("competition_id") @db.Uuid
+  milestoneCode    ReferralMilestoneCode        @map("milestone_code")
+  thresholdCents   Int                          @map("threshold_cents")
+  points           Int
+  status           ReferralMilestoneAwardStatus @default(ACTIVE)
+  generation       Int                          @default(1)
+  awardEventId     String                       @map("award_event_id") @db.Uuid
+  reversalEventId  String?                      @map("reversal_event_id") @db.Uuid
+  awardedAt        DateTime                     @map("awarded_at")
+  reversedAt       DateTime?                    @map("reversed_at")
+  createdAt        DateTime                     @default(now()) @map("created_at")
+  workspace        Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  referral         LeaderboardReferral          @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  competition      LeaderboardCompetition       @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  awardEvent       LeaderboardEvent             @relation("MilestoneAwardEvent", fields: [awardEventId], references: [id], onDelete: Restrict)
+  reversalEvent    LeaderboardEvent?            @relation("MilestoneReversalEvent", fields: [reversalEventId], references: [id], onDelete: SetNull)
+
+  @@unique([referralId, milestoneCode, generation])
+  @@index([referralId, status])
+  @@index([competitionId])
+  @@map("referral_milestone_awards")
+}
+
+model PromotionAward {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  competitionId      String   @map("competition_id") @db.Uuid
+  crmContactId       String   @map("crm_contact_id") @db.Uuid
+  points             Int
+  eventId            String   @unique @map("event_id") @db.Uuid
+  actorUserId        String?  @map("actor_user_id") @db.Uuid
+  idempotencyKey     String   @unique @map("idempotency_key") @db.VarChar(160)
+  createdAt          DateTime @default(now()) @map("created_at")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User      @relation("PromotionAwardOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition        LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  crmContact         CrmContact @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  event              LeaderboardEvent @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  actor              User? @relation("PromotionAwardActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([ownerCoadminUserId, crmContactId, createdAt])
+  @@index([competitionId, crmContactId, createdAt])
+  @@map("promotion_awards")
+}
+
+model PoolRateHistory {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  competitionId      String?  @map("competition_id") @db.Uuid
+  rateBps            Int      @map("rate_bps")
+  effectiveFrom      DateTime @map("effective_from")
+  changedByUserId    String?  @map("changed_by_user_id") @db.Uuid
+  reason             String?  @db.VarChar(500)
+  createdAt          DateTime @default(now()) @map("created_at")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User      @relation("PoolRateHistoryOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition        LeaderboardCompetition? @relation(fields: [competitionId], references: [id], onDelete: SetNull)
+  changedBy          User? @relation("PoolRateHistoryChangedBy", fields: [changedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([ownerCoadminUserId, effectiveFrom])
+  @@map("pool_rate_history")
+}
+
+model CompetitionSnapshot {
+  id                 String    @id @default(uuid()) @db.Uuid
+  competitionId      String    @unique @map("competition_id") @db.Uuid
+  workspaceId        String    @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String    @map("owner_coadmin_user_id") @db.Uuid
+  frozenAt           DateTime  @map("frozen_at")
+  prizePoolCents     Int       @map("prize_pool_cents")
+  /** True score ordering at freeze (membership-agnostic). Immutable after freeze. */
+  top10Json          Json      @map("top10_json")
+  /** Top 3 by score at freeze (ranking only — not prize winners). Immutable after freeze. */
+  top3Json           Json      @map("top3_json")
+  standingsHash      String    @map("standings_hash") @db.VarChar(128)
+  metricsJson        Json      @default("{}") @map("metrics_json")
+  /** Prize winners locked at finalize. Null until FINALIZED. Immutable afterward. */
+  winnersJson        Json?     @map("winners_json")
+  winnersLockedAt    DateTime? @map("winners_locked_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User      @relation("CompetitionSnapshotOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition        LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+
+  @@index([ownerCoadminUserId])
+  @@map("competition_snapshots")
+}
+
+/**
+ * Frozen ranking candidates with prize-membership eligibility.
+ * Membership lookup is supplied later by a Telegram verification layer — not performed here.
+ */
+model GiveawayEligibilityCandidate {
+  id                       String                                    @id @default(uuid()) @db.Uuid
+  workspaceId              String                                    @map("workspace_id") @db.Uuid
+  ownerCoadminUserId       String                                    @map("owner_coadmin_user_id") @db.Uuid
+  competitionId            String                                    @map("competition_id") @db.Uuid
+  crmContactId             String                                    @map("crm_contact_id") @db.Uuid
+  leaderboardRank          Int                                       @map("leaderboard_rank")
+  totalPoints              Int                                       @map("total_points")
+  membershipStatus         PrizeMembershipStatus                     @default(PENDING_REVIEW) @map("membership_status")
+  ineligibilityReason      String?                                   @map("ineligibility_reason") @db.VarChar(120)
+  resolvedAt               DateTime?                                 @map("resolved_at")
+  resolvedByUserId         String?                                   @map("resolved_by_user_id") @db.Uuid
+  resolutionReason         String?                                   @map("resolution_reason") @db.VarChar(500)
+  verificationSource       LeaderboardEligibilityVerificationSource? @map("verification_source")
+  telegramChatMemberStatus String?                                   @map("telegram_chat_member_status") @db.VarChar(40)
+  verifiedChannelId        String?                                   @map("verified_channel_id") @db.VarChar(64)
+  botIntegrationId         String?                                   @map("bot_integration_id") @db.Uuid
+  verificationCheckedAt    DateTime?                                 @map("verification_checked_at")
+  verificationErrorCode    String?                                   @map("verification_error_code") @db.VarChar(120)
+  verificationErrorMessage String?                                   @map("verification_error_message") @db.VarChar(500)
+  createdAt                DateTime                                  @default(now()) @map("created_at")
+  updatedAt                DateTime                                  @updatedAt @map("updated_at")
+  workspace                Workspace                                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin             User                                      @relation("GiveawayEligibilityOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition              LeaderboardCompetition                    @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  crmContact               CrmContact                                @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  resolvedBy               User?                                     @relation("GiveawayEligibilityResolvedBy", fields: [resolvedByUserId], references: [id], onDelete: SetNull)
+  botIntegration           LeaderboardBotIntegration?                @relation(fields: [botIntegrationId], references: [id], onDelete: SetNull)
+
+  @@unique([competitionId, crmContactId])
+  @@unique([competitionId, leaderboardRank])
+  @@index([competitionId, membershipStatus, leaderboardRank])
+  @@index([ownerCoadminUserId, competitionId])
+  @@map("giveaway_eligibility_candidates")
+}
+
+model GiveawayPayout {
+  id                 String               @id @default(uuid()) @db.Uuid
+  workspaceId        String               @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String               @map("owner_coadmin_user_id") @db.Uuid
+  competitionId      String               @map("competition_id") @db.Uuid
+  /** Prize position 1–3 (may differ from leaderboard rank when ineligible players are skipped). */
+  prizeRank          Int                  @map("prize_rank")
+  /** Frozen leaderboard rank of this winner at competition freeze. */
+  leaderboardRank    Int                  @map("leaderboard_rank")
+  crmContactId       String               @map("crm_contact_id") @db.Uuid
+  points             Int
+  payoutCents        Int                  @map("payout_cents")
+  status             GiveawayPayoutStatus @default(UNPAID)
+  paidAt             DateTime?            @map("paid_at")
+  paidByUserId       String?              @map("paid_by_user_id") @db.Uuid
+  notes              String?              @db.VarChar(500)
+  createdAt          DateTime             @default(now()) @map("created_at")
+  updatedAt          DateTime             @updatedAt @map("updated_at")
+  workspace          Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User                 @relation("GiveawayPayoutOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition        LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  crmContact         CrmContact           @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  paidBy             User?                @relation("GiveawayPayoutMarkedBy", fields: [paidByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([competitionId, prizeRank])
+  @@index([ownerCoadminUserId, competitionId])
+  @@map("giveaway_payouts")
+}
+
+/// Per-Coadmin dedicated Bot API bot for public leaderboard + channel membership checks.
+/// Never uses GramJS user sessions. Bot token stored encrypted only.
+model LeaderboardBotIntegration {
+  id                            String                         @id @default(uuid()) @db.Uuid
+  workspaceId                   String                         @map("workspace_id") @db.Uuid
+  ownerCoadminUserId            String                         @unique @map("owner_coadmin_user_id") @db.Uuid
+  encryptedBotToken             Json                           @map("encrypted_bot_token")
+  botTelegramUserId             String?                        @map("bot_telegram_user_id") @db.VarChar(32)
+  botUsername                   String?                        @map("bot_username") @db.VarChar(120)
+  botDisplayName                String?                        @map("bot_display_name") @db.VarChar(200)
+  /** Stable Telegram channel/chat id used for BOTH public posts and prize membership. */
+  channelId                     String?                        @map("channel_id") @db.VarChar(64)
+  channelTitle                  String?                        @map("channel_title") @db.VarChar(255)
+  channelUsername               String?                        @map("channel_username") @db.VarChar(120)
+  postingEnabled                Boolean                        @default(false) @map("posting_enabled")
+  connectedAt                   DateTime                       @default(now()) @map("connected_at")
+  lastVerifiedAt                DateTime?                      @map("last_verified_at")
+  lastChannelVerifiedAt         DateTime?                      @map("last_channel_verified_at")
+  lastSuccessfulPostAt          DateTime?                      @map("last_successful_post_at")
+  lastMembershipCheckAt         DateTime?                      @map("last_membership_check_at")
+  persistentMessageId           String?                        @map("persistent_message_id") @db.VarChar(64)
+  persistentMessageCompetitionId String?                       @map("persistent_message_competition_id") @db.Uuid
+  /** Last publicly posted Top 10 snapshot for conservative rank announcements. */
+  lastPublicTop10Json           Json?                          @map("last_public_top10_json")
+  lastError                     String?                        @map("last_error") @db.VarChar(500)
+  disconnectedAt                DateTime?                      @map("disconnected_at")
+  createdAt                     DateTime                       @default(now()) @map("created_at")
+  updatedAt                     DateTime                       @updatedAt @map("updated_at")
+  workspace                     Workspace                      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin                  User                           @relation("LeaderboardBotIntegrationOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  outboxJobs                    LeaderboardTelegramOutbox[]
+  eligibilityCandidates         GiveawayEligibilityCandidate[]
+
+  @@index([workspaceId])
+  @@map("leaderboard_bot_integrations")
+}
+
+/// Durable leaderboard Telegram outbox. Postgres is source of truth; BullMQ wakes workers.
+model LeaderboardTelegramOutbox {
+  id                 String                       @id @default(uuid()) @db.Uuid
+  workspaceId        String                       @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String                       @map("owner_coadmin_user_id") @db.Uuid
+  competitionId      String?                      @map("competition_id") @db.Uuid
+  botIntegrationId   String?                      @map("bot_integration_id") @db.Uuid
+  jobType            LeaderboardTelegramJobType   @map("job_type")
+  status             LeaderboardTelegramJobStatus @default(QUEUED)
+  idempotencyKey     String                       @unique @map("idempotency_key") @db.VarChar(320)
+  payloadJson        Json                         @default("{}") @map("payload_json")
+  attemptCount       Int                          @default(0) @map("attempt_count")
+  nextAttemptAt      DateTime?                    @map("next_attempt_at")
+  lastErrorCode      String?                      @map("last_error_code") @db.VarChar(120)
+  lastErrorMessage   String?                      @map("last_error_message") @db.VarChar(500)
+  succeededAt        DateTime?                    @map("succeeded_at")
+  failedAt           DateTime?                    @map("failed_at")
+  cancelledAt        DateTime?                    @map("cancelled_at")
+  createdAt          DateTime                     @default(now()) @map("created_at")
+  updatedAt          DateTime                     @updatedAt @map("updated_at")
+  workspace          Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User                         @relation("LeaderboardTelegramOutboxOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition        LeaderboardCompetition?      @relation(fields: [competitionId], references: [id], onDelete: SetNull)
+  botIntegration     LeaderboardBotIntegration?   @relation(fields: [botIntegrationId], references: [id], onDelete: SetNull)
+
+  @@index([status, nextAttemptAt])
+  @@index([ownerCoadminUserId, status])
+  @@index([competitionId])
+  @@map("leaderboard_telegram_outbox")
 }

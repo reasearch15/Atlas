@@ -65,6 +65,20 @@ export type NotifyUrgentFlagInput = {
   readonly eventId?: string;
 };
 
+export type NotifyIncomingCallInput = {
+  readonly workspaceId: string;
+  readonly telegramAccountId: string;
+  readonly callId: string;
+  readonly callerTelegramUserId: string;
+  readonly callerName: string | null;
+  readonly callerUsername: string | null;
+  readonly video: boolean;
+  readonly timestamp: string;
+  readonly chatId?: string | null;
+  /** Stable dedupe key — typically `call:{telegramAccountId}:{callId}`. */
+  readonly eventId: string;
+};
+
 export type NotifyTestInput = {
   readonly workspaceId: string;
   readonly userId: string;

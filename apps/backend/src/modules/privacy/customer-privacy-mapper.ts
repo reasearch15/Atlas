@@ -300,6 +300,15 @@ export function applyRealtimeEventPrivacy(
       })
     };
   }
+  if (event.type === "telegram.call.incoming") {
+    const caps = customerPrivacyCapabilities(role);
+    if (canViewAnyDirectContact(caps)) return event;
+    return {
+      ...event,
+      callerUsername: null,
+      callerName: event.callerName?.trim() || `Telegram user ${event.callerTelegramUserId}`
+    };
+  }
   // Internal team messages contain operator names only — no customer identifiers.
   return event;
 }
