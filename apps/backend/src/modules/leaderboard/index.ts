@@ -21,6 +21,7 @@ export * from "./auto-bind";
 export * from "./backfill-participants";
 export * from "./telegram/public-display-name";
 export * from "./telegram/membership-status";
+export * from "./telegram/competition-end-display";
 export * from "./telegram/leaderboard-telegram.client";
 export * from "./telegram/leaderboard-telegram.outbox";
 export * from "./telegram/leaderboard-telegram.integration-service";

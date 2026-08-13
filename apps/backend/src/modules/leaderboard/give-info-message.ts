@@ -1,4 +1,6 @@
+import { LEADERBOARD_TIMEZONE } from "./leaderboard.constants";
 import { formatPrizePoolDisplay } from "./leaderboard.standing-helpers";
+import { formatCompetitionEndDisplay } from "./telegram/competition-end-display";
 
 export interface GiveInfoMessageInput {
   readonly rank: number;
@@ -10,9 +12,10 @@ export interface GiveInfoMessageInput {
   readonly prizePoolCents: number;
   readonly competitionEndsAt: Date;
   readonly isFirst: boolean;
+  /** Defaults to America/Chicago competition schedule timezone. */
+  readonly timezone?: string;
 }
 
-const ENDS_COPY = "Competition ends Tuesday at 9 PM Texas time.";
 const SUBSCRIPTION_REMINDER =
   "Reminder: prize winners must be subscribed to the official leaderboard channel at the eligibility deadline.";
 
@@ -23,10 +26,14 @@ const SUBSCRIPTION_REMINDER =
 export function buildGiveInfoMessage(input: GiveInfoMessageInput): string {
   const pool = formatPrizePoolDisplay(input.prizePoolCents);
   const status = buildStatusLine(input);
+  const ends = formatCompetitionEndDisplay(
+    input.competitionEndsAt,
+    input.timezone ?? LEADERBOARD_TIMEZONE
+  );
   return [
     status,
     `Current prize pool: ${pool}.`,
-    ENDS_COPY,
+    `Competition ends ${ends}.`,
     SUBSCRIPTION_REMINDER
   ].join(" ");
 }

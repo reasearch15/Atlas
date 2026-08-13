@@ -34,6 +34,7 @@ describe("formatPublicLeaderboardMessage", () => {
     expect(text).toContain("10. David Lee — 390 pts");
     expect(text).toContain(PUBLIC_LEADERBOARD_SUBSCRIPTION_REMINDER);
     expect(text).toContain("🔥 Keep climbing.");
+    expect(text).toContain("⏰ Ends Monday, Aug 17 at 9:00 PM CDT");
     expect(text).not.toMatch(/\b2%\b/);
     expect(text).not.toMatch(/rateBps/i);
   });

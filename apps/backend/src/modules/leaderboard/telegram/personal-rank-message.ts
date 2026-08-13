@@ -1,5 +1,6 @@
 import { formatPrizePoolDisplay } from "../leaderboard.standing-helpers";
 import type { TelegramInlineKeyboardMarkup } from "./leaderboard-telegram.client";
+import { formatCompetitionEndDisplay } from "./competition-end-display";
 
 /** Inline keyboard callback_data for player wheel spin. Never includes IDs. */
 export const LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA = "leaderboard:wheel:spin";
@@ -294,18 +295,7 @@ function buildGapLines(input: PersonalRankMessageInput): string[] {
 }
 
 function formatEndsLine(endsAt: Date, timezone: string): string {
-  try {
-    const formatted = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone || "America/Chicago",
-      weekday: "long",
-      hour: "numeric",
-      minute: "2-digit",
-      timeZoneName: "short"
-    }).format(endsAt);
-    return `Ends ${formatted}`;
-  } catch {
-    return "Ends Tuesday 9 PM Texas time";
-  }
+  return `Ends ${formatCompetitionEndDisplay(endsAt, timezone)}`;
 }
 
 export const PERSONAL_RANK_PRIZE_REMINDER = PRIZE_REMINDER;

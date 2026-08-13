@@ -20,7 +20,7 @@ describe("buildGiveInfoMessage", () => {
     expect(text).toContain("leading by 40");
     expect(text).toContain("over #2");
     expect(text).toContain("Current prize pool: $123.45.");
-    expect(text).toContain("Competition ends Tuesday at 9 PM Texas time.");
+    expect(text).toContain("Competition ends Monday, Aug 17 at 9:00 PM CDT.");
     expect(text).toMatch(/subscribed to the official leaderboard channel/i);
     expect(text).not.toMatch(/\d+%/);
     expect(text).not.toMatch(/bps/i);
@@ -44,7 +44,7 @@ describe("buildGiveInfoMessage", () => {
     expect(text).toContain("15 points behind #4");
     expect(text).toContain("60 points away from Top 3");
     expect(text).toContain("Current prize pool: $50.00.");
-    expect(text).toContain("Competition ends Tuesday at 9 PM Texas time.");
+    expect(text).toContain("Competition ends Monday, Aug 17 at 9:00 PM CDT.");
     expect(text).toMatch(/subscribed to the official leaderboard channel/i);
   });
 

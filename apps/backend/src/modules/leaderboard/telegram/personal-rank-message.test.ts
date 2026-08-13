@@ -24,6 +24,7 @@ describe("formatPersonalRankMessage", () => {
     expect(text).toContain("18 points behind #6");
     expect(text).toContain("61 points away from Top 3");
     expect(text).toContain("$620.00");
+    expect(text).toContain("⏰ Ends Monday, Aug 17 at 9:00 PM CDT");
     expect(text).not.toMatch(/2%|rateBps|poolRate/i);
   });
 

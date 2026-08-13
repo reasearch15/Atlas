@@ -1,5 +1,6 @@
 import { formatPrizePoolDisplay } from "../leaderboard.standing-helpers";
 import type { AnnouncementKind } from "./announcement-policy";
+import { formatCompetitionEndDisplay } from "./competition-end-display";
 import { toPublicLeaderboardDisplayName } from "./public-display-name";
 
 const RULE_LINE = "━━━━━━━━━━━━━━━━━━";
@@ -59,7 +60,7 @@ export function formatPublicLeaderboardMessage(input: PublicLeaderboardMessageIn
 
   const standingLines = rows.map((row) => formatStandingLine(row));
   const pool = formatPrizePoolDisplay(input.prizePoolCents);
-  const ends = formatEndsLine(input.endsAt, input.timezone);
+  const ends = formatCompetitionEndDisplay(input.endsAt, input.timezone);
   const botUsername = normalizeBotUsername(input.botUsername);
   const cta = botUsername
     ? `➡️ Check your personal rank:\nhttps://t.me/${botUsername}?start=rank`
@@ -169,21 +170,6 @@ function medalForRank(rank: number): string {
   if (rank === 2) return "🥈 ";
   if (rank === 3) return "🥉 ";
   return "";
-}
-
-function formatEndsLine(endsAt: Date, timezone: string): string {
-  try {
-    const formatted = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone || "America/Chicago",
-      weekday: "long",
-      hour: "numeric",
-      minute: "2-digit",
-      timeZoneName: "short"
-    }).format(endsAt);
-    return formatted;
-  } catch {
-    return "Tuesday, 9:00 PM Texas time";
-  }
 }
 
 export const PUBLIC_LEADERBOARD_SUBSCRIPTION_REMINDER = SUBSCRIPTION_REMINDER;
