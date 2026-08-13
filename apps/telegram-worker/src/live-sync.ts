@@ -748,16 +748,20 @@ async function linkCrmContact(
     chatType: identity?.chatType ?? "PRIVATE"
   });
 
+  const resolvedKind = resolveCrmContactKind(identity?.chatType, message.telegramChatId);
+
   const contact = await prisma.crmContact.upsert({
     where: { workspaceId_telegramPeerId: { workspaceId, telegramPeerId: message.telegramChatId } },
     update: {
       lastSeenAt: new Date(),
-      ...(identity?.username ? { username: identity.username } : {})
+      ...(identity?.username ? { username: identity.username } : {}),
+      // Heal stuck UNKNOWN person rows once we know the peer kind (or can infer user id).
+      ...(resolvedKind !== "UNKNOWN" ? { kind: resolvedKind } : {})
     },
     create: {
       workspaceId,
       telegramPeerId: message.telegramChatId,
-      kind: mapContactKind(identity?.chatType),
+      kind: resolvedKind,
       displayName,
       username: identity?.username ?? null
     }
@@ -855,6 +859,18 @@ function mapContactKind(chatType: string | undefined): CrmContactKind {
   if (chatType === "PRIVATE") return "PRIVATE";
   if (chatType === "GROUP" || chatType === "SUPERGROUP") return "GROUP";
   if (chatType === "CHANNEL") return "CHANNEL";
+  return "UNKNOWN";
+}
+
+/**
+ * Resolve CRM kind for a peer. Matches TelegramChat create default: when chatType is
+ * missing/UNKNOWN but the peer id is a positive Telegram user id, treat as PRIVATE.
+ * This prevents permanent UNKNOWN CRM rows that auto-bind previously skipped.
+ */
+function resolveCrmContactKind(chatType: string | undefined, telegramPeerId: string): CrmContactKind {
+  const mapped = mapContactKind(chatType);
+  if (mapped !== "UNKNOWN") return mapped;
+  if (/^\d+$/.test(telegramPeerId)) return "PRIVATE";
   return "UNKNOWN";
 }
 

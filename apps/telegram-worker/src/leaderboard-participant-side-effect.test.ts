@@ -46,7 +46,18 @@ function createWorkerPrisma() {
     _state: state,
     crmContact: {
       findFirst: async ({ where }: any) =>
-        state.contacts.find((c) => c.id === where.id && c.workspaceId === where.workspaceId) ?? null
+        state.contacts.find((c) => c.id === where.id && c.workspaceId === where.workspaceId) ?? null,
+      updateMany: async ({ where, data }: any) => {
+        let count = 0;
+        for (const row of state.contacts) {
+          if (where.id && row.id !== where.id) continue;
+          if (where.workspaceId && row.workspaceId !== where.workspaceId) continue;
+          if (where.kind && row.kind !== where.kind) continue;
+          Object.assign(row, data);
+          count += 1;
+        }
+        return { count };
+      }
     },
     user: {
       findMany: async ({ where, take }: any) => {
@@ -154,6 +165,27 @@ describe("telegram-worker leaderboard participant side effect", () => {
     const result = await ensureLeaderboardParticipantBestEffort(prisma, workspaceId, contactId);
     expect(result.status).toBe("BOUND");
     expect(prisma._state.participants).toHaveLength(1);
+  });
+
+  it("binds UNKNOWN numeric person contacts (Picasso-like live-sync gap)", async () => {
+    const prisma = createWorkerPrisma();
+    prisma._state.users.push({
+      id: ownerA,
+      workspaceId,
+      role: "COADMIN",
+      status: "ACTIVE"
+    });
+    prisma._state.contacts.push({
+      id: contactId,
+      workspaceId,
+      kind: "UNKNOWN",
+      telegramPeerId: "424747"
+    });
+
+    const result = await ensureLeaderboardParticipantBestEffort(prisma, workspaceId, contactId);
+    expect(result.status).toBe("BOUND");
+    expect(prisma._state.participants).toHaveLength(1);
+    expect(prisma._state.contacts.find((c) => c.id === contactId)?.kind).toBe("PRIVATE");
   });
 
   it("skips CHANNEL contacts", async () => {

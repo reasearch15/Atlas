@@ -38,7 +38,7 @@ export type TryAutoBindResult =
 
 /**
  * Attempts an idempotent participant bind using PrismaLeaderboardService semantics.
- * Never transfers. CRM/backfill only bind PRIVATE contacts with numeric telegramPeerId.
+ * Never transfers. CRM/backfill bind PRIVATE (and UNKNOWN person) contacts with numeric telegramPeerId.
  */
 export async function tryAutoBindParticipant(
   prisma: PrismaClient,
@@ -99,6 +99,19 @@ export async function tryAutoBindParticipant(
       crmContactId: input.crmContactId,
       ...(input.actorUserId !== undefined ? { createdByUserId: input.actorUserId } : {})
     });
+    // Heal historical UNKNOWN person contacts to PRIVATE once bound.
+    if (classified.kind === "UNKNOWN") {
+      await prisma.crmContact
+        .updateMany({
+          where: {
+            id: input.crmContactId,
+            workspaceId: input.workspaceId,
+            kind: "UNKNOWN"
+          },
+          data: { kind: "PRIVATE" }
+        })
+        .catch(() => undefined);
+    }
     return { status: "BOUND", ownerCoadminUserId: row.ownerCoadminUserId, dryRun: false };
   } catch (error) {
     if (error instanceof LeaderboardError) {

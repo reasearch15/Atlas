@@ -3,7 +3,7 @@
  *
  * Kept inside the telegram-worker (no @atlas/backend dependency) but mirrors
  * backend ownership rules:
- * - PRIVATE + numeric telegramPeerId only
+ * - PRIVATE or UNKNOWN person + numeric telegramPeerId
  * - exactly one ACTIVE COADMIN owner
  * - never transfer / never guess
  * - never throw into message ingestion
@@ -16,6 +16,12 @@ export type LiveSyncAutoBindResult =
   | { readonly status: "BOUND" | "ALREADY_BOUND"; readonly ownerCoadminUserId: string }
   | { readonly status: "SKIPPED"; readonly reason: string }
   | { readonly status: "FAILED"; readonly reason: string };
+
+function isEligiblePrivatePerson(kind: string, telegramPeerId: string): boolean {
+  if (kind === "CHANNEL" || kind === "GROUP") return false;
+  if (kind !== "PRIVATE" && kind !== "UNKNOWN") return false;
+  return NUMERIC_PEER.test(telegramPeerId);
+}
 
 /**
  * Idempotent side effect: ensure a PRIVATE Atlas contact has a LeaderboardParticipant
@@ -32,9 +38,14 @@ export async function ensureLeaderboardParticipantBestEffort(
       select: { id: true, kind: true, telegramPeerId: true }
     });
     if (!contact) return { status: "SKIPPED", reason: "CONTACT_MISSING" };
-    if (contact.kind !== "PRIVATE") return { status: "SKIPPED", reason: "NOT_PRIVATE" };
-    if (!NUMERIC_PEER.test(contact.telegramPeerId)) {
-      return { status: "SKIPPED", reason: "NON_NUMERIC_PEER" };
+    if (!isEligiblePrivatePerson(contact.kind, contact.telegramPeerId)) {
+      if (contact.kind === "CHANNEL" || contact.kind === "GROUP") {
+        return { status: "SKIPPED", reason: "NOT_PRIVATE" };
+      }
+      if (!NUMERIC_PEER.test(contact.telegramPeerId)) {
+        return { status: "SKIPPED", reason: "NON_NUMERIC_PEER" };
+      }
+      return { status: "SKIPPED", reason: "NOT_PRIVATE" };
     }
 
     const coadmins = await prisma.user.findMany({
@@ -59,6 +70,7 @@ export async function ensureLeaderboardParticipantBestEffort(
       if (existing[0]!.ownerCoadminUserId !== ownerCoadminUserId) {
         return { status: "SKIPPED", reason: "TRANSFER_REJECTED" };
       }
+      await healUnknownKind(prisma, workspaceId, crmContactId, contact.kind);
       await ensureZeroStandingIfActive(prisma, workspaceId, ownerCoadminUserId, crmContactId);
       return { status: "ALREADY_BOUND", ownerCoadminUserId };
     }
@@ -91,6 +103,7 @@ export async function ensureLeaderboardParticipantBestEffort(
         select: { ownerCoadminUserId: true }
       });
       if (raced.length === 1 && raced[0]!.ownerCoadminUserId === ownerCoadminUserId) {
+        await healUnknownKind(prisma, workspaceId, crmContactId, contact.kind);
         await ensureZeroStandingIfActive(prisma, workspaceId, ownerCoadminUserId, crmContactId);
         return { status: "ALREADY_BOUND", ownerCoadminUserId };
       }
@@ -100,6 +113,7 @@ export async function ensureLeaderboardParticipantBestEffort(
       throw error;
     }
 
+    await healUnknownKind(prisma, workspaceId, crmContactId, contact.kind);
     await ensureZeroStandingIfActive(prisma, workspaceId, ownerCoadminUserId, crmContactId);
     return { status: "BOUND", ownerCoadminUserId };
   } catch (error) {
@@ -108,6 +122,21 @@ export async function ensureLeaderboardParticipantBestEffort(
       reason: error instanceof Error ? error.message : "LIVE_SYNC_AUTO_BIND_FAILED"
     };
   }
+}
+
+async function healUnknownKind(
+  prisma: PrismaClient,
+  workspaceId: string,
+  crmContactId: string,
+  kind: string
+): Promise<void> {
+  if (kind !== "UNKNOWN") return;
+  await prisma.crmContact
+    .updateMany({
+      where: { id: crmContactId, workspaceId, kind: "UNKNOWN" },
+      data: { kind: "PRIVATE" }
+    })
+    .catch(() => undefined);
 }
 
 async function ensureZeroStandingIfActive(

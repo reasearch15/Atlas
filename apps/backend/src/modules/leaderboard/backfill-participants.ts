@@ -1,6 +1,9 @@
 import type { PrismaClient } from "@prisma/client";
 import { tryAutoBindParticipant } from "./auto-bind";
-import { resolveDeterministicLeaderboardOwner } from "./ownership-resolution";
+import {
+  isAutoBindEligiblePrivatePerson,
+  resolveDeterministicLeaderboardOwner
+} from "./ownership-resolution";
 import { PrismaLeaderboardService } from "./leaderboard.prisma-service";
 
 export interface BackfillParticipantsInput {
@@ -14,7 +17,9 @@ export interface BackfillParticipantsInput {
 export interface BackfillParticipantsCounts {
   scanned: number;
   eligible: number;
+  /** Alias of newlyBound for older callers. */
   bound: number;
+  newlyBound: number;
   alreadyBound: number;
   ambiguous: number;
   conflict: number;
@@ -25,8 +30,8 @@ export interface BackfillParticipantsCounts {
 }
 
 /**
- * Backfills LeaderboardParticipant rows for PRIVATE numeric CRM contacts when the
- * workspace has exactly one ACTIVE COADMIN (or when that owner matches scope).
+ * Backfills LeaderboardParticipant rows for PRIVATE (and UNKNOWN person) CRM contacts
+ * when the workspace has exactly one ACTIVE COADMIN (or when that owner matches scope).
  * Never runs at app startup — invoke via script or Coadmin API only.
  */
 export async function backfillLeaderboardParticipants(
@@ -41,6 +46,7 @@ export async function backfillLeaderboardParticipants(
     scanned: 0,
     eligible: 0,
     bound: 0,
+    newlyBound: 0,
     alreadyBound: 0,
     ambiguous: 0,
     conflict: 0,
@@ -53,12 +59,17 @@ export async function backfillLeaderboardParticipants(
   if (deterministicOwnerId == null) {
     // Still scan eligible contacts for reporting when possible, but never bind.
     const contacts = await prisma.crmContact.findMany({
-      where: { workspaceId: input.workspaceId, kind: "PRIVATE" },
-      select: { id: true, telegramPeerId: true },
+      where: {
+        workspaceId: input.workspaceId,
+        kind: { in: ["PRIVATE", "UNKNOWN"] }
+      },
+      select: { id: true, kind: true, telegramPeerId: true },
       ...(input.limit != null ? { take: input.limit } : {})
     });
     counts.scanned = contacts.length;
-    counts.eligible = contacts.filter((c) => /^\d+$/.test(c.telegramPeerId)).length;
+    counts.eligible = contacts.filter((c) =>
+      isAutoBindEligiblePrivatePerson({ kind: c.kind, telegramPeerId: c.telegramPeerId })
+    ).length;
     counts.ambiguous = counts.eligible > 0 ? counts.eligible : 1;
     return counts;
   }
@@ -72,16 +83,17 @@ export async function backfillLeaderboardParticipants(
   const contacts = await prisma.crmContact.findMany({
     where: {
       workspaceId: input.workspaceId,
-      kind: "PRIVATE"
+      // PRIVATE is intentional; UNKNOWN catches the live-sync kind stuck-as-UNKNOWN gap.
+      kind: { in: ["PRIVATE", "UNKNOWN"] }
     },
-    select: { id: true, telegramPeerId: true },
+    select: { id: true, kind: true, telegramPeerId: true },
     orderBy: { createdAt: "asc" },
     ...(input.limit != null ? { take: input.limit } : {})
   });
 
   for (const contact of contacts) {
     counts.scanned += 1;
-    if (!/^\d+$/.test(contact.telegramPeerId)) {
+    if (!isAutoBindEligiblePrivatePerson({ kind: contact.kind, telegramPeerId: contact.telegramPeerId })) {
       counts.skipped += 1;
       continue;
     }
@@ -103,6 +115,7 @@ export async function backfillLeaderboardParticipants(
     switch (result.status) {
       case "BOUND":
         counts.bound += 1;
+        counts.newlyBound += 1;
         break;
       case "ALREADY_BOUND":
         counts.alreadyBound += 1;

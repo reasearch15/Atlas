@@ -95,9 +95,30 @@ function createPrisma() {
       },
       findMany: async ({ where, take }: any) => {
         let rows = state.contacts.filter((c) => c.workspaceId === where.workspaceId);
-        if (where.kind) rows = rows.filter((c) => c.kind === where.kind);
+        if (where.kind) {
+          if (typeof where.kind === "string") {
+            rows = rows.filter((c) => c.kind === where.kind);
+          } else if (Array.isArray(where.kind.in)) {
+            rows = rows.filter((c) => where.kind.in.includes(c.kind));
+          }
+        }
         if (typeof take === "number") rows = rows.slice(0, take);
-        return rows.map((c) => ({ id: c.id, telegramPeerId: c.telegramPeerId }));
+        return rows.map((c) => ({
+          id: c.id,
+          kind: c.kind,
+          telegramPeerId: c.telegramPeerId
+        }));
+      },
+      updateMany: async ({ where, data }: any) => {
+        let count = 0;
+        for (const row of state.contacts) {
+          if (where.id && row.id !== where.id) continue;
+          if (where.workspaceId && row.workspaceId !== where.workspaceId) continue;
+          if (where.kind && row.kind !== where.kind) continue;
+          Object.assign(row, data);
+          count += 1;
+        }
+        return { count };
       }
     },
     leaderboardParticipant: {
@@ -625,6 +646,7 @@ describe("automatic PRIVATE contact participant binding", () => {
     );
     expect(first.scanned).toBe(3);
     expect(first.eligible).toBe(2);
+    expect(first.newlyBound).toBe(1);
     expect(first.bound).toBe(1);
     expect(first.alreadyBound).toBe(1);
     expect(first.skipped).toBeGreaterThanOrEqual(1);
@@ -634,6 +656,7 @@ describe("automatic PRIVATE contact participant binding", () => {
       { workspaceId, dryRun: false },
       domain
     );
+    expect(second.newlyBound).toBe(0);
     expect(second.bound).toBe(0);
     expect(second.alreadyBound).toBe(2);
     expect(prisma._state.participants).toHaveLength(2);
@@ -655,6 +678,65 @@ describe("automatic PRIVATE contact participant binding", () => {
       25
     );
     expect(hits.map((h) => h.crmContactId)).toContain(contactPicasso);
+  });
+
+  it("backfill binds Picasso-like UNKNOWN numeric person contacts that live-sync left unbound", async () => {
+    const prisma = createPrisma();
+    prisma._state.users.push({
+      id: ownerA,
+      workspaceId,
+      role: "COADMIN",
+      status: "ACTIVE"
+    });
+    // Historical gap: TelegramChat treated as PRIVATE, CRM kind stuck UNKNOWN.
+    prisma._state.contacts.push({
+      id: contactPicasso,
+      workspaceId,
+      kind: "UNKNOWN",
+      telegramPeerId: "424747",
+      displayName: "Picasso",
+      username: "Piccaso47"
+    });
+
+    const first = await backfillLeaderboardParticipants(
+      prisma,
+      { workspaceId, dryRun: false },
+      new TestDomain(prisma) as never
+    );
+    expect(first.scanned).toBe(1);
+    expect(first.eligible).toBe(1);
+    expect(first.newlyBound).toBe(1);
+    expect(prisma._state.participants).toHaveLength(1);
+    expect(prisma._state.participants[0]?.crmContactId).toBe(contactPicasso);
+    // Heal UNKNOWN → PRIVATE after bind.
+    expect(prisma._state.contacts.find((c) => c.id === contactPicasso)?.kind).toBe("PRIVATE");
+
+    const second = await backfillLeaderboardParticipants(
+      prisma,
+      { workspaceId, dryRun: false },
+      new TestDomain(prisma) as never
+    );
+    expect(second.newlyBound).toBe(0);
+    expect(second.alreadyBound).toBe(1);
+
+    const picasso = prisma._state.contacts.find((c) => c.id === contactPicasso)!;
+    for (const q of ["p", "pic", "pica", "picass", "Picasso", "@Piccaso47"]) {
+      const hits = selectPlayerSearchHits(
+        [
+          {
+            crmContactId: picasso.id,
+            displayName: picasso.displayName,
+            username: picasso.username,
+            chatFirstNames: ["Picasso"],
+            chatLastNames: [],
+            chatUsernames: ["Piccaso47"]
+          }
+        ],
+        q,
+        25
+      );
+      expect(hits.map((h) => h.crmContactId)).toContain(contactPicasso);
+    }
   });
 
   it("never binds Coadmin A contact into Coadmin B scope when sole owner is A", async () => {

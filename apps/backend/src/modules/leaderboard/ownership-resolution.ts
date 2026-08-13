@@ -26,6 +26,28 @@ export interface ClassifyContactBindabilityResult {
 
 type PrismaLike = Pick<PrismaClient, "user" | "leaderboardParticipant" | "crmContact">;
 
+/** Telegram user ids are positive decimals; channels/groups use negative / -100… ids. */
+export const NUMERIC_TELEGRAM_USER_PEER = /^\d+$/;
+
+/**
+ * True for person contacts eligible for automatic LeaderboardParticipant binding.
+ *
+ * PRIVATE is the happy path. UNKNOWN + numeric user peer is also eligible because
+ * live-sync historically created CRM rows as UNKNOWN while TelegramChat defaulted to PRIVATE
+ * — those contacts must not stay unbound forever.
+ *
+ * CHANNEL / GROUP are never eligible.
+ */
+export function isAutoBindEligiblePrivatePerson(input: {
+  readonly kind: string | null | undefined;
+  readonly telegramPeerId: string | null | undefined;
+}): boolean {
+  const kind = input.kind ?? "UNKNOWN";
+  if (kind === "CHANNEL" || kind === "GROUP") return false;
+  if (kind !== "PRIVATE" && kind !== "UNKNOWN") return false;
+  return NUMERIC_TELEGRAM_USER_PEER.test(input.telegramPeerId ?? "");
+}
+
 /**
  * Deterministic sole ACTIVE COADMIN owner for a workspace.
  * Exactly 1 → that user id; 0 or >1 → null (never guess via primaryCoadminId).
@@ -93,7 +115,7 @@ export async function classifyContactBindability(
     };
   }
 
-  if (contact.kind !== "PRIVATE") {
+  if (contact.kind === "CHANNEL" || contact.kind === "GROUP") {
     return {
       classification: "NOT_PRIVATE",
       deterministicOwnerId,
@@ -102,9 +124,19 @@ export async function classifyContactBindability(
       telegramPeerId: contact.telegramPeerId
     };
   }
-  if (!/^\d+$/.test(contact.telegramPeerId)) {
+  if (!NUMERIC_TELEGRAM_USER_PEER.test(contact.telegramPeerId)) {
     return {
       classification: "NON_NUMERIC_PEER",
+      deterministicOwnerId,
+      existingOwnerId: null,
+      kind: contact.kind,
+      telegramPeerId: contact.telegramPeerId
+    };
+  }
+  // PRIVATE or UNKNOWN with numeric user peer — both bindable.
+  if (contact.kind !== "PRIVATE" && contact.kind !== "UNKNOWN") {
+    return {
+      classification: "NOT_PRIVATE",
       deterministicOwnerId,
       existingOwnerId: null,
       kind: contact.kind,
