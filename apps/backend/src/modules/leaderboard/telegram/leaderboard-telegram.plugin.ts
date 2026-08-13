@@ -6,7 +6,7 @@ import {
 import { LeaderboardBotUpdateHandler } from "./bot-update-handler";
 import { HttpLeaderboardTelegramClient } from "./leaderboard-telegram.client";
 import { LeaderboardTelegramIntegrationService } from "./leaderboard-telegram.integration-service";
-import { LeaderboardTelegramOutboxService } from "./leaderboard-telegram.outbox";
+import { LeaderboardTelegramOutboxService, resumeLeaderboardTelegramOutboxSafely } from "./leaderboard-telegram.outbox";
 import { LeaderboardTelegramProcessor } from "./leaderboard-telegram.processor";
 import { startLeaderboardTelegramWorker } from "./leaderboard-telegram.worker";
 
@@ -58,13 +58,11 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
   startLeaderboardTelegramWorker(app);
 
   setTimeout(() => {
-    void outbox.resumePending().then((count) => {
-      if (count > 0) app.log.info({ count }, "Resumed pending leaderboard Telegram outbox jobs");
-    });
+    void resumeLeaderboardTelegramOutboxSafely(outbox, app.log);
   }, 2_500);
 
   const maintenance = setInterval(() => {
-    void outbox.resumePending();
+    void resumeLeaderboardTelegramOutboxSafely(outbox, app.log);
   }, 60_000);
   maintenance.unref?.();
 

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { LeaderboardTelegramJobType, Prisma, PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
 
@@ -21,10 +21,11 @@ export type LeaderboardTelegramWakeFn = (jobId: string, delayMs?: number) => Pro
  * BullMQ wake-only job id. Must be unique per wake attempt so a completed
  * `removeOnComplete` retention entry cannot suppress a later re-queue of the
  * same Postgres outbox row (static `:now` caused permanent QUEUED stalls).
+ *
+ * BullMQ 5.x rejects custom job IDs containing `:`.
  */
 export function buildLeaderboardTelegramWakeJobId(outboxId: string, nowMs = Date.now()): string {
-  const nonce = randomBytes(4).toString("hex");
-  return `lb-tg:${outboxId}:${nowMs}:${nonce}`.slice(0, 120);
+  return `lb-tg-${outboxId}-${nowMs}-${randomUUID()}`.slice(0, 120);
 }
 
 /** Payload marker: mutations arrived while a refresh was already DISPATCHING. */
@@ -288,9 +289,16 @@ export class LeaderboardTelegramOutboxService {
       take: limit,
       select: { id: true }
     });
+    let firstWakeError: unknown;
     for (const row of rows) {
-      await this.wakeBestEffort(row.id, 0);
+      try {
+        await this.wake(row.id, 0);
+      } catch (error) {
+        // Continue waking remaining rows; surface one error so safeResume can log it.
+        firstWakeError ??= error;
+      }
     }
+    if (firstWakeError) throw firstWakeError;
     return rows.length;
   }
 
@@ -424,6 +432,29 @@ export class LeaderboardTelegramOutboxService {
       await this.wakeBestEffort(raced.id, 0);
       return raced.id;
     }
+  }
+}
+
+export type LeaderboardTelegramResumeLogger = {
+  info: (obj: unknown, msg?: string) => void;
+  error: (obj: unknown, msg?: string) => void;
+};
+
+/**
+ * Runs outbox resume without ever rejecting to the caller.
+ * BullMQ / Redis / Prisma failures are logged; Atlas stays up.
+ */
+export async function resumeLeaderboardTelegramOutboxSafely(
+  outbox: Pick<LeaderboardTelegramOutboxService, "resumePending">,
+  log: LeaderboardTelegramResumeLogger
+): Promise<void> {
+  try {
+    const count = await outbox.resumePending();
+    if (count > 0) {
+      log.info({ count }, "Resumed pending leaderboard Telegram outbox jobs");
+    }
+  } catch (error) {
+    log.error({ err: error }, "Failed to resume pending leaderboard Telegram outbox jobs");
   }
 }
 

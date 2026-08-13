@@ -8,7 +8,8 @@ import {
 } from "./leaderboard-telegram.client";
 import {
   buildLeaderboardTelegramWakeJobId,
-  LeaderboardTelegramOutboxService
+  LeaderboardTelegramOutboxService,
+  resumeLeaderboardTelegramOutboxSafely
 } from "./leaderboard-telegram.outbox";
 import { LeaderboardTelegramProcessor } from "./leaderboard-telegram.processor";
 import { createMemoryPrisma } from "./leaderboard-telegram.test-harness";
@@ -103,12 +104,14 @@ function seedRefreshReadyPrisma(options?: {
 }
 
 describe("BullMQ wake job id uniqueness", () => {
-  it("buildLeaderboardTelegramWakeJobId never uses static :now suffix", () => {
+  it("generated BullMQ custom job IDs contain no colon characters", () => {
     const id = "6af55936-1624-4e42-af24-982a645e717b";
     const a = buildLeaderboardTelegramWakeJobId(id, 1_700_000_000_000);
     const b = buildLeaderboardTelegramWakeJobId(id, 1_700_000_000_000);
-    expect(a).toContain(`lb-tg:${id}:`);
-    expect(a).not.toMatch(/:now$/);
+    expect(a).not.toContain(":");
+    expect(b).not.toContain(":");
+    expect(a.startsWith(`lb-tg-${id}-`)).toBe(true);
+    expect(a).not.toMatch(/-now$/);
     expect(a).not.toBe(b);
     expect(a.length).toBeLessThanOrEqual(120);
   });
@@ -117,6 +120,9 @@ describe("BullMQ wake job id uniqueness", () => {
     const added: Array<{ jobId: string; data: { outboxId: string } }> = [];
     const queue = {
       add: async (_name: string, data: { outboxId: string }, opts: { jobId?: string }) => {
+        if (opts.jobId?.includes(":")) {
+          throw new Error("Custom Id cannot contain :");
+        }
         added.push({ jobId: opts.jobId!, data });
         return { id: opts.jobId };
       }
@@ -131,13 +137,17 @@ describe("BullMQ wake job id uniqueness", () => {
     expect(added[0]!.jobId).not.toBe(added[1]!.jobId);
     expect(added[0]!.data.outboxId).toBe(outboxId);
     expect(added[1]!.data.outboxId).toBe(outboxId);
-    expect(added.every((j) => !j.jobId.endsWith(":now"))).toBe(true);
+    expect(added.every((j) => !j.jobId.includes(":"))).toBe(true);
+    expect(added.every((j) => !j.jobId.endsWith("-now"))).toBe(true);
   });
 
   it("delayed wakes in the same second still get distinct BullMQ job ids", async () => {
     const added: string[] = [];
     const queue = {
       add: async (_name: string, _data: unknown, opts: { jobId?: string }) => {
+        if (opts.jobId?.includes(":")) {
+          throw new Error("Custom Id cannot contain :");
+        }
         added.push(opts.jobId!);
         return { id: opts.jobId };
       }
@@ -150,6 +160,7 @@ describe("BullMQ wake job id uniqueness", () => {
     await wake(outboxId, 5_000);
 
     expect(new Set(added).size).toBe(3);
+    expect(added.every((id) => !id.includes(":"))).toBe(true);
   });
 
   it("previously completed wake exists → later wake still creates runnable job", async () => {
@@ -158,6 +169,9 @@ describe("BullMQ wake job id uniqueness", () => {
     const queue = {
       add: async (_name: string, _data: { outboxId: string }, opts: { jobId?: string }) => {
         const jobId = opts.jobId!;
+        if (jobId.includes(":")) {
+          throw new Error("Custom Id cannot contain :");
+        }
         if (completedIds.has(jobId)) {
           return { id: jobId, reused: true };
         }
@@ -202,6 +216,9 @@ describe("BullMQ wake job id uniqueness", () => {
 
     const queue = {
       add: async (_n: string, _d: unknown, opts: { jobId?: string }) => {
+        if (opts.jobId?.includes(":")) {
+          throw new Error("Custom Id cannot contain :");
+        }
         wakeIds.push(opts.jobId!);
         return { id: opts.jobId };
       }
@@ -217,6 +234,79 @@ describe("BullMQ wake job id uniqueness", () => {
     expect(wakeIds).toHaveLength(2);
     expect(wakeIds[0]).not.toBe(wakeIds[1]);
     expect(prisma._state.outbox[0].status).toBe("QUEUED");
+  });
+
+  it("resumePending BullMQ wake failure is logged via safeResume and does not crash startup", async () => {
+    const prisma = createMemoryPrisma();
+    const outboxId = crypto.randomUUID();
+    prisma._state.outbox.push({
+      id: outboxId,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      botIntegrationId: null,
+      jobType: "REFRESH_PUBLIC_LEADERBOARD",
+      status: "QUEUED",
+      idempotencyKey: `lb:refresh:${ownerA}:${competitionA}`,
+      payloadJson: { competitionId: competitionA },
+      attemptCount: 0,
+      nextAttemptAt: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      succeededAt: null,
+      failedAt: null,
+      cancelledAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+
+    const service = new LeaderboardTelegramOutboxService(prisma as never, async () => {
+      throw new Error("Custom Id cannot contain :");
+    });
+    const log = { info: vi.fn(), error: vi.fn() };
+
+    await expect(resumeLeaderboardTelegramOutboxSafely(service, log)).resolves.toBeUndefined();
+    expect(log.error).toHaveBeenCalledTimes(1);
+    expect(String(log.error.mock.calls[0]?.[1])).toMatch(/Failed to resume pending leaderboard Telegram/);
+    expect(prisma._state.outbox[0].status).toBe("QUEUED");
+  });
+});
+
+describe("resumeLeaderboardTelegramOutboxSafely", () => {
+  it("logs resumePending failure and does not reject (startup lifecycle)", async () => {
+    const errors: unknown[] = [];
+    const log = {
+      info: vi.fn(),
+      error: (obj: unknown, msg?: string) => {
+        errors.push({ obj, msg });
+      }
+    };
+    const outbox = {
+      resumePending: async () => {
+        throw new Error("Custom Id cannot contain :");
+      }
+    };
+
+    await expect(resumeLeaderboardTelegramOutboxSafely(outbox, log)).resolves.toBeUndefined();
+    expect(errors).toHaveLength(1);
+    expect(String((errors[0] as { msg?: string }).msg)).toMatch(/Failed to resume pending leaderboard Telegram/);
+  });
+
+  it("maintenance resume failure is logged and backend continues", async () => {
+    const log = { info: vi.fn(), error: vi.fn() };
+    let calls = 0;
+    const outbox = {
+      resumePending: async () => {
+        calls += 1;
+        throw new Error("Redis connection refused");
+      }
+    };
+
+    await resumeLeaderboardTelegramOutboxSafely(outbox, log);
+    await resumeLeaderboardTelegramOutboxSafely(outbox, log);
+    expect(calls).toBe(2);
+    expect(log.error).toHaveBeenCalledTimes(2);
+    expect(log.info).not.toHaveBeenCalled();
   });
 });
 
