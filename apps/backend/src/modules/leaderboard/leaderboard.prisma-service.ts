@@ -493,7 +493,10 @@ export class PrismaLeaderboardService {
   public async setReferral(input: SetReferralInput) {
     if (input.referrerCrmContactId === input.referredCrmContactId) throw selfReferralForbidden();
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+
+    // Audit MUST run after commit. AuditService uses the root Prisma client; calling it
+    // inside an interactive $transaction blocks until the ~5s timeout (prod HTTP 500).
+    const result = await this.prisma.$transaction(async (tx) => {
       await this.assertContactTx(tx, input.workspaceId, input.referrerCrmContactId);
       await this.assertContactTx(tx, input.workspaceId, input.referredCrmContactId);
       await this.lockContact(tx, input.referredCrmContactId);
@@ -531,30 +534,44 @@ export class PrismaLeaderboardService {
           now,
           input.actorUserId
         );
-        await this.audit.record({
-          workspaceId: input.workspaceId,
-          actorId: input.actorUserId,
-          action: "leaderboard.referral_set",
-          metadata: {
-            referralId: row.id,
-            ownerCoadminUserId,
-            referrerCrmContactId: row.referrerCrmContactId,
-            referredCrmContactId: row.referredCrmContactId,
-            idempotencyKey: input.idempotencyKey
-          }
-        });
-        return row;
+        return { row, ownerCoadminUserId };
       } catch (error) {
         if (isUniqueViolation(error)) throw referralAlreadyExists();
         throw error;
       }
     });
+
+    try {
+      await this.audit.record({
+        workspaceId: input.workspaceId,
+        actorId: input.actorUserId,
+        action: "leaderboard.referral_set",
+        metadata: {
+          referralId: result.row.id,
+          ownerCoadminUserId: result.ownerCoadminUserId,
+          referrerCrmContactId: result.row.referrerCrmContactId,
+          referredCrmContactId: result.row.referredCrmContactId,
+          idempotencyKey: input.idempotencyKey
+        }
+      });
+    } catch (error) {
+      // Referral already committed — never roll back or surface failure for audit alone.
+      console.error("leaderboard.referral_set audit failed after commit", {
+        referralId: result.row.id,
+        workspaceId: input.workspaceId,
+        error
+      });
+    }
+
+    return result.row;
   }
 
   public async overrideReferral(input: OverrideReferralInput) {
     if (input.newReferrerCrmContactId === input.referredCrmContactId) throw selfReferralForbidden();
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+
+    // Audit MUST run after commit (same root-client / interactive-tx hazard as deposit + setReferral).
+    const result = await this.prisma.$transaction(async (tx) => {
       await this.assertContactTx(tx, input.workspaceId, input.newReferrerCrmContactId);
       await this.assertContactTx(tx, input.workspaceId, input.referredCrmContactId);
       await this.lockContact(tx, input.referredCrmContactId);
@@ -601,21 +618,32 @@ export class PrismaLeaderboardService {
         now,
         input.actorUserId
       );
+      return { updated, ownerCoadminUserId, previous };
+    });
+
+    try {
       await this.audit.record({
         workspaceId: input.workspaceId,
         actorId: input.actorUserId,
         action: "leaderboard.referral_override",
         metadata: {
-          referralId: updated.id,
-          ownerCoadminUserId,
-          previousReferrerCrmContactId: previous,
+          referralId: result.updated.id,
+          ownerCoadminUserId: result.ownerCoadminUserId,
+          previousReferrerCrmContactId: result.previous,
           newReferrerCrmContactId: input.newReferrerCrmContactId,
           reason: input.reason,
           idempotencyKey: input.idempotencyKey
         }
       });
-      return updated;
-    });
+    } catch (error) {
+      console.error("leaderboard.referral_override audit failed after commit", {
+        referralId: result.updated.id,
+        workspaceId: input.workspaceId,
+        error
+      });
+    }
+
+    return result.updated;
   }
 
   public async recordPromotion(input: PromotionInput) {
