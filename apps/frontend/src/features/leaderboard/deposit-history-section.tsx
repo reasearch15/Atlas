@@ -86,11 +86,11 @@ export function DepositHistorySection() {
   return (
     <section className="rounded-lg border bg-white p-4 md:p-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold tracking-wide text-foreground">Deposit History</h2>
+        <h2 className="sr-only">Deposit records</h2>
         <Button
           type="button"
           variant="secondary"
-          className="h-8 px-3 text-xs"
+          className="ml-auto h-8 px-3 text-xs"
           disabled={loading}
           onClick={() => void resetAndLoadFirst()}
         >
