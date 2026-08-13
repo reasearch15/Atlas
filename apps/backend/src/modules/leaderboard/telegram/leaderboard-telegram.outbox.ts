@@ -53,7 +53,8 @@ export class LeaderboardTelegramOutboxService {
   public async enqueueRefresh(
     workspaceId: string,
     ownerCoadminUserId: string,
-    competitionId: string
+    competitionId: string,
+    options?: { readonly skipRankAnnouncements?: boolean }
   ): Promise<string> {
     return this.upsertJob({
       workspaceId,
@@ -61,7 +62,11 @@ export class LeaderboardTelegramOutboxService {
       competitionId,
       jobType: "REFRESH_PUBLIC_LEADERBOARD",
       idempotencyKey: `lb:refresh:${ownerCoadminUserId}:${competitionId}`,
-      payloadJson: { competitionId }
+      payloadJson: {
+        competitionId,
+        // Manual "Send Leaderboard" is snapshot-only; scoring-driven refresh keeps false.
+        skipRankAnnouncements: options?.skipRankAnnouncements === true
+      }
     });
   }
 
@@ -227,6 +232,21 @@ export class LeaderboardTelegramOutboxService {
     });
 
     if (existing && (PENDING_STATUSES as readonly string[]).includes(existing.status)) {
+      // Coalesce refresh payloads: announcements remain enabled if either enqueued wants them.
+      let payloadJson = input.payloadJson;
+      if (input.jobType === "REFRESH_PUBLIC_LEADERBOARD") {
+        const prev = (existing.payloadJson ?? {}) as Record<string, unknown>;
+        const prevSkip = prev.skipRankAnnouncements === true;
+        const nextSkip = input.payloadJson.skipRankAnnouncements === true;
+        payloadJson = {
+          ...input.payloadJson,
+          skipRankAnnouncements: prevSkip && nextSkip
+        };
+      }
+      await this.prisma.leaderboardTelegramOutbox.update({
+        where: { id: existing.id },
+        data: { payloadJson: payloadJson as Prisma.InputJsonValue }
+      });
       await this.wake(existing.id, 0);
       return existing.id;
     }
@@ -295,6 +315,22 @@ export class LeaderboardTelegramOutboxService {
         });
         await this.wake(reset.id, 0);
         return reset.id;
+      }
+      if ((PENDING_STATUSES as readonly string[]).includes(raced.status)) {
+        let payloadJson = input.payloadJson;
+        if (input.jobType === "REFRESH_PUBLIC_LEADERBOARD") {
+          const prev = (raced.payloadJson ?? {}) as Record<string, unknown>;
+          const prevSkip = prev.skipRankAnnouncements === true;
+          const nextSkip = input.payloadJson.skipRankAnnouncements === true;
+          payloadJson = {
+            ...input.payloadJson,
+            skipRankAnnouncements: prevSkip && nextSkip
+          };
+        }
+        await this.prisma.leaderboardTelegramOutbox.update({
+          where: { id: raced.id },
+          data: { payloadJson: payloadJson as Prisma.InputJsonValue }
+        });
       }
       await this.wake(raced.id, 0);
       return raced.id;

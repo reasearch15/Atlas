@@ -383,7 +383,8 @@ export class LeaderboardTelegramIntegrationService {
   }
 
   /**
-   * Manually queue a public leaderboard refresh for the Coadmin's verified channel.
+   * Manually queue a public leaderboard snapshot for the Coadmin's verified channel.
+   * Snapshot/publish only — never emits rank-achievement announcements.
    * Reuses REFRESH_PUBLIC_LEADERBOARD outbox coalescing (edit persistent message when present).
    */
   public async sendLatestLeaderboard(
@@ -430,7 +431,10 @@ export class LeaderboardTelegramIntegrationService {
       );
     }
 
-    const jobId = await this.outbox.enqueueRefresh(workspaceId, ownerCoadminUserId, competition.id);
+    const jobId = await this.outbox.enqueueRefresh(workspaceId, ownerCoadminUserId, competition.id, {
+      // Manual publish is a snapshot only — never emit rank-achievement side effects.
+      skipRankAnnouncements: true
+    });
     const mode = row.persistentMessageId ? "edit" : "send";
 
     await this.audit.record({

@@ -139,7 +139,13 @@ export class LeaderboardTelegramProcessor {
   }
 
   private async processRefresh(
-    row: { id: string; workspaceId: string; ownerCoadminUserId: string; competitionId: string | null },
+    row: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+      competitionId: string | null;
+      payloadJson?: unknown;
+    },
     integration: {
       id: string;
       postingEnabled: boolean;
@@ -257,8 +263,14 @@ export class LeaderboardTelegramProcessor {
       competition.id,
       integration.lastPublicTop10Json
     );
+    const skipRankAnnouncements =
+      row.payloadJson != null &&
+      typeof row.payloadJson === "object" &&
+      (row.payloadJson as { skipRankAnnouncements?: unknown }).skipRankAnnouncements === true;
     const announcements =
-      competition.status === "ACTIVE" ? detectRankAnnouncements(prevTop10, nextTop10) : [];
+      !skipRankAnnouncements && competition.status === "ACTIVE"
+        ? detectRankAnnouncements(prevTop10, nextTop10)
+        : [];
 
     await this.prisma.leaderboardBotIntegration.update({
       where: { id: integration.id },

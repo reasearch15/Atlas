@@ -852,4 +852,176 @@ describe("sendLatestLeaderboard manual refresh", () => {
     await processor.processJob(job.id);
     expect(job.status).toBe("SUCCEEDED");
   });
+
+  it("manual Send Leaderboard with 73 zero-point standings publishes one snapshot and zero achievements", async () => {
+    const prisma = createMemoryPrisma();
+    const { service, outboxSvc, client, tgState } = await readyIntegration(prisma);
+    prisma._state.competitions.push({
+      id: competitionA,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      sequence: 1,
+      prizePoolCents: 0,
+      endsAt: new Date("2026-08-18T02:00:00.000Z")
+    });
+    prisma._state.settings.push({
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      timezone: "America/Chicago"
+    });
+
+    const pointsBefore: number[] = [];
+    for (let i = 0; i < 73; i += 1) {
+      const id = `d${(0x10000000 + i).toString(16).padStart(8, "0")}-dddd-4ddd-8ddd-${(0xd00000000000 + i)
+        .toString(16)
+        .padStart(12, "0")}`;
+      prisma._state.standings.push({
+        competitionId: competitionA,
+        ownerCoadminUserId: ownerA,
+        crmContactId: id,
+        totalPoints: 0,
+        depositPoints: 0,
+        referralPoints: 0,
+        promotionPoints: 0,
+        wheelPoints: 0,
+        pointsReachedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)),
+        crmContact: { displayName: `Player ${i}`, chats: [] }
+      });
+      pointsBefore.push(0);
+    }
+
+    const eventsBefore = prisma._state.outbox.filter((r: any) => r.jobType === "POST_RANK_ANNOUNCEMENT")
+      .length;
+
+    async function runManualSend(): Promise<void> {
+      const queued = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+      const job = prisma._state.outbox.find((r: any) => r.id === queued.jobId);
+      expect(job.payloadJson?.skipRankAnnouncements).toBe(true);
+      const processor = new LeaderboardTelegramProcessor({
+        prisma: prisma as never,
+        encryptionKey,
+        outbox: outboxSvc,
+        client,
+        domain: { setMembershipEligibility: vi.fn() } as never
+      });
+      await processor.processJob(job.id);
+      expect(job.status).toBe("SUCCEEDED");
+    }
+
+    await runManualSend();
+    await runManualSend();
+
+    const channel = tgState.chats.get(-1001);
+    expect(channel).toBeTruthy();
+    const boardMessages = (channel?.messages ?? []).filter(
+      (m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD")
+    );
+    // First send creates; second edits in place (edit mode after persistentMessageId set).
+    expect(boardMessages.length).toBeGreaterThanOrEqual(1);
+    expect(boardMessages.some((m) => m.text.includes("🥇 1."))).toBe(true);
+    expect(boardMessages.some((m) => /moved from unranked/i.test(m.text))).toBe(false);
+
+    const announceJobs = prisma._state.outbox.filter((r: any) => r.jobType === "POST_RANK_ANNOUNCEMENT");
+    expect(announceJobs).toHaveLength(eventsBefore);
+
+    expect(prisma._state.standings).toHaveLength(73);
+    expect(prisma._state.standings.every((s: any) => s.totalPoints === 0)).toBe(true);
+    expect(pointsBefore.every((p) => p === 0)).toBe(true);
+  });
+
+  it("manual Send Leaderboard never turns real snapshot diffs into achievement announcements", async () => {
+    const prisma = createMemoryPrisma();
+    const { service, outboxSvc, client, tgState } = await readyIntegration(prisma);
+    prisma._state.competitions.push({
+      id: competitionA,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      sequence: 1,
+      prizePoolCents: 0,
+      endsAt: new Date("2026-08-18T02:00:00.000Z")
+    });
+    prisma._state.settings.push({
+      ownerCoadminUserId: ownerA,
+      timezone: "America/Chicago"
+    });
+
+    // Prior public snapshot without the climber.
+    prisma._state.integrations[0].lastPublicTop10Json = [
+      { crmContactId: contact1, rank: 1, displayName: "A", totalPoints: 200 },
+      { crmContactId: contact2, rank: 2, displayName: "B", totalPoints: 150 },
+      { crmContactId: contact3, rank: 3, displayName: "C", totalPoints: 100 }
+    ];
+    prisma._state.integrations[0].persistentMessageCompetitionId = competitionA;
+    prisma._state.integrations[0].persistentMessageId = "7";
+
+    prisma._state.standings.push(
+      {
+        competitionId: competitionA,
+        ownerCoadminUserId: ownerA,
+        crmContactId: contact1,
+        totalPoints: 200,
+        pointsReachedAt: new Date(),
+        crmContact: { displayName: "A", chats: [] }
+      },
+      {
+        competitionId: competitionA,
+        ownerCoadminUserId: ownerA,
+        crmContactId: contact2,
+        totalPoints: 150,
+        pointsReachedAt: new Date(),
+        crmContact: { displayName: "B", chats: [] }
+      },
+      {
+        competitionId: competitionA,
+        ownerCoadminUserId: ownerA,
+        crmContactId: contact3,
+        totalPoints: 100,
+        pointsReachedAt: new Date(),
+        crmContact: { displayName: "C", chats: [] }
+      },
+      {
+        competitionId: competitionA,
+        ownerCoadminUserId: ownerA,
+        crmContactId: contact4,
+        totalPoints: 180,
+        pointsReachedAt: new Date(),
+        crmContact: { displayName: "Climber", chats: [] }
+      }
+    );
+
+    // Seed a fake prior channel message id for edit mode.
+    tgState.chats.get(-1001)!.messages.push({ messageId: 7, text: "old board" });
+    tgState.chats.get(-1001)!.nextMessageId = 8;
+
+    const queued = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
+    const job = prisma._state.outbox.find((r: any) => r.id === queued.jobId);
+    expect(job.payloadJson?.skipRankAnnouncements).toBe(true);
+
+    const processor = new LeaderboardTelegramProcessor({
+      prisma: prisma as never,
+      encryptionKey,
+      outbox: outboxSvc,
+      client,
+      domain: { setMembershipEligibility: vi.fn() } as never
+    });
+    await processor.processJob(job.id);
+    expect(job.status).toBe("SUCCEEDED");
+
+    // Climber would be ENTER_TOP_3 / #2 under achievement detection — must not enqueue.
+    expect(
+      prisma._state.outbox.filter((r: any) => r.jobType === "POST_RANK_ANNOUNCEMENT")
+    ).toHaveLength(0);
+
+    const board = tgState.chats.get(-1001)!.messages.find((m) => m.messageId === 7);
+    expect(board?.text).toContain("BIWEEKLY LEADERBOARD");
+    expect(board?.text).toContain("Climber");
+    expect(board?.text).not.toMatch(/moved from unranked/i);
+
+    // Points untouched.
+    expect(prisma._state.standings.find((s: any) => s.crmContactId === contact4)?.totalPoints).toBe(
+      180
+    );
+  });
 });
