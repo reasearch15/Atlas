@@ -274,14 +274,20 @@ export class PrismaLeaderboardService {
   public async recordDeposit(input: DepositInput) {
     if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) throw invalidDepositAmount();
     const now = input.now ?? new Date();
-    return this.prisma.$transaction(async (tx) => {
+
+    // Audit MUST run after commit. AuditService uses the root Prisma client; calling it
+    // inside an interactive $transaction blocks until the ~5s timeout (prod HTTP 500).
+    const result = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.leaderboardEvent.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
-      if (existing) return existing;
+      if (existing) {
+        return { event: existing, created: false as const };
+      }
 
       await this.assertContactTx(tx, input.workspaceId, input.crmContactId);
-      await this.lockContact(tx, input.crmContactId);
       const ownerCoadminUserId = await this.resolveLeaderboardOwnerTx(tx, input.workspaceId, input.crmContactId);
       const settings = await this.requireEnabledSettings(tx, input.workspaceId, ownerCoadminUserId);
+      // Lock order: workspace (via ensureCurrentCompetitionTx) → contact → competition.
+      // Matches setPoolRate / lifecycle paths; avoids contact→workspace deadlock risk.
       const competition = await this.ensureCurrentCompetitionTx(
         tx,
         input.workspaceId,
@@ -289,6 +295,7 @@ export class PrismaLeaderboardService {
         now,
         true
       );
+      await this.lockContact(tx, input.crmContactId);
       await this.lockCompetition(tx, competition.id);
 
       const standing = await this.getOrCreateStandingTx(
@@ -351,21 +358,39 @@ export class PrismaLeaderboardService {
         input.actorUserId
       );
 
-      await this.audit.record({
-        workspaceId: input.workspaceId,
-        actorId: input.actorUserId,
-        action: "leaderboard.deposit",
-        metadata: {
-          eventId: event.id,
-          ownerCoadminUserId,
-          amountCents: input.amountCents,
-          pointsDelta,
-          poolContributionCents: contribution,
-          competitionId: competition.id
+      return {
+        event,
+        created: true as const,
+        audit: {
+          workspaceId: input.workspaceId,
+          actorId: input.actorUserId,
+          action: "leaderboard.deposit" as const,
+          metadata: {
+            eventId: event.id,
+            ownerCoadminUserId,
+            amountCents: input.amountCents,
+            pointsDelta,
+            poolContributionCents: contribution,
+            competitionId: competition.id
+          }
         }
-      });
-      return event;
+      };
     });
+
+    if (result.created) {
+      try {
+        await this.audit.record(result.audit);
+      } catch (error) {
+        // Deposit already committed — never roll back or surface failure for audit alone.
+        console.error("leaderboard.deposit audit failed after commit", {
+          eventId: result.event.id,
+          workspaceId: input.workspaceId,
+          error
+        });
+      }
+    }
+
+    return result.event;
   }
 
   public async reverseDeposit(input: ReverseDepositInput) {
