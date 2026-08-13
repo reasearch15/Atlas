@@ -435,6 +435,10 @@ export class LeaderboardTelegramIntegrationService {
       // Manual publish is a snapshot only — never emit rank-achievement side effects.
       skipRankAnnouncements: true
     });
+    const channelLabel =
+      row.channelTitle?.trim() ||
+      (row.channelUsername ? `@${row.channelUsername.replace(/^@/, "")}` : null) ||
+      "Telegram channel";
     const mode = row.persistentMessageId ? "edit" : "send";
 
     await this.audit.record({
@@ -446,7 +450,8 @@ export class LeaderboardTelegramIntegrationService {
         competitionId: competition.id,
         jobId,
         mode,
-        channelId: row.channelId
+        channelId: row.channelId,
+        skipRankAnnouncements: true
       }
     });
 
@@ -455,10 +460,8 @@ export class LeaderboardTelegramIntegrationService {
       jobId,
       competitionId: competition.id,
       mode,
-      message:
-        mode === "edit"
-          ? "Leaderboard refresh queued — the existing channel message will be updated."
-          : "Leaderboard refresh queued — a new channel message will be sent."
+      channelTitle: row.channelTitle?.trim() || null,
+      message: `Leaderboard sent to ${channelLabel}`
     };
   }
 

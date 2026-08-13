@@ -594,46 +594,45 @@ export function LeaderboardCoadminControls() {
                   >
                     {telegram.postingEnabled ? "Disable posting" : "Enable posting"}
                   </Button>
-                  <div className="flex flex-col gap-1">
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      className="h-8 px-3 text-xs"
-                      disabled={
-                        pending ||
-                        sendingLatest ||
-                        !telegram.channelId ||
-                        !telegram.channelVerified ||
-                        !telegram.postingEnabled
-                      }
-                      title={
-                        !telegram.postingEnabled
-                          ? "Enable posting first."
-                          : !telegram.channelVerified
-                            ? "Verify the channel first."
-                            : undefined
-                      }
-                      onClick={() =>
-                        void (async () => {
-                          setSendingLatest(true);
-                          setError(null);
-                          try {
-                            const result = await api.leaderboardTelegramSendLatest();
-                            toast.success(result.message || "Leaderboard refresh queued");
-                          } catch (actionError) {
-                            setError(mapLeaderboardError(actionError));
-                          } finally {
-                            setSendingLatest(false);
-                          }
-                        })()
-                      }
-                    >
-                      {sendingLatest ? "Sending..." : "Send Latest Leaderboard"}
-                    </Button>
-                    {!telegram.postingEnabled ? (
-                      <p className="text-[11px] text-muted-foreground">Enable posting first.</p>
-                    ) : null}
-                  </div>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    className="h-8 px-3 text-xs font-semibold"
+                    disabled={
+                      pending ||
+                      sendingLatest ||
+                      !telegram.channelId ||
+                      !telegram.channelVerified ||
+                      !telegram.postingEnabled
+                    }
+                    title={
+                      !telegram.postingEnabled
+                        ? "Enable posting first."
+                        : !telegram.channelVerified
+                          ? "Verify the channel first."
+                          : !telegram.channelId
+                            ? "Set a channel first."
+                            : "Publish the current Top 10 leaderboard snapshot to Telegram."
+                    }
+                    onClick={() =>
+                      void (async () => {
+                        setSendingLatest(true);
+                        setError(null);
+                        try {
+                          const result = await api.leaderboardTelegramSendLatest();
+                          toast.success(`✓ ${result.message}`);
+                        } catch (actionError) {
+                          const mapped = mapLeaderboardError(actionError);
+                          setError(mapped);
+                          toast.error(mapped);
+                        } finally {
+                          setSendingLatest(false);
+                        }
+                      })()
+                    }
+                  >
+                    {sendingLatest ? "Sending..." : "🏆 Send Leaderboard"}
+                  </Button>
                   {confirming === "disconnect-bot" ? (
                     <>
                       <Button
@@ -674,6 +673,15 @@ export function LeaderboardCoadminControls() {
                     </Button>
                   )}
                 </div>
+                {!telegram.postingEnabled ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    Enable posting to use Send Leaderboard.
+                  </p>
+                ) : !telegram.channelVerified ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    Verify the channel to use Send Leaderboard.
+                  </p>
+                ) : null}
 
                 <div className="flex flex-wrap items-end gap-2">
                   <div className="min-w-[220px] flex-1 space-y-1">

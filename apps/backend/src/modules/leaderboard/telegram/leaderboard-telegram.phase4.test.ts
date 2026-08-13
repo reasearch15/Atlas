@@ -668,7 +668,8 @@ describe("sendLatestLeaderboard manual refresh", () => {
     expect(result.queued).toBe(true);
     expect(result.competitionId).toBe(competitionA);
     expect(result.mode).toBe("send");
-    expect(result.message).toMatch(/queued/i);
+    expect(result.channelTitle).toBe("LB Channel");
+    expect(result.message).toBe("Leaderboard sent to LB Channel");
     expect(JSON.stringify(result)).not.toContain("token-a");
     expect(prisma._state.outbox.some((r: any) => r.jobType === "REFRESH_PUBLIC_LEADERBOARD")).toBe(true);
   });
