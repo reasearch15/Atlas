@@ -27,7 +27,7 @@ function createService(randomValues: number[] = [2, 2, 2, 2, 2]) {
 
 async function enable(service: LeaderboardService, now = new Date()): Promise<void> {
   await service.ensureSettings(workspaceId, ownerA, actorId);
-  await service.setEnabled(workspaceId, ownerA, true, actorId);
+  await service.setEnabled(workspaceId, ownerA, true, actorId, now);
   await service.bindParticipant({
     workspaceId,
     ownerCoadminUserId: ownerA,
@@ -170,7 +170,7 @@ describe("LeaderboardService deposits + pool", () => {
     const unbound = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     store.registerContact(unbound, workspaceId);
     await service.ensureSettings(workspaceId, ownerA, actorId);
-    await service.setEnabled(workspaceId, ownerA, true, actorId);
+    await service.setEnabled(workspaceId, ownerA, true, actorId, chicagoWallTimeToUtc("2024-01-10T12:00:00"));
     await expect(
       service.recordDeposit({
         workspaceId,

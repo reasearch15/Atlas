@@ -170,31 +170,38 @@ export class LeaderboardService {
 
   public async bindParticipant(input: BindParticipantInput): Promise<LeaderboardParticipantRow> {
     this.assertContact(input.workspaceId, input.crmContactId);
+    const now = input.now ?? new Date();
     return this.store.withLock(`participant:${input.workspaceId}:${input.crmContactId}`, async () => {
       const existing = this.store.participants.filter(
         (p) => p.workspaceId === input.workspaceId && p.crmContactId === input.crmContactId
       );
       if (existing.length > 1) throw participantIntegrityError();
-      if (existing.length === 1) {
-        const row = existing[0]!;
+      let row = existing[0];
+      if (row) {
         if (row.ownerCoadminUserId !== input.ownerCoadminUserId) throw participantTransferUnsupported();
-        return row;
+      } else {
+        row = {
+          id: randomUUID(),
+          workspaceId: input.workspaceId,
+          ownerCoadminUserId: input.ownerCoadminUserId,
+          crmContactId: input.crmContactId,
+          createdByUserId: input.createdByUserId ?? null,
+          createdAt: now,
+          updatedAt: now
+        };
+        this.store.participants.push(row);
+        this.audit(input.workspaceId, input.createdByUserId ?? null, "leaderboard.participant_bound", {
+          ownerCoadminUserId: input.ownerCoadminUserId,
+          crmContactId: input.crmContactId
+        });
       }
-      const now = new Date();
-      const row: LeaderboardParticipantRow = {
-        id: randomUUID(),
-        workspaceId: input.workspaceId,
-        ownerCoadminUserId: input.ownerCoadminUserId,
-        crmContactId: input.crmContactId,
-        createdByUserId: input.createdByUserId ?? null,
-        createdAt: now,
-        updatedAt: now
-      };
-      this.store.participants.push(row);
-      this.audit(input.workspaceId, input.createdByUserId ?? null, "leaderboard.participant_bound", {
-        ownerCoadminUserId: input.ownerCoadminUserId,
-        crmContactId: input.crmContactId
-      });
+
+      this.ensureZeroStandingIfActive(
+        input.workspaceId,
+        input.ownerCoadminUserId,
+        input.crmContactId,
+        now
+      );
       return row;
     });
   }
@@ -249,14 +256,21 @@ export class LeaderboardService {
     workspaceId: string,
     ownerCoadminUserId: string,
     enabled: boolean,
-    actorUserId: string
+    actorUserId: string,
+    now = new Date()
   ): Promise<LeaderboardSettingsRow> {
     const settings = await this.ensureSettings(workspaceId, ownerCoadminUserId, actorUserId);
-    const updated = { ...settings, enabled, updatedByUserId: actorUserId, updatedAt: new Date() };
+    const updated = { ...settings, enabled, updatedByUserId: actorUserId, updatedAt: now };
     this.store.settings.set(ownerCoadminUserId, updated);
     this.audit(workspaceId, actorUserId, enabled ? "leaderboard.enabled" : "leaderboard.disabled", {
       ownerCoadminUserId
     });
+
+    if (enabled) {
+      const competition = await this.ensureCurrentCompetition(workspaceId, ownerCoadminUserId, now);
+      this.ensureZeroPointStandingsForOwner(workspaceId, ownerCoadminUserId, competition.id, now);
+    }
+
     return updated;
   }
 
@@ -1539,6 +1553,46 @@ export class LeaderboardService {
       this.store.standings.push(standing);
     }
     return standing;
+  }
+
+  private ensureZeroPointStandingsForOwner(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string,
+    now: Date
+  ): void {
+    const participants = this.store.participants.filter(
+      (p) => p.workspaceId === workspaceId && p.ownerCoadminUserId === ownerCoadminUserId
+    );
+    for (const participant of participants) {
+      this.getOrCreateStanding(
+        workspaceId,
+        ownerCoadminUserId,
+        competitionId,
+        participant.crmContactId,
+        now
+      );
+    }
+  }
+
+  private ensureZeroStandingIfActive(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    crmContactId: string,
+    now: Date
+  ): void {
+    const settings = this.store.settings.get(ownerCoadminUserId);
+    if (!settings?.enabled || settings.workspaceId !== workspaceId) return;
+    const competition = this.store.competitions.find(
+      (c) =>
+        c.workspaceId === workspaceId &&
+        c.ownerCoadminUserId === ownerCoadminUserId &&
+        c.status === "ACTIVE" &&
+        c.startsAt.getTime() <= now.getTime() &&
+        c.endsAt.getTime() > now.getTime()
+    );
+    if (!competition) return;
+    this.getOrCreateStanding(workspaceId, ownerCoadminUserId, competition.id, crmContactId, now);
   }
 
   private createEvent(

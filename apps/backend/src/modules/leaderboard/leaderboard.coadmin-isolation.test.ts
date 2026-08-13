@@ -23,7 +23,7 @@ async function setup() {
   const now = chicagoWallTimeToUtc("2024-01-10T12:00:00");
 
   await service.ensureSettings(workspaceId, coadminA, coadminA);
-  await service.setEnabled(workspaceId, coadminA, true, coadminA);
+  await service.setEnabled(workspaceId, coadminA, true, coadminA, now);
   await service.bindParticipant({
     workspaceId,
     ownerCoadminUserId: coadminA,
@@ -39,7 +39,7 @@ async function setup() {
   await service.ensureCurrentCompetition(workspaceId, coadminA, now);
 
   await service.ensureSettings(workspaceId, coadminB, coadminB);
-  await service.setEnabled(workspaceId, coadminB, true, coadminB);
+  await service.setEnabled(workspaceId, coadminB, true, coadminB, now);
   await service.bindParticipant({
     workspaceId,
     ownerCoadminUserId: coadminB,

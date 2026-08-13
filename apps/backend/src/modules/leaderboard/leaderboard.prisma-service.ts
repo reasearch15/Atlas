@@ -91,46 +91,55 @@ export class PrismaLeaderboardService {
 
   public async bindParticipant(input: BindParticipantInput) {
     await this.assertContact(input.workspaceId, input.crmContactId);
+    const now = input.now ?? new Date();
     return this.prisma.$transaction(async (tx) => {
       await this.lockContact(tx, input.crmContactId);
       const existing = await tx.leaderboardParticipant.findMany({
         where: { workspaceId: input.workspaceId, crmContactId: input.crmContactId }
       });
       if (existing.length > 1) throw participantIntegrityError();
-      if (existing.length === 1) {
-        const row = existing[0]!;
+      let row = existing[0];
+      if (row) {
         if (row.ownerCoadminUserId !== input.ownerCoadminUserId) throw participantTransferUnsupported();
-        return row;
-      }
-      try {
-        const row = await tx.leaderboardParticipant.create({
-          data: {
+      } else {
+        try {
+          row = await tx.leaderboardParticipant.create({
+            data: {
+              workspaceId: input.workspaceId,
+              ownerCoadminUserId: input.ownerCoadminUserId,
+              crmContactId: input.crmContactId,
+              createdByUserId: input.createdByUserId ?? null
+            }
+          });
+          await this.audit.record({
             workspaceId: input.workspaceId,
-            ownerCoadminUserId: input.ownerCoadminUserId,
-            crmContactId: input.crmContactId,
-            createdByUserId: input.createdByUserId ?? null
-          }
-        });
-        await this.audit.record({
-          workspaceId: input.workspaceId,
-          actorId: input.createdByUserId ?? null,
-          action: "leaderboard.participant_bound",
-          metadata: {
-            ownerCoadminUserId: input.ownerCoadminUserId,
-            crmContactId: input.crmContactId
-          }
-        });
-        return row;
-      } catch (error) {
-        if (!isUniqueViolation(error)) throw error;
-        const raced = await tx.leaderboardParticipant.findMany({
-          where: { workspaceId: input.workspaceId, crmContactId: input.crmContactId }
-        });
-        if (raced.length > 1) throw participantIntegrityError();
-        if (raced.length === 0) throw error;
-        if (raced[0]!.ownerCoadminUserId !== input.ownerCoadminUserId) throw participantTransferUnsupported();
-        return raced[0]!;
+            actorId: input.createdByUserId ?? null,
+            action: "leaderboard.participant_bound",
+            metadata: {
+              ownerCoadminUserId: input.ownerCoadminUserId,
+              crmContactId: input.crmContactId
+            }
+          });
+        } catch (error) {
+          if (!isUniqueViolation(error)) throw error;
+          const raced = await tx.leaderboardParticipant.findMany({
+            where: { workspaceId: input.workspaceId, crmContactId: input.crmContactId }
+          });
+          if (raced.length > 1) throw participantIntegrityError();
+          if (raced.length === 0) throw error;
+          if (raced[0]!.ownerCoadminUserId !== input.ownerCoadminUserId) throw participantTransferUnsupported();
+          row = raced[0]!;
+        }
       }
+
+      await this.ensureZeroStandingIfActiveTx(
+        tx,
+        input.workspaceId,
+        input.ownerCoadminUserId,
+        input.crmContactId,
+        now
+      );
+      return row;
     });
   }
 
@@ -156,19 +165,47 @@ export class PrismaLeaderboardService {
     workspaceId: string,
     ownerCoadminUserId: string,
     enabled: boolean,
-    actorUserId: string
+    actorUserId: string,
+    now = new Date()
   ) {
-    await this.ensureSettings(workspaceId, ownerCoadminUserId, actorUserId);
-    const updated = await this.prisma.leaderboardSettings.update({
-      where: { ownerCoadminUserId },
-      data: { enabled, updatedByUserId: actorUserId }
+    const newlyFrozen: string[] = [];
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await this.ensureSettingsTx(tx, workspaceId, ownerCoadminUserId, actorUserId);
+      const settings = await tx.leaderboardSettings.update({
+        where: { ownerCoadminUserId },
+        data: { enabled, updatedByUserId: actorUserId }
+      });
+
+      if (enabled) {
+        // Create/resolve current biweekly ACTIVE competition, then seed zero-point standings
+        // for every existing participant (idempotent; no fabricated scoring events).
+        const competition = await this.ensureCurrentCompetitionTx(
+          tx,
+          workspaceId,
+          ownerCoadminUserId,
+          now,
+          false,
+          newlyFrozen
+        );
+        await this.ensureZeroPointStandingsForOwnerTx(
+          tx,
+          workspaceId,
+          ownerCoadminUserId,
+          competition.id,
+          now
+        );
+      }
+
+      return settings;
     });
+
     await this.audit.record({
       workspaceId,
       actorId: actorUserId,
       action: enabled ? "leaderboard.enabled" : "leaderboard.disabled",
       metadata: { ownerCoadminUserId }
     });
+    await this.emitFrozen(workspaceId, ownerCoadminUserId, newlyFrozen);
     return updated;
   }
 
@@ -1591,26 +1628,79 @@ export class PrismaLeaderboardService {
     crmContactId: string,
     now: Date
   ) {
-    const existing = await tx.leaderboardStanding.findUnique({
-      where: { competitionId_crmContactId: { competitionId, crmContactId } }
+    // Upsert avoids create→P2002→query-in-same-tx (25P02) under concurrency.
+    return tx.leaderboardStanding.upsert({
+      where: { competitionId_crmContactId: { competitionId, crmContactId } },
+      create: {
+        workspaceId,
+        ownerCoadminUserId,
+        competitionId,
+        crmContactId,
+        pointsReachedAt: now
+      },
+      update: { ownerCoadminUserId }
     });
-    if (existing) return existing;
-    try {
-      return await tx.leaderboardStanding.create({
-        data: {
-          workspaceId,
-          ownerCoadminUserId,
-          competitionId,
-          crmContactId,
-          pointsReachedAt: now
-        }
-      });
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      return tx.leaderboardStanding.findUniqueOrThrow({
-        where: { competitionId_crmContactId: { competitionId, crmContactId } }
-      });
-    }
+  }
+
+  /**
+   * Idempotently ensures every participant for this owner has a zero-default standing
+   * in the ACTIVE competition. Does not create events or alter existing point totals.
+   */
+  private async ensureZeroPointStandingsForOwnerTx(
+    tx: Tx,
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string,
+    now: Date
+  ): Promise<void> {
+    const participants = await tx.leaderboardParticipant.findMany({
+      where: { workspaceId, ownerCoadminUserId },
+      select: { crmContactId: true }
+    });
+    if (participants.length === 0) return;
+
+    await tx.leaderboardStanding.createMany({
+      data: participants.map((p) => ({
+        workspaceId,
+        ownerCoadminUserId,
+        competitionId,
+        crmContactId: p.crmContactId,
+        pointsReachedAt: now
+      })),
+      skipDuplicates: true
+    });
+  }
+
+  /** If leaderboard is enabled and an ACTIVE competition exists, ensure one zero standing. */
+  private async ensureZeroStandingIfActiveTx(
+    tx: Tx,
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    crmContactId: string,
+    now: Date
+  ): Promise<void> {
+    const settings = await tx.leaderboardSettings.findUnique({ where: { ownerCoadminUserId } });
+    if (!settings?.enabled || settings.workspaceId !== workspaceId) return;
+
+    const competition = await tx.leaderboardCompetition.findFirst({
+      where: {
+        workspaceId,
+        ownerCoadminUserId,
+        status: "ACTIVE",
+        startsAt: { lte: now },
+        endsAt: { gt: now }
+      }
+    });
+    if (!competition) return;
+
+    await this.getOrCreateStandingTx(
+      tx,
+      workspaceId,
+      ownerCoadminUserId,
+      competition.id,
+      crmContactId,
+      now
+    );
   }
 
   /**

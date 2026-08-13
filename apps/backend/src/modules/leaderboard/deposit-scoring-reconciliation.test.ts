@@ -33,7 +33,7 @@ async function enableOwner(
   now: Date
 ): Promise<void> {
   await service.ensureSettings(workspaceId, owner, owner);
-  await service.setEnabled(workspaceId, owner, true, owner);
+  await service.setEnabled(workspaceId, owner, true, owner, now);
   for (const crmContactId of players) {
     await service.bindParticipant({
       workspaceId,

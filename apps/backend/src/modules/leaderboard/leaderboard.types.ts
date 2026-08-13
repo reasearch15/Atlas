@@ -233,6 +233,8 @@ export interface BindParticipantInput {
   readonly ownerCoadminUserId: string;
   readonly crmContactId: string;
   readonly createdByUserId?: string;
+  /** Test/clock override; production uses server time. */
+  readonly now?: Date;
 }
 
 /** Deposit / referral / promotion resolve owner from participant binding. */

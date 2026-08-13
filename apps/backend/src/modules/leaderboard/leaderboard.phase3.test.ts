@@ -55,7 +55,7 @@ async function bindAndEnable(
   now: Date
 ): Promise<void> {
   await service.ensureSettings(workspaceId, owner, owner);
-  await service.setEnabled(workspaceId, owner, true, owner);
+  await service.setEnabled(workspaceId, owner, true, owner, now);
   for (const crmContactId of players) {
     await service.bindParticipant({
       workspaceId,
@@ -104,7 +104,7 @@ describe("Phase 3 domain: enable/disable + pool rate", () => {
     expect(service.listEventsForOwner(ownerA)).toHaveLength(1);
     expect(service.listEventsForOwner(ownerA)[0]?.poolContributionCents).toBe(200);
 
-    await service.setEnabled(workspaceId, ownerA, true, ownerA);
+    await service.setEnabled(workspaceId, ownerA, true, ownerA, now);
     expect(service.listEventsForOwner(ownerA)[0]?.id).toBe(deposit.id);
   });
 
