@@ -199,6 +199,9 @@ function createMemoryPrisma() {
       findUnique: async ({ where }: any) =>
         settings.find((s) => s.ownerCoadminUserId === where.ownerCoadminUserId) ?? null
     },
+    leaderboardWheelConfig: {
+      findUnique: async () => null
+    },
     giveawayEligibilityCandidate: {
       findFirst: async ({ where }: any) =>
         candidates.find((c) => {
@@ -925,7 +928,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
     expect(tgState.chats.get(-1001)!.messages.find((m) => m.messageId === 7)?.deleted).toBe(true);
   });
 
-  it("G: automatic refresh edits photo in place; manual Send uses same living message", async () => {
+  it("G: automatic refresh sends new board; manual Send replaces again (one living board)", async () => {
     const prisma = createMemoryPrisma();
     const { service, outboxSvc, client, tgState } = await readyIntegration(prisma);
     seedActiveCompetition(prisma, 1000);
@@ -955,8 +958,8 @@ describe("sendLatestLeaderboard manual refresh", () => {
         (m) => !m.deleted && (m.photo === true || (typeof m.text === "string" && m.text.includes("BIWEEKLY LEADERBOARD")))
       );
     expect(boards()).toHaveLength(1);
-    const canonicalId = prisma._state.integrations[0].persistentMessageId;
-    expect(canonicalId).toBeTruthy();
+    const firstCanonicalId = prisma._state.integrations[0].persistentMessageId;
+    expect(firstCanonicalId).toBeTruthy();
 
     await outboxSvc.enqueueRefresh(workspaceA, ownerA, competitionA);
     const job2 = prisma._state.outbox.find(
@@ -965,12 +968,14 @@ describe("sendLatestLeaderboard manual refresh", () => {
     await processor.processJob(job2.id);
     expect(job2.status).toBe("SUCCEEDED");
     expect(boards()).toHaveLength(1);
-    expect(prisma._state.integrations[0].persistentMessageId).toBe(canonicalId);
+    const secondCanonicalId = prisma._state.integrations[0].persistentMessageId;
+    expect(secondCanonicalId).toBeTruthy();
+    expect(secondCanonicalId).not.toBe(firstCanonicalId);
 
     const manual = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
-    expect(manual.deliveryAction).toBe("UPDATED_EXISTING");
+    expect(manual.deliveryAction).toBe("SENT_NEW");
     expect(manual.telegramMessageId).toBe(prisma._state.integrations[0].persistentMessageId);
-    expect(manual.telegramMessageId).toBe(canonicalId);
+    expect(manual.telegramMessageId).not.toBe(secondCanonicalId);
     expect(boards()).toHaveLength(1);
   });
 
@@ -1041,8 +1046,8 @@ describe("sendLatestLeaderboard manual refresh", () => {
     const first = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
     const second = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
     expect(first.deliveryAction).toBe("SENT_NEW");
-    expect(second.deliveryAction).toBe("UPDATED_EXISTING");
-    expect(second.telegramMessageId).toBe(first.telegramMessageId);
+    expect(second.deliveryAction).toBe("SENT_NEW");
+    expect(second.telegramMessageId).not.toBe(first.telegramMessageId);
 
     const boardMessages = (tgState.chats.get(-1001)?.messages ?? []).filter(
       (m) => !m.deleted && (m.photo === true || (typeof m.text === "string" && m.text.includes("BIWEEKLY LEADERBOARD")))

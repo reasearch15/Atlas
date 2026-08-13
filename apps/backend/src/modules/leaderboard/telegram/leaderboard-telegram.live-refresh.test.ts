@@ -119,7 +119,7 @@ describe("immediate live Telegram refresh after scoring", () => {
 
     expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
     expect(editTextSpy).not.toHaveBeenCalled();
-    expect(editMediaSpy).toHaveBeenCalledTimes(1);
+    expect(editMediaSpy).not.toHaveBeenCalled();
     expect(sendPhotoSpy).toHaveBeenCalledTimes(1);
     expect(deleteSpy).toHaveBeenCalledWith("tok", channelId, 42);
     const photoArg = sendPhotoSpy.mock.calls[0]?.[2] as Buffer;
@@ -502,7 +502,7 @@ describe("public leaderboard replace (send new + delete old)", () => {
     expect(prisma._state.integrations[0].persistentMessageId).toBe("1");
   });
 
-  it("subsequent refresh edits existing photo media in place", async () => {
+  it("subsequent refresh sends a new photo and deletes the previous canonical board", async () => {
     const { prisma, integrationId } = seedBoard(10, 20);
     const tgState: FakeLeaderboardTelegramState = {
       bots: new Map([["tok", { id: 1, isBot: true, firstName: "Bot", username: "atlas_lb_bot" }]]),
@@ -552,11 +552,12 @@ describe("public leaderboard replace (send new + delete old)", () => {
       skipRankAnnouncements: true
     });
 
-    expect(published.deliveryAction).toBe("UPDATED_EXISTING");
-    expect(published.messageId).toBe("42");
-    expect(editMediaSpy).toHaveBeenCalledTimes(1);
-    expect(sendPhotoSpy).not.toHaveBeenCalled();
-    expect(deleteSpy).not.toHaveBeenCalled();
-    expect(prisma._state.integrations[0].persistentMessageId).toBe("42");
+    expect(published.deliveryAction).toBe("SENT_NEW");
+    expect(published.messageId).toBe("43");
+    expect(published.deletedPreviousMessageId).toBe("42");
+    expect(editMediaSpy).not.toHaveBeenCalled();
+    expect(sendPhotoSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith("tok", channelId, 42);
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("43");
   });
 });

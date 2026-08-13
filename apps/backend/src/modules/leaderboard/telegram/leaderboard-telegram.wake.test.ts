@@ -335,7 +335,7 @@ describe("processJob atomic claim under duplicate wakes", () => {
     ]);
 
     expect(sendPhotoSpy).toHaveBeenCalledTimes(1);
-    expect(editMediaSpy.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(editMediaSpy).not.toHaveBeenCalled();
     expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
     expect(prisma._state.outbox[0].attemptCount).toBe(1);
     expect(prisma._state.integrations[0].persistentMessageId).toBeTruthy();

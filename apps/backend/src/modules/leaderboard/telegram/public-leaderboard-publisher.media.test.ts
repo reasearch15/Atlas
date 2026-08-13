@@ -129,7 +129,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     });
   });
 
-  it("edit failure safely falls back to replacement sendPhoto", async () => {
+  it("existing board is replaced via sendPhoto then delete (never edit)", async () => {
     const { prisma, integrationId } = seedOwner({
       workspaceId: workspaceA,
       ownerId: ownerA,
@@ -151,7 +151,15 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
             id: Number(channelA),
             type: "channel",
             members: new Map([[1, "administrator"]]),
-            messages: [{ messageId: 42, text: "OLD TEXT BOARD", deleted: false }],
+            messages: [
+              {
+                messageId: 42,
+                photo: true,
+                photoBytes: 1200,
+                caption: "old",
+                deleted: false
+              }
+            ],
             nextMessageId: 43
           }
         ]
@@ -160,6 +168,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     const client = createFakeLeaderboardTelegramClient(tgState);
     const editSpy = vi.spyOn(client, "editMessageMedia");
     const sendSpy = vi.spyOn(client, "sendPhoto");
+    const deleteSpy = vi.spyOn(client, "deleteMessage");
     const published = await publishPublicLeaderboardSnapshot({
       prisma: prisma as never,
       client,
@@ -176,11 +185,223 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
       mode: "replace",
       skipRankAnnouncements: true
     });
-    expect(editSpy).toHaveBeenCalled();
-    expect(sendSpy).toHaveBeenCalled();
+    expect(editSpy).not.toHaveBeenCalled();
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith("tokA", channelA, 42);
     expect(published.deliveryAction).toBe("SENT_NEW");
-    expect(published.recoveredFromFailedEdit).toBe(true);
+    expect(published.recoveredFromFailedEdit).toBe(false);
     expect(published.messageId).toBe("43");
+    expect(published.deletedPreviousMessageId).toBe("42");
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("43");
+    expect(tgState.chats.get(Number(channelA))!.messages.find((m) => m.messageId === 42)?.deleted).toBe(
+      true
+    );
+  });
+
+  it("sendPhoto failure keeps previous canonical message", async () => {
+    const { prisma, integrationId } = seedOwner({
+      workspaceId: workspaceA,
+      ownerId: ownerA,
+      competitionId: competitionA,
+      channelId: channelA,
+      token: "tokA",
+      playerId: playerA,
+      displayName: "Picasso",
+      points: 10,
+      poolCents: 25000,
+      messageId: "100"
+    });
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tokA", { id: 1, isBot: true, firstName: "Bot", username: "tokA_bot" }]]),
+      chats: new Map([
+        [
+          Number(channelA),
+          {
+            id: Number(channelA),
+            type: "channel",
+            members: new Map([[1, "administrator"]]),
+            messages: [
+              {
+                messageId: 100,
+                photo: true,
+                photoBytes: 800,
+                caption: "live",
+                deleted: false
+              }
+            ],
+            nextMessageId: 101
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    vi.spyOn(client, "sendPhoto").mockRejectedValue(
+      new LeaderboardTelegramApiError({
+        httpStatus: 429,
+        telegramErrorCode: 429,
+        description: "Too Many Requests: retry after 3",
+        permanent: false
+      })
+    );
+    const deleteSpy = vi.spyOn(client, "deleteMessage");
+    await expect(
+      publishPublicLeaderboardSnapshot({
+        prisma: prisma as never,
+        client,
+        token: "tokA",
+        workspaceId: workspaceA,
+        ownerCoadminUserId: ownerA,
+        competitionId: competitionA,
+        integrationId,
+        channelId: channelA,
+        botUsername: "tokA_bot",
+        persistentMessageId: "100",
+        persistentMessageCompetitionId: competitionA,
+        lastPublicTop10Json: [],
+        mode: "replace",
+        skipRankAnnouncements: true
+      })
+    ).rejects.toBeInstanceOf(LeaderboardTelegramApiError);
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("100");
+    expect(tgState.chats.get(Number(channelA))!.messages.find((m) => m.messageId === 100)?.deleted).toBe(
+      false
+    );
+  });
+
+  it("delete failure keeps new message canonical", async () => {
+    const { prisma, integrationId } = seedOwner({
+      workspaceId: workspaceA,
+      ownerId: ownerA,
+      competitionId: competitionA,
+      channelId: channelA,
+      token: "tokA",
+      playerId: playerA,
+      displayName: "Picasso",
+      points: 10,
+      poolCents: 25000,
+      messageId: "100"
+    });
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tokA", { id: 1, isBot: true, firstName: "Bot", username: "tokA_bot" }]]),
+      chats: new Map([
+        [
+          Number(channelA),
+          {
+            id: Number(channelA),
+            type: "channel",
+            members: new Map([[1, "administrator"]]),
+            messages: [
+              {
+                messageId: 100,
+                photo: true,
+                photoBytes: 800,
+                caption: "old",
+                deleted: false
+              }
+            ],
+            nextMessageId: 101
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    const warn = vi.fn();
+    vi.spyOn(client, "deleteMessage").mockRejectedValue(
+      new LeaderboardTelegramApiError({
+        httpStatus: 400,
+        telegramErrorCode: 400,
+        description: "Bad Request: message to delete not found",
+        permanent: true
+      })
+    );
+    const published = await publishPublicLeaderboardSnapshot({
+      prisma: prisma as never,
+      client,
+      token: "tokA",
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      integrationId,
+      channelId: channelA,
+      botUsername: "tokA_bot",
+      persistentMessageId: "100",
+      persistentMessageCompetitionId: competitionA,
+      lastPublicTop10Json: [],
+      mode: "replace",
+      skipRankAnnouncements: true,
+      logger: { warn, info: vi.fn() }
+    });
+    expect(published.messageId).toBe("101");
+    expect(published.deletedPreviousMessageId).toBeNull();
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("101");
+    expect(warn).toHaveBeenCalled();
+    // New board must still be live (not rolled back).
+    const newest = tgState.chats.get(Number(channelA))!.messages.find((m) => m.messageId === 101);
+    expect(newest).toBeTruthy();
+    expect(newest!.deleted).not.toBe(true);
+  });
+
+  it("second update sends 102, persists 102, deletes 101", async () => {
+    const { prisma, integrationId } = seedOwner({
+      workspaceId: workspaceA,
+      ownerId: ownerA,
+      competitionId: competitionA,
+      channelId: channelA,
+      token: "tokA",
+      playerId: playerA,
+      displayName: "Picasso",
+      points: 10,
+      poolCents: 25000,
+      messageId: "101"
+    });
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tokA", { id: 1, isBot: true, firstName: "Bot", username: "tokA_bot" }]]),
+      chats: new Map([
+        [
+          Number(channelA),
+          {
+            id: Number(channelA),
+            type: "channel",
+            members: new Map([[1, "administrator"]]),
+            messages: [
+              {
+                messageId: 101,
+                photo: true,
+                photoBytes: 900,
+                caption: "board",
+                deleted: false
+              }
+            ],
+            nextMessageId: 102
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    const editSpy = vi.spyOn(client, "editMessageMedia");
+    const published = await publishPublicLeaderboardSnapshot({
+      prisma: prisma as never,
+      client,
+      token: "tokA",
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      integrationId,
+      channelId: channelA,
+      botUsername: "tokA_bot",
+      persistentMessageId: "101",
+      persistentMessageCompetitionId: competitionA,
+      lastPublicTop10Json: [
+        { crmContactId: playerA, rank: 1, displayName: "Picasso", totalPoints: 10 }
+      ],
+      mode: "replace",
+      skipRankAnnouncements: true
+    });
+    expect(editSpy).not.toHaveBeenCalled();
+    expect(published.messageId).toBe("102");
+    expect(published.deletedPreviousMessageId).toBe("101");
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("102");
   });
 
   it("Coadmin A cannot affect Coadmin B Telegram leaderboard message", async () => {
@@ -283,75 +504,6 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     expect(tgState.chats.get(Number(channelB))!.messages).toHaveLength(1);
     expect((a.prisma._state.integrations[0].lastPublicTop10Json as any)[0].displayName).toBe("OwnerAStar");
     expect((b.prisma._state.integrations[0].lastPublicTop10Json as any)[0].displayName).toBe("OwnerBStar");
-  });
-
-  it("editMessageMedia 'message is not modified' keeps same message id", async () => {
-    const { prisma, integrationId } = seedOwner({
-      workspaceId: workspaceA,
-      ownerId: ownerA,
-      competitionId: competitionA,
-      channelId: channelA,
-      token: "tokA",
-      playerId: playerA,
-      displayName: "Picasso",
-      points: 10,
-      poolCents: 25000,
-      messageId: "42"
-    });
-    const tgState: FakeLeaderboardTelegramState = {
-      bots: new Map([["tokA", { id: 1, isBot: true, firstName: "Bot", username: "tokA_bot" }]]),
-      chats: new Map([
-        [
-          Number(channelA),
-          {
-            id: Number(channelA),
-            type: "channel",
-            members: new Map([[1, "administrator"]]),
-            messages: [
-              {
-                messageId: 42,
-                photo: true,
-                photoBytes: 1200,
-                caption: "🔥 Competition is live. Keep climbing.",
-                deleted: false
-              }
-            ],
-            nextMessageId: 43
-          }
-        ]
-      ])
-    };
-    const client = createFakeLeaderboardTelegramClient(tgState);
-    vi.spyOn(client, "editMessageMedia").mockRejectedValue(
-      new LeaderboardTelegramApiError({
-        httpStatus: 400,
-        telegramErrorCode: 400,
-        description:
-          "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message",
-        permanent: false
-      })
-    );
-    const sendSpy = vi.spyOn(client, "sendPhoto");
-    const published = await publishPublicLeaderboardSnapshot({
-      prisma: prisma as never,
-      client,
-      token: "tokA",
-      workspaceId: workspaceA,
-      ownerCoadminUserId: ownerA,
-      competitionId: competitionA,
-      integrationId,
-      channelId: channelA,
-      botUsername: "tokA_bot",
-      persistentMessageId: "42",
-      persistentMessageCompetitionId: competitionA,
-      lastPublicTop10Json: [],
-      mode: "replace",
-      skipRankAnnouncements: true
-    });
-    expect(published.deliveryAction).toBe("UPDATED_EXISTING");
-    expect(published.messageId).toBe("42");
-    expect(sendSpy).not.toHaveBeenCalled();
-    expect(prisma._state.integrations[0].persistentMessageId).toBe("42");
   });
 
   it("falls back to text when render path is forced to fail via client media permanent photo error after render", async () => {

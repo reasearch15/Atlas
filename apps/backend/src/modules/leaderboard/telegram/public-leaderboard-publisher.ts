@@ -26,8 +26,9 @@ export type PublicLeaderboardDeliveryAction = "SENT_NEW" | "UPDATED_EXISTING";
 
 /**
  * Public full-board delivery.
- * Prefer editMessageMedia when a photo board already exists; otherwise sendPhoto replace.
- * `edit_or_create` / `replace` / `send_new` are retained as mode aliases.
+ * Always send a NEW photo/message, persist its message_id, then delete the previous canonical board.
+ * Never editMessageMedia / editMessageText / editMessageCaption for the living board.
+ * Mode aliases (`replace` / `send_new` / `edit_or_create`) all use this same lifecycle.
  */
 export type PublicLeaderboardPublishMode = "replace" | "send_new" | "edit_or_create";
 
@@ -330,82 +331,7 @@ async function deliverPhotoBoard(input: {
     filename: "leaderboard.png"
   };
 
-  // Prefer living edit when a canonical message exists.
-  if (previousMessageId) {
-    try {
-      await input.client.editMessageMedia(
-        input.token,
-        publishChannelId,
-        Number(previousMessageId),
-        input.png,
-        mediaOptions
-      );
-      await persistBoardMeta({
-        prisma: input.prisma,
-        integrationId: input.integrationId,
-        channelId: publishChannelId,
-        expectedPersistentMessageId: previousMessageId,
-        persistentMessageId: previousMessageId,
-        competitionId: input.competitionId,
-        nextTop10: input.nextTop10
-      });
-      input.logger?.info?.(
-        {
-          ownerCoadminUserId: input.ownerCoadminUserId,
-          competitionId: input.competitionId,
-          messageId: previousMessageId,
-          channelId: publishChannelId
-        },
-        "[LEADERBOARD_MEDIA_EDITED]"
-      );
-      return {
-        messageId: previousMessageId,
-        deliveryAction: "UPDATED_EXISTING",
-        recoveredFromFailedEdit: false,
-        deletedPreviousMessageId: null
-      };
-    } catch (error) {
-      // Telegram returns this when photo/caption/markup are byte-identical — treat as success.
-      if (isUnmodifiedTelegramEditError(error)) {
-        await persistBoardMeta({
-          prisma: input.prisma,
-          integrationId: input.integrationId,
-          channelId: publishChannelId,
-          expectedPersistentMessageId: previousMessageId,
-          persistentMessageId: previousMessageId,
-          competitionId: input.competitionId,
-          nextTop10: input.nextTop10
-        });
-        input.logger?.info?.(
-          {
-            ownerCoadminUserId: input.ownerCoadminUserId,
-            competitionId: input.competitionId,
-            messageId: previousMessageId,
-            channelId: publishChannelId,
-            unchanged: true
-          },
-          "[LEADERBOARD_MEDIA_EDITED]"
-        );
-        return {
-          messageId: previousMessageId,
-          deliveryAction: "UPDATED_EXISTING",
-          recoveredFromFailedEdit: false,
-          deletedPreviousMessageId: null
-        };
-      }
-      input.logger?.warn?.(
-        {
-          err: error,
-          ownerCoadminUserId: input.ownerCoadminUserId,
-          competitionId: input.competitionId,
-          previousMessageId
-        },
-        "[LEADERBOARD_MEDIA_EDIT_FALLBACK_REPLACE]"
-      );
-      // Fall through to sendPhoto replace.
-    }
-  }
-
+  // Always send a brand-new photo so the board appears at the channel bottom with no "edited" label.
   const sent = await input.client.sendPhoto(input.token, publishChannelId, input.png, mediaOptions);
   const newMessageId = String(sent.messageId);
   input.logger?.info?.(
@@ -413,7 +339,8 @@ async function deliverPhotoBoard(input: {
       ownerCoadminUserId: input.ownerCoadminUserId,
       competitionId: input.competitionId,
       messageId: newMessageId,
-      channelId: publishChannelId
+      channelId: publishChannelId,
+      previousMessageId
     },
     "[LEADERBOARD_MEDIA_SENT]"
   );
@@ -466,7 +393,7 @@ async function deliverPhotoBoard(input: {
   return {
     messageId: finalRow?.persistentMessageId ?? newMessageId,
     deliveryAction: "SENT_NEW",
-    recoveredFromFailedEdit: Boolean(previousMessageId),
+    recoveredFromFailedEdit: false,
     deletedPreviousMessageId
   };
 }
@@ -675,9 +602,4 @@ function shouldFallbackToText(error: unknown): boolean {
     d.includes("mime") ||
     d.includes("too big")
   );
-}
-
-function isUnmodifiedTelegramEditError(error: unknown): boolean {
-  if (!(error instanceof LeaderboardTelegramApiError)) return false;
-  return /message is not modified/i.test(error.description);
 }
