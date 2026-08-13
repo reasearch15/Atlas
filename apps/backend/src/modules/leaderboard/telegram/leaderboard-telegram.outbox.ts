@@ -5,6 +5,13 @@ import type { Queue } from "bullmq";
 const PENDING_STATUSES = ["QUEUED", "DISPATCHING", "RETRY_SCHEDULED"] as const;
 const TERMINAL_STATUSES = ["SUCCEEDED", "FAILED", "CANCELLED"] as const;
 
+/**
+ * DISPATCHING older than this is treated as a crashed/stuck claim.
+ * Fresh DISPATCHING keeps dirty-coalesce (do not steal); stale must reopen to QUEUED
+ * or refreshes permanently never claim again.
+ */
+export const STALE_DISPATCHING_MS = 30_000;
+
 /** Statuses from which a processor may atomically claim an outbox row. */
 export const CLAIMABLE_OUTBOX_STATUSES = ["QUEUED", "RETRY_SCHEDULED"] as const;
 
@@ -93,6 +100,22 @@ export class LeaderboardTelegramOutboxService {
 
   public async wake(jobId: string, delayMs = 0): Promise<void> {
     await this.wakeFn(jobId, delayMs);
+  }
+
+  /** Wake must not block durable enqueue / immediate processJob when Redis is flaky. */
+  private async wakeBestEffort(jobId: string, delayMs = 0): Promise<void> {
+    try {
+      await this.wakeFn(jobId, delayMs);
+    } catch {
+      // Durable row remains claimable; resumePending / immediate processJob recover.
+    }
+  }
+
+  private isStaleDispatching(row: { status: string; updatedAt?: Date | null }): boolean {
+    if (row.status !== "DISPATCHING") return false;
+    const updatedAt = row.updatedAt ? new Date(row.updatedAt).getTime() : 0;
+    if (!updatedAt) return true;
+    return Date.now() - updatedAt >= STALE_DISPATCHING_MS;
   }
 
   public async enqueueRefresh(
@@ -244,6 +267,18 @@ export class LeaderboardTelegramOutboxService {
 
   public async resumePending(limit = 100): Promise<number> {
     const now = new Date();
+    const staleBefore = new Date(now.getTime() - STALE_DISPATCHING_MS);
+    // Reclaim crashed DISPATCHING claims so maintenance can wake them again.
+    await this.prisma.leaderboardTelegramOutbox.updateMany({
+      where: {
+        status: "DISPATCHING",
+        updatedAt: { lte: staleBefore }
+      },
+      data: {
+        status: "QUEUED",
+        nextAttemptAt: null
+      }
+    });
     const rows = await this.prisma.leaderboardTelegramOutbox.findMany({
       where: {
         status: { in: ["QUEUED", "RETRY_SCHEDULED"] },
@@ -254,7 +289,7 @@ export class LeaderboardTelegramOutboxService {
       select: { id: true }
     });
     for (const row of rows) {
-      await this.wake(row.id, 0);
+      await this.wakeBestEffort(row.id, 0);
     }
     return rows.length;
   }
@@ -279,24 +314,25 @@ export class LeaderboardTelegramOutboxService {
     if (existing && (PENDING_STATUSES as readonly string[]).includes(existing.status)) {
       // Coalesce refresh payloads: announcements remain enabled if either enqueued wants them.
       let payloadJson = input.payloadJson;
+      const staleDispatching = this.isStaleDispatching(existing);
       if (input.jobType === "REFRESH_PUBLIC_LEADERBOARD") {
         payloadJson = mergeRefreshPayload(existing.payloadJson, {
           ...input.payloadJson,
-          // In-flight DISPATCHING must not be stolen; mark dirty so completion re-queues.
+          // Fresh in-flight: dirty so completion re-queues. Stale: reopen below.
           ...(existing.status === "DISPATCHING" ? { dirty: true } : {})
         });
       }
+      const reopenDispatching =
+        existing.status === "DISPATCHING" &&
+        (input.jobType !== "REFRESH_PUBLIC_LEADERBOARD" || staleDispatching);
       await this.prisma.leaderboardTelegramOutbox.update({
         where: { id: existing.id },
         data: {
           payloadJson: payloadJson as Prisma.InputJsonValue,
-          // Only reopen stuck DISPATCHING when not using dirty-coalesce path for refresh.
-          ...(existing.status === "DISPATCHING" && input.jobType !== "REFRESH_PUBLIC_LEADERBOARD"
-            ? { status: "QUEUED" as const, nextAttemptAt: null }
-            : {})
+          ...(reopenDispatching ? { status: "QUEUED" as const, nextAttemptAt: null } : {})
         }
       });
-      await this.wake(existing.id, 0);
+      await this.wakeBestEffort(existing.id, 0);
       return existing.id;
     }
 
@@ -320,7 +356,7 @@ export class LeaderboardTelegramOutboxService {
           cancelledAt: null
         }
       });
-      await this.wake(reset.id, 0);
+      await this.wakeBestEffort(reset.id, 0);
       return reset.id;
     }
 
@@ -337,7 +373,7 @@ export class LeaderboardTelegramOutboxService {
           payloadJson: input.payloadJson as Prisma.InputJsonValue
         }
       });
-      await this.wake(created.id, 0);
+      await this.wakeBestEffort(created.id, 0);
       return created.id;
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
@@ -362,28 +398,30 @@ export class LeaderboardTelegramOutboxService {
             botIntegrationId: integration?.disconnectedAt ? null : (integration?.id ?? null)
           }
         });
-        await this.wake(reset.id, 0);
+        await this.wakeBestEffort(reset.id, 0);
         return reset.id;
       }
       if ((PENDING_STATUSES as readonly string[]).includes(raced.status)) {
         let payloadJson = input.payloadJson;
+        const staleDispatching = this.isStaleDispatching(raced);
         if (input.jobType === "REFRESH_PUBLIC_LEADERBOARD") {
           payloadJson = mergeRefreshPayload(raced.payloadJson, {
             ...input.payloadJson,
             ...(raced.status === "DISPATCHING" ? { dirty: true } : {})
           });
         }
+        const reopenDispatching =
+          raced.status === "DISPATCHING" &&
+          (input.jobType !== "REFRESH_PUBLIC_LEADERBOARD" || staleDispatching);
         await this.prisma.leaderboardTelegramOutbox.update({
           where: { id: raced.id },
           data: {
             payloadJson: payloadJson as Prisma.InputJsonValue,
-            ...(raced.status === "DISPATCHING" && input.jobType !== "REFRESH_PUBLIC_LEADERBOARD"
-              ? { status: "QUEUED" as const, nextAttemptAt: null }
-              : {})
+            ...(reopenDispatching ? { status: "QUEUED" as const, nextAttemptAt: null } : {})
           }
         });
       }
-      await this.wake(raced.id, 0);
+      await this.wakeBestEffort(raced.id, 0);
       return raced.id;
     }
   }

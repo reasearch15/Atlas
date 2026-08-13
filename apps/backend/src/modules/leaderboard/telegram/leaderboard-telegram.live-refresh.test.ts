@@ -252,4 +252,34 @@ describe("immediate live Telegram refresh after scoring", () => {
     await processor.processJob(outboxId);
     expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
   });
+
+  it("stale DISPATCHING refresh is reopened so a later deposit can deliver", async () => {
+    const { prisma } = seedBoard(10, 20);
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tok", { id: 1, isBot: true, firstName: "Bot", username: "atlas_lb_bot" }]]),
+      chats: new Map([[Number(channelId), makeChannel(42)]])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    const outbox = new LeaderboardTelegramOutboxService(prisma as never, async () => undefined);
+    const processor = new LeaderboardTelegramProcessor({
+      prisma: prisma as never,
+      encryptionKey,
+      outbox,
+      client
+    });
+
+    const outboxId = await outbox.enqueueRefresh(workspaceA, ownerA, competitionA);
+    prisma._state.outbox[0].status = "DISPATCHING";
+    prisma._state.outbox[0].updatedAt = new Date(Date.now() - 60_000);
+
+    const again = await outbox.enqueueRefresh(workspaceA, ownerA, competitionA);
+    expect(again).toBe(outboxId);
+    expect(prisma._state.outbox[0].status).toBe("QUEUED");
+    expect(isRefreshPayloadDirty(prisma._state.outbox[0].payloadJson)).toBe(true);
+
+    await processor.processJob(outboxId);
+    expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
+    const text = tgState.chats.get(Number(channelId))!.messages.find((m) => !m.deleted)!.text;
+    expect(text).toMatch(/\b10\b/);
+  });
 });

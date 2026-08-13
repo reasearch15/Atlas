@@ -107,6 +107,10 @@ export function createMemoryPrisma() {
           if (where.ownerCoadminUserId && row.ownerCoadminUserId !== where.ownerCoadminUserId) continue;
           if (typeof where.status === "string" && row.status !== where.status) continue;
           if (where.status?.in && !where.status.in.includes(row.status)) continue;
+          if (where.updatedAt?.lte) {
+            const updated = row.updatedAt ? new Date(row.updatedAt).getTime() : 0;
+            if (updated > new Date(where.updatedAt.lte).getTime()) continue;
+          }
           for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
             if (value && typeof value === "object" && value !== null && "increment" in value) {
               const current = typeof row[key] === "number" ? row[key] : 0;
