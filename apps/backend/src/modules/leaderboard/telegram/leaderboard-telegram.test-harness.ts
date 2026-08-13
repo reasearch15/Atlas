@@ -10,6 +10,7 @@ export function createMemoryPrisma() {
   const payouts: any[] = [];
   const audits: any[] = [];
   const playerLinks: any[] = [];
+  const wheelConfigs: any[] = [];
 
   const prisma = {
     leaderboardBotPlayerLink: {
@@ -179,6 +180,14 @@ export function createMemoryPrisma() {
       findUnique: async ({ where }: any) =>
         settings.find((s) => s.ownerCoadminUserId === where.ownerCoadminUserId) ?? null
     },
+    leaderboardWheelConfig: {
+      findUnique: async ({ where }: any) => {
+        const row =
+          wheelConfigs.find((w) => w.ownerCoadminUserId === where.ownerCoadminUserId) ?? null;
+        if (!row) return null;
+        return row;
+      }
+    },
     giveawayEligibilityCandidate: {
       findFirst: async ({ where }: any) =>
         candidates.find((c) => {
@@ -216,7 +225,18 @@ export function createMemoryPrisma() {
         return data;
       }
     },
-    _state: { integrations, outbox, competitions, standings, candidates, contacts, settings, payouts, audits }
+    _state: {
+      integrations,
+      outbox,
+      competitions,
+      standings,
+      candidates,
+      contacts,
+      settings,
+      payouts,
+      audits,
+      wheelConfigs
+    }
   };
 
   return prisma as any;

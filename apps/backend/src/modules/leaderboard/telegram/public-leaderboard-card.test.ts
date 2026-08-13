@@ -208,7 +208,7 @@ describe("renderPublicLeaderboardCard", () => {
     });
   });
 
-  it("SVG includes empty-state copy and prize text", () => {
+  it("SVG includes empty-state copy, prize text, and how-to-climb", () => {
     const svg = buildPublicLeaderboardCardSvg({
       brandName: "SAYU GAMING HUB",
       prizePoolCents: 25000,
@@ -216,22 +216,58 @@ describe("renderPublicLeaderboardCard", () => {
       timezone: "America/Chicago",
       competitionStatus: "ACTIVE",
       standings: [],
-      now: NOW
+      now: NOW,
+      climbTips: [
+        { icon: "💵", title: "DEPOSIT", detail: "$1 = 1 PT" },
+        { icon: "🎡", title: "48H WHEEL", detail: "$40+ → spin up to 40 PTS" }
+      ]
     });
     expect(svg).toContain("The race starts here.");
     expect(svg).toContain("$250");
+    expect(svg).toContain("HOW TO CLIMB");
+    expect(svg).toContain("$1 = 1 PT");
+    expect(svg).toContain("48H WHEEL");
   });
 
   it("writes visual inspection sample PNGs", async () => {
     mkdirSync(SAMPLE_DIR, { recursive: true });
 
-    const samples: Array<{ name: string; cents: number; standings: LeaderboardCardStanding[] }> = [
-      { name: "sample-1-250-full10.png", cents: 25000, standings: FULL_TEN },
-      { name: "after-250-full10.png", cents: 25000, standings: FULL_TEN },
+    const refTen: LeaderboardCardStanding[] = [
+      standing(1, "Picasso", 67, { kind: "same" }),
+      standing(2, "Jake", 20),
+      standing(3, "A.", 10),
+      standing(4, "Morgan Grindstaff", 10),
+      standing(5, "Homer Cardenas", 0),
+      standing(6, "L. J.", 0),
+      standing(7, "TanDra DaviDson", 0),
+      standing(8, "Amanda Mauricio", 0),
+      standing(9, "S F", 0),
+      standing(10, "Bee Arnett", 0)
+    ];
+
+    const climbTips = [
+      { icon: "💵", title: "DEPOSIT", detail: "$1 = 1 PT" },
+      { icon: "🤝", title: "REFER", detail: "Milestones up to 300 PTS" },
+      { icon: "🎁", title: "PROMOTIONS", detail: "Verified promo bonuses" },
+      { icon: "🎡", title: "48H WHEEL", detail: "$40+ → spin up to 40 PTS" }
+    ];
+
+    const samples: Array<{
+      name: string;
+      cents: number;
+      standings: LeaderboardCardStanding[];
+    }> = [
+      { name: "after-250-full10.png", cents: 159, standings: refTen },
+      { name: "sample-1-250-full10.png", cents: 159, standings: refTen },
+      {
+        name: "sample-0-zero-pool.png",
+        cents: 0,
+        standings: refTen.map((s) => ({ ...s, points: 0 }))
+      },
       {
         name: "sample-2-1-three.png",
         cents: 100,
-        standings: [standing(1, "Picasso", 12), standing(2, "Skylar", 8), standing(3, "Alex", 3)]
+        standings: [standing(1, "Picasso", 12), standing(2, "Jake", 8), standing(3, "A.", 3)]
       },
       {
         name: "sample-3-10000-long-names.png",
@@ -260,7 +296,8 @@ describe("renderPublicLeaderboardCard", () => {
         timezone: "America/Chicago",
         competitionStatus: "ACTIVE",
         standings: sample.standings,
-        now: NOW
+        now: NOW,
+        climbTips
       });
       writeFileSync(join(SAMPLE_DIR, sample.name), result.png);
       expect(isValidPngBuffer(result.png)).toBe(true);
@@ -270,12 +307,13 @@ describe("renderPublicLeaderboardCard", () => {
     // Telegram-ish mobile preview (~420px wide in chat).
     const full = await renderPublicLeaderboardCard({
       brandName: "SAYU GAMING HUB",
-      prizePoolCents: 25000,
+      prizePoolCents: 159,
       endsAt: ENDS,
       timezone: "America/Chicago",
       competitionStatus: "ACTIVE",
-      standings: FULL_TEN,
-      now: NOW
+      standings: refTen,
+      now: NOW,
+      climbTips
     });
     const mobile = await (await import("sharp")).default(full.png)
       .resize(420, Math.round((420 * LEADERBOARD_CARD_HEIGHT) / LEADERBOARD_CARD_WIDTH), {

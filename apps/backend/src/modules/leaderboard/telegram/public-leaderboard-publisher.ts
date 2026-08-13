@@ -10,12 +10,17 @@ import {
   resolveLeaderboardCardTheme,
   type LeaderboardCardStanding
 } from "./public-leaderboard-card";
+import {
+  buildPublicLeaderboardClimbTips,
+  maxWheelPointsFromDistribution
+} from "./public-leaderboard-climb-tips";
 import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
 import {
   buildPublicLeaderboardKeyboard,
   formatPublicLeaderboardCaption,
   formatPublicLeaderboardMessage
 } from "./public-message";
+import { WHEEL_MAX_POINTS, WHEEL_QUALIFICATION_CENTS } from "../leaderboard.constants";
 
 export type PublicLeaderboardDeliveryAction = "SENT_NEW" | "UPDATED_EXISTING";
 
@@ -91,6 +96,23 @@ export async function publishPublicLeaderboardSnapshot(
 
   const settings = await input.prisma.leaderboardSettings.findUnique({
     where: { ownerCoadminUserId: input.ownerCoadminUserId }
+  });
+
+  const wheelConfig = await input.prisma.leaderboardWheelConfig.findUnique({
+    where: { ownerCoadminUserId: input.ownerCoadminUserId },
+    include: { activeVersion: true }
+  });
+  const wheelEnabled = Boolean(wheelConfig?.enabled && wheelConfig.activeVersionId);
+  const wheelMaxFromDist = maxWheelPointsFromDistribution(
+    wheelConfig?.activeVersion?.rewardDistributionJson
+  );
+  const climbTips = buildPublicLeaderboardClimbTips({
+    includeDeposit: true,
+    includeReferral: true,
+    includePromotions: true,
+    includeWheel: wheelEnabled,
+    wheelQualificationCents: WHEEL_QUALIFICATION_CENTS,
+    wheelMaxPoints: wheelMaxFromDist ?? WHEEL_MAX_POINTS
   });
 
   const standings = await input.prisma.leaderboardStanding.findMany({
@@ -191,7 +213,8 @@ export async function publishPublicLeaderboardSnapshot(
       timezone,
       competitionStatus: competition.status,
       standings: cardStandings,
-      theme: resolveLeaderboardCardTheme(competition.status, competition.endsAt)
+      theme: resolveLeaderboardCardTheme(competition.status, competition.endsAt),
+      climbTips
     });
     png = rendered.png;
     input.logger?.info?.(
