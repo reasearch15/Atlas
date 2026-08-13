@@ -46,7 +46,8 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     prisma: app.prisma,
     client,
     encryptionKey: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY,
-    startTokenSecret: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY || app.env.JWT_ACCESS_SECRET
+    startTokenSecret: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY || app.env.JWT_ACCESS_SECRET,
+    outbox
   });
 
   app.decorate("leaderboardTelegramOutbox", outbox);
@@ -136,28 +137,92 @@ function mapPollingUpdate(update: {
       readonly username?: string;
     };
   };
+  readonly callbackQuery?: {
+    readonly id: string;
+    readonly from: {
+      readonly id: number;
+      readonly isBot: boolean;
+      readonly firstName: string;
+      readonly lastName?: string;
+      readonly username?: string;
+    };
+    readonly data?: string;
+    readonly message?: {
+      readonly messageId: number;
+      readonly chat: { readonly id: number; readonly type: string };
+    };
+  };
 }): import("./bot-update-handler").InboundTelegramUpdate {
-  if (!update.message) {
-    return { update_id: update.updateId };
+  const mapped: import("./bot-update-handler").InboundTelegramUpdate = {
+    update_id: update.updateId
+  };
+
+  if (update.message) {
+    const msg = update.message;
+    const from = msg.from
+      ? {
+          id: msg.from.id,
+          is_bot: msg.from.isBot,
+          first_name: msg.from.firstName,
+          ...(msg.from.lastName !== undefined ? { last_name: msg.from.lastName } : {}),
+          ...(msg.from.username !== undefined ? { username: msg.from.username } : {})
+        }
+      : undefined;
+    return {
+      ...mapped,
+      message: {
+        message_id: msg.messageId,
+        date: msg.date,
+        chat: { id: msg.chat.id, type: msg.chat.type },
+        ...(msg.text !== undefined ? { text: msg.text } : {}),
+        ...(from !== undefined ? { from } : {})
+      },
+      ...(update.callbackQuery
+        ? { callback_query: mapPollingCallbackQuery(update.callbackQuery) }
+        : {})
+    };
   }
-  const msg = update.message;
-  const from = msg.from
-    ? {
-        id: msg.from.id,
-        is_bot: msg.from.isBot,
-        first_name: msg.from.firstName,
-        ...(msg.from.lastName !== undefined ? { last_name: msg.from.lastName } : {}),
-        ...(msg.from.username !== undefined ? { username: msg.from.username } : {})
-      }
-    : undefined;
+
+  if (update.callbackQuery) {
+    return { ...mapped, callback_query: mapPollingCallbackQuery(update.callbackQuery) };
+  }
+
+  return mapped;
+}
+
+function mapPollingCallbackQuery(cq: {
+  readonly id: string;
+  readonly from: {
+    readonly id: number;
+    readonly isBot: boolean;
+    readonly firstName: string;
+    readonly lastName?: string;
+    readonly username?: string;
+  };
+  readonly data?: string;
+  readonly message?: {
+    readonly messageId: number;
+    readonly chat: { readonly id: number; readonly type: string };
+  };
+}): NonNullable<import("./bot-update-handler").InboundTelegramUpdate["callback_query"]> {
+  const from = {
+    id: cq.from.id,
+    is_bot: cq.from.isBot,
+    first_name: cq.from.firstName,
+    ...(cq.from.lastName !== undefined ? { last_name: cq.from.lastName } : {}),
+    ...(cq.from.username !== undefined ? { username: cq.from.username } : {})
+  };
   return {
-    update_id: update.updateId,
-    message: {
-      message_id: msg.messageId,
-      date: msg.date,
-      chat: { id: msg.chat.id, type: msg.chat.type },
-      ...(msg.text !== undefined ? { text: msg.text } : {}),
-      ...(from !== undefined ? { from } : {})
-    }
+    id: cq.id,
+    from,
+    ...(cq.data !== undefined ? { data: cq.data } : {}),
+    ...(cq.message
+      ? {
+          message: {
+            message_id: cq.message.messageId,
+            chat: { id: cq.message.chat.id, type: cq.message.chat.type }
+          }
+        }
+      : {})
   };
 }

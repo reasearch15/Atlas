@@ -32,10 +32,34 @@ export interface TelegramMessage {
 
 export type TelegramParseMode = "HTML" | "Markdown" | "MarkdownV2";
 
+export interface TelegramInlineKeyboardButton {
+  readonly text: string;
+  readonly callback_data: string;
+}
+
+export interface TelegramInlineKeyboardMarkup {
+  readonly inline_keyboard: ReadonlyArray<ReadonlyArray<TelegramInlineKeyboardButton>>;
+}
+
+export type SendMessageOptions = {
+  readonly parseMode?: TelegramParseMode;
+  readonly replyMarkup?: TelegramInlineKeyboardMarkup;
+};
+
 export interface TelegramWebhookInfo {
   readonly url: string;
   readonly hasCustomCertificate: boolean;
   readonly pendingUpdateCount: number;
+}
+
+export interface TelegramCallbackQuery {
+  readonly id: string;
+  readonly from: TelegramUser;
+  readonly data?: string;
+  readonly message?: {
+    readonly messageId: number;
+    readonly chat: TelegramChat;
+  };
 }
 
 export interface TelegramUpdate {
@@ -47,6 +71,7 @@ export interface TelegramUpdate {
     readonly chat: TelegramChat;
     readonly from?: TelegramUser;
   };
+  readonly callbackQuery?: TelegramCallbackQuery;
 }
 
 export interface LeaderboardTelegramClient {
@@ -62,7 +87,7 @@ export interface LeaderboardTelegramClient {
     token: string,
     chatId: string | number,
     text: string,
-    parseMode?: TelegramParseMode
+    parseModeOrOptions?: TelegramParseMode | SendMessageOptions
   ): Promise<TelegramMessage>;
   editMessageText(
     token: string,
@@ -181,10 +206,12 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
     token: string,
     chatId: string | number,
     text: string,
-    parseMode?: TelegramParseMode
+    parseModeOrOptions?: TelegramParseMode | SendMessageOptions
   ): Promise<TelegramMessage> {
+    const options = normalizeSendMessageOptions(parseModeOrOptions);
     const body: Record<string, unknown> = { chat_id: chatId, text };
-    if (parseMode) body.parse_mode = parseMode;
+    if (options.parseMode) body.parse_mode = options.parseMode;
+    if (options.replyMarkup) body.reply_markup = options.replyMarkup;
     const raw = await this.callTelegram<Record<string, unknown>>(token, "sendMessage", body);
     return mapMessage(raw);
   }
@@ -217,7 +244,7 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
   async setWebhook(token: string, url: string, secretToken?: string): Promise<boolean> {
     const body: Record<string, unknown> = {
       url,
-      allowed_updates: ["message"]
+      allowed_updates: ["message", "callback_query"]
     };
     if (secretToken) body.secret_token = secretToken;
     return this.callTelegram<boolean>(token, "setWebhook", body);
@@ -381,7 +408,12 @@ export interface FakeTelegramChatState {
   username?: string;
   /** userId → ChatMember.status */
   members: Map<number, string>;
-  messages: Array<{ messageId: number; text: string; deleted?: boolean }>;
+  messages: Array<{
+    messageId: number;
+    text: string;
+    deleted?: boolean;
+    replyMarkup?: TelegramInlineKeyboardMarkup;
+  }>;
   nextMessageId: number;
 }
 
@@ -393,6 +425,7 @@ export interface FakeLeaderboardTelegramState {
   failures?: Map<string, LeaderboardTelegramApiError>;
   webhooks?: Map<string, { url: string; secretToken?: string }>;
   pendingUpdates?: Map<string, TelegramUpdate[]>;
+  callbackAnswers?: Array<{ callbackQueryId: string; text?: string }>;
 }
 
 export function createFakeLeaderboardTelegramClient(
@@ -471,9 +504,10 @@ export function createFakeLeaderboardTelegramClient(
           user: { id, isBot: false, firstName: `User${id}` }
         }));
     },
-    async sendMessage(token, chatId, text) {
+    async sendMessage(token, chatId, text, parseModeOrOptions) {
       fail(token, "sendMessage");
       requireBot(token);
+      const options = normalizeSendMessageOptions(parseModeOrOptions);
       const id = Number(chatId);
       let chat = state.chats.get(id);
       if (!chat) {
@@ -488,7 +522,11 @@ export function createFakeLeaderboardTelegramClient(
         state.chats.set(id, chat);
       }
       const messageId = chat.nextMessageId++;
-      chat.messages.push({ messageId, text });
+      chat.messages.push({
+        messageId,
+        text,
+        ...(options.replyMarkup ? { replyMarkup: options.replyMarkup } : {})
+      });
       return {
         messageId,
         chat: mapFakeChat(chat),
@@ -556,31 +594,86 @@ export function createFakeLeaderboardTelegramClient(
       const limit = options?.limit ?? filtered.length;
       return filtered.slice(0, limit);
     },
-    async answerCallbackQuery(token) {
+    async answerCallbackQuery(token, callbackQueryId, text) {
       fail(token, "answerCallbackQuery");
       requireBot(token);
+      if (!state.callbackAnswers) state.callbackAnswers = [];
+      state.callbackAnswers.push({
+        callbackQueryId,
+        ...(text !== undefined ? { text } : {})
+      });
       return true;
     }
   };
 }
 
+function normalizeSendMessageOptions(
+  parseModeOrOptions?: TelegramParseMode | SendMessageOptions
+): SendMessageOptions {
+  if (parseModeOrOptions == null) return {};
+  if (typeof parseModeOrOptions === "string") {
+    return { parseMode: parseModeOrOptions };
+  }
+  return parseModeOrOptions;
+}
+
 function mapUpdate(raw: Record<string, unknown>): TelegramUpdate {
   const messageRaw = raw.message as Record<string, unknown> | undefined;
-  if (!messageRaw) {
-    return { updateId: Number(raw.update_id) };
+  const callbackRaw = raw.callback_query as Record<string, unknown> | undefined;
+  const update: TelegramUpdate = { updateId: Number(raw.update_id) };
+
+  if (messageRaw) {
+    const fromRaw = messageRaw.from as Record<string, unknown> | undefined;
+    const chatRaw = (messageRaw.chat ?? {}) as Record<string, unknown>;
+    return {
+      ...update,
+      message: {
+        messageId: Number(messageRaw.message_id),
+        date: Number(messageRaw.date ?? 0),
+        chat: mapChat(chatRaw),
+        ...(messageRaw.text != null ? { text: String(messageRaw.text) } : {}),
+        ...(fromRaw ? { from: mapUser(fromRaw) } : {})
+      },
+      ...(callbackRaw ? { callbackQuery: mapCallbackQuery(callbackRaw) } : {})
+    };
   }
-  const fromRaw = messageRaw.from as Record<string, unknown> | undefined;
-  const chatRaw = (messageRaw.chat ?? {}) as Record<string, unknown>;
-  return {
-    updateId: Number(raw.update_id),
-    message: {
-      messageId: Number(messageRaw.message_id),
-      date: Number(messageRaw.date ?? 0),
-      chat: mapChat(chatRaw),
-      ...(messageRaw.text != null ? { text: String(messageRaw.text) } : {}),
-      ...(fromRaw ? { from: mapUser(fromRaw) } : {})
-    }
+
+  if (callbackRaw) {
+    return { ...update, callbackQuery: mapCallbackQuery(callbackRaw) };
+  }
+
+  return update;
+}
+
+function mapCallbackQuery(raw: Record<string, unknown>): TelegramCallbackQuery {
+  const fromRaw = (raw.from ?? {}) as Record<string, unknown>;
+  const messageRaw = raw.message as Record<string, unknown> | undefined;
+  const mapped: TelegramCallbackQuery = {
+    id: String(raw.id ?? ""),
+    from: mapUser(fromRaw)
   };
+  if (raw.data != null) {
+    return messageRaw
+      ? {
+          ...mapped,
+          data: String(raw.data),
+          message: {
+            messageId: Number(messageRaw.message_id),
+            chat: mapChat((messageRaw.chat ?? {}) as Record<string, unknown>)
+          }
+        }
+      : { ...mapped, data: String(raw.data) };
+  }
+  if (messageRaw) {
+    return {
+      ...mapped,
+      message: {
+        messageId: Number(messageRaw.message_id),
+        chat: mapChat((messageRaw.chat ?? {}) as Record<string, unknown>)
+      }
+    };
+  }
+  return mapped;
 }
 
 function mapFakeChat(chat: FakeTelegramChatState): TelegramChat {

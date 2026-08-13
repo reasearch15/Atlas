@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   formatPersonalAnnouncementDm,
   formatPersonalFinalResultMessage,
-  formatPersonalRankMessage
+  formatPersonalRankMessage,
+  formatWheelSpinResultMessage,
+  buildWheelSpinInlineKeyboard,
+  LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA
 } from "./personal-rank-message";
 
 describe("formatPersonalRankMessage", () => {
@@ -68,6 +71,7 @@ describe("formatPersonalRankMessage", () => {
       }
     });
     expect(available).toContain("Wheel Spin Available");
+    expect(available).not.toContain("Open Atlas to spin");
 
     const used = formatPersonalRankMessage({
       rank: 5,
@@ -88,6 +92,75 @@ describe("formatPersonalRankMessage", () => {
       }
     });
     expect(used).toContain("Used for this cycle");
+  });
+});
+
+describe("formatWheelSpinResultMessage", () => {
+  it("formats a normal rank-movement result", () => {
+    const text = formatWheelSpinResultMessage({
+      pointsAwarded: 25,
+      previousRank: 9,
+      resultingRank: 6,
+      totalPoints: 309,
+      pointsAbove: 12
+    });
+    expect(text).toContain("🎡 WHEEL RESULT");
+    expect(text).toContain("+25 POINTS!");
+    expect(text).toContain("#9 → #6");
+    expect(text).toContain("You're now 12 points behind #5.");
+    expect(text).toContain("Total points: 309");
+  });
+
+  it("formats a zero-point success without looking like an error", () => {
+    const text = formatWheelSpinResultMessage({
+      pointsAwarded: 0,
+      previousRank: 8,
+      resultingRank: 8,
+      totalPoints: 200,
+      pointsAbove: 10
+    });
+    expect(text).toContain("0 POINTS");
+    expect(text).toContain("No points this spin.");
+    expect(text).toContain("You're still #8.");
+    expect(text).toContain("Keep earning through deposits, referrals and promotions.");
+    expect(text).not.toMatch(/error|failed|unavailable/i);
+  });
+
+  it("formats Top 3 / prize-zone entry", () => {
+    const text = formatWheelSpinResultMessage({
+      pointsAwarded: 35,
+      previousRank: 5,
+      resultingRank: 3,
+      totalPoints: 344,
+      pointsAbove: 0
+    });
+    expect(text).toContain("+35 POINTS!");
+    expect(text).toContain("#5 → #3");
+    expect(text).toContain("🏆 You're now in the prize zone!");
+    expect(text).toContain("Total points: 344");
+  });
+
+  it("formats a forced 40-point result", () => {
+    const text = formatWheelSpinResultMessage({
+      pointsAwarded: 40,
+      previousRank: 4,
+      resultingRank: 2,
+      totalPoints: 400,
+      pointsAbove: null
+    });
+    expect(text).toContain("+40 POINTS!");
+    expect(text).toContain("#4 → #2");
+    expect(text).toContain("prize zone");
+  });
+});
+
+describe("buildWheelSpinInlineKeyboard", () => {
+  it("uses namespaced callback data without player/owner IDs", () => {
+    const kb = buildWheelSpinInlineKeyboard();
+    expect(kb.inline_keyboard[0]?.[0]?.text).toBe("🎡 Spin Now");
+    expect(kb.inline_keyboard[0]?.[0]?.callback_data).toBe(LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA);
+    expect(LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA).toBe("leaderboard:wheel:spin");
+    expect(JSON.stringify(kb)).not.toMatch(/crmContact|participant|ownerCoadmin|uuid/i);
   });
 });
 

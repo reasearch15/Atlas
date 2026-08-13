@@ -1,4 +1,10 @@
 import { formatPrizePoolDisplay } from "../leaderboard.standing-helpers";
+import type { TelegramInlineKeyboardMarkup } from "./leaderboard-telegram.client";
+
+/** Inline keyboard callback_data for player wheel spin. Never includes IDs. */
+export const LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA = "leaderboard:wheel:spin";
+
+const TOP_PRIZE_ZONE_RANK = 3;
 
 export interface PersonalRankWheelStatus {
   readonly qualifyingDepositCents: number;
@@ -19,8 +25,28 @@ export interface PersonalRankMessageInput {
   readonly endsAt: Date;
   readonly timezone: string;
   readonly isFirst: boolean;
-  /** Optional Phase 6 wheel status lines for /rank (bot Spin callback DEFERRED). */
+  /** Optional Phase 6 wheel status lines for /rank. */
   readonly wheelStatus?: PersonalRankWheelStatus | null;
+}
+
+export interface WheelSpinResultMessageInput {
+  readonly pointsAwarded: number;
+  readonly previousRank: number | null;
+  readonly resultingRank: number | null;
+  readonly totalPoints: number;
+  /** Points behind the rank above after spin; omitted when #1 or unavailable. */
+  readonly pointsAbove: number | null;
+}
+
+/**
+ * Inline Spin Now keyboard for /rank when wheel status is AVAILABLE.
+ */
+export function buildWheelSpinInlineKeyboard(): TelegramInlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [{ text: "🎡 Spin Now", callback_data: LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA }]
+    ]
+  };
 }
 
 export interface PersonalFinalResultMessageInput {
@@ -158,15 +184,71 @@ export function formatPersonalAnnouncementDm(input: {
       return [
         "🎡 Wheel spin complete!",
         input.totalPoints != null ? `You won +${Math.trunc(input.totalPoints)} wheel points.` : null,
-        "Open /rank for your latest standing.",
-        // Bot Spin callback DEFERRED — Atlas UI is the spin surface.
-        "(Spin in Atlas — bot Spin button coming later.)"
+        "Open /rank for your latest standing."
       ]
         .filter((line): line is string => Boolean(line))
         .join("\n");
     default:
       return `📈 Rank update: ${from} → #${input.toRank}.${points}\nOpen /rank for details.`;
   }
+}
+
+/**
+ * Formats the private wheel result DM after a successful Telegram spin.
+ */
+export function formatWheelSpinResultMessage(input: WheelSpinResultMessageInput): string {
+  const points = Math.trunc(input.pointsAwarded);
+  const total = Math.trunc(input.totalPoints);
+  const prev = input.previousRank;
+  const next = input.resultingRank;
+  const enteredPrizeZone =
+    next != null &&
+    next <= TOP_PRIZE_ZONE_RANK &&
+    (prev == null || prev > TOP_PRIZE_ZONE_RANK);
+
+  if (points === 0) {
+    const stillRank = next != null ? `You're still #${next}.` : prev != null ? `You're still #${prev}.` : null;
+    return [
+      "🎡 WHEEL RESULT",
+      "",
+      "0 POINTS",
+      "",
+      "No points this spin.",
+      ...(stillRank ? ["", stillRank] : []),
+      "Keep earning through deposits, referrals and promotions."
+    ].join("\n");
+  }
+
+  const lines = [
+    "🎡 WHEEL RESULT",
+    "",
+    `+${points} POINTS!`,
+    ""
+  ];
+
+  if (prev != null && next != null) {
+    lines.push(`#${prev} → #${next}`);
+    lines.push("");
+  } else if (next != null) {
+    lines.push(`You're now #${next}.`);
+    lines.push("");
+  }
+
+  if (enteredPrizeZone) {
+    lines.push("🏆 You're now in the prize zone!");
+    lines.push("");
+  } else if (
+    next != null &&
+    next > 1 &&
+    input.pointsAbove != null &&
+    input.pointsAbove > 0
+  ) {
+    lines.push(`You're now ${input.pointsAbove} points behind #${next - 1}.`);
+    lines.push("");
+  }
+
+  lines.push(`Total points: ${total}`);
+  return lines.join("\n");
 }
 
 function buildWheelStatusLines(wheel: PersonalRankWheelStatus | null | undefined): string[] {
@@ -183,7 +265,7 @@ function buildWheelStatusLines(wheel: PersonalRankWheelStatus | null | undefined
     ];
   }
   if (wheel.available) {
-    return ["🎡 Wheel Spin Available!", "Open Atlas to spin."];
+    return ["🎡 Wheel Spin Available!"];
   }
   return [
     `🎡 Wheel: $${have} / $${need}`,

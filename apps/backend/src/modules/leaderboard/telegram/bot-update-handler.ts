@@ -1,5 +1,6 @@
 /**
- * Telegram Bot webhook handler for leaderboard player onboarding (/start, /rank).
+ * Telegram Bot webhook handler for leaderboard player onboarding (/start, /rank)
+ * and secure private wheel spin via callback_query.
  *
  * Deploy requirement: set LEADERBOARD_BOT_WEBHOOK_BASE_URL to the public HTTPS origin
  * of atlas-backend (e.g. https://api.example.com). Webhooks are registered to
@@ -13,13 +14,54 @@ import {
 } from "@atlas/shared/session-encryption";
 import { tryAutoBindParticipant } from "../auto-bind";
 import { LEADERBOARD_TIMEZONE } from "../leaderboard.constants";
+import { LeaderboardError } from "../leaderboard.errors";
 import { computeStandingGaps } from "../leaderboard.standing-helpers";
 import { PrismaLeaderboardService } from "../leaderboard.prisma-service";
 import { withRanks } from "../ranking";
+import { createCryptoWheelRng, type WheelRng } from "../wheel-rng";
+import { PrismaWheelService } from "../wheel.prisma-service";
+import type { WheelSpinResult } from "../wheel.service";
 import { verifyBotStartToken } from "./bot-start-token";
 import type { LeaderboardTelegramClient } from "./leaderboard-telegram.client";
-import { formatPersonalRankMessage } from "./personal-rank-message";
-import { PrismaWheelService } from "../wheel.prisma-service";
+import {
+  buildWheelSpinInlineKeyboard,
+  formatPersonalRankMessage,
+  formatWheelSpinResultMessage,
+  LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA
+} from "./personal-rank-message";
+
+export interface BotWheelServicePort {
+  getStatus(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    crmContactId: string,
+    now: Date
+  ): Promise<{
+    wheelEnabled: boolean;
+    configured: boolean;
+    qualifyingDepositCents: number;
+    qualificationCentsRequired: number;
+    available: boolean;
+    consumed: boolean;
+    pointsAwarded: number | null;
+    cycleSequence: number | null;
+  }>;
+  spin(input: {
+    workspaceId: string;
+    crmContactId: string;
+    idempotencyKey: string;
+    actorUserId: string;
+    rng?: WheelRng;
+  }): Promise<WheelSpinResult>;
+}
+
+export interface BotTelegramOutboxPort {
+  enqueueRefresh(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string
+  ): Promise<string>;
+}
 
 export interface BotUpdateHandlerDeps {
   readonly prisma: PrismaClient;
@@ -27,6 +69,10 @@ export interface BotUpdateHandlerDeps {
   readonly encryptionKey: string;
   readonly startTokenSecret: string;
   readonly domain?: PrismaLeaderboardService;
+  readonly wheel?: BotWheelServicePort;
+  readonly outbox?: BotTelegramOutboxPort;
+  /** Test-only RNG injection for Telegram spins. */
+  readonly createWheelRng?: () => WheelRng;
 }
 
 export interface InboundTelegramUpdate {
@@ -44,6 +90,21 @@ export interface InboundTelegramUpdate {
       readonly username?: string;
     };
   };
+  readonly callback_query?: {
+    readonly id?: string;
+    readonly data?: string;
+    readonly from?: {
+      readonly id?: number;
+      readonly is_bot?: boolean;
+      readonly first_name?: string;
+      readonly last_name?: string;
+      readonly username?: string;
+    };
+    readonly message?: {
+      readonly message_id?: number;
+      readonly chat?: { readonly id?: number; readonly type?: string };
+    };
+  };
 }
 
 const WELCOME =
@@ -58,6 +119,9 @@ export class LeaderboardBotUpdateHandler {
   private readonly encryptionKey: string;
   private readonly startTokenSecret: string;
   private readonly domain: PrismaLeaderboardService;
+  private readonly wheel: BotWheelServicePort;
+  private readonly outbox: BotTelegramOutboxPort | null;
+  private readonly createWheelRng: () => WheelRng;
 
   public constructor(deps: BotUpdateHandlerDeps) {
     this.prisma = deps.prisma;
@@ -65,6 +129,9 @@ export class LeaderboardBotUpdateHandler {
     this.encryptionKey = deps.encryptionKey;
     this.startTokenSecret = deps.startTokenSecret;
     this.domain = deps.domain ?? new PrismaLeaderboardService(deps.prisma);
+    this.wheel = deps.wheel ?? new PrismaWheelService(deps.prisma);
+    this.outbox = deps.outbox ?? null;
+    this.createWheelRng = deps.createWheelRng ?? createCryptoWheelRng;
   }
 
   public async handleWebhook(input: {
@@ -118,15 +185,21 @@ export class LeaderboardBotUpdateHandler {
     },
     update: InboundTelegramUpdate
   ): Promise<void> {
+    const token = decryptSecret(
+      integration.encryptedBotToken as unknown as EncryptedSecret,
+      this.encryptionKey
+    );
+
+    if (update.callback_query) {
+      await this.handleCallbackQuery({ integration, token, update });
+      return;
+    }
+
     const message = update.message;
     const from = message?.from;
     const text = message?.text?.trim() ?? "";
     if (!from?.id || from.is_bot) return;
 
-    const token = decryptSecret(
-      integration.encryptedBotToken as unknown as EncryptedSecret,
-      this.encryptionKey
-    );
     const telegramUserId = String(from.id);
 
     if (text === "/start" || text.startsWith("/start ")) {
@@ -149,6 +222,158 @@ export class LeaderboardBotUpdateHandler {
         token,
         telegramUserId
       });
+    }
+  }
+
+  private async handleCallbackQuery(input: {
+    integration: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+    };
+    token: string;
+    update: InboundTelegramUpdate;
+  }): Promise<void> {
+    const cq = input.update.callback_query;
+    if (!cq?.id || !cq.from?.id || cq.from.is_bot) return;
+
+    const answer = async (text: string): Promise<void> => {
+      if (!this.client.answerCallbackQuery) return;
+      try {
+        await this.client.answerCallbackQuery(input.token, cq.id!, text);
+      } catch {
+        // Callback ack must never roll back wheel points.
+      }
+    };
+
+    const data = cq.data?.trim() ?? "";
+    if (data !== LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA) {
+      await answer("Unsupported action.");
+      return;
+    }
+
+    await this.handleWheelSpinCallback({
+      integration: input.integration,
+      token: input.token,
+      updateId: input.update.update_id,
+      callbackQueryId: cq.id,
+      telegramUserId: String(cq.from.id),
+      answer
+    });
+  }
+
+  private async handleWheelSpinCallback(input: {
+    integration: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+    };
+    token: string;
+    updateId: number;
+    callbackQueryId: string;
+    telegramUserId: string;
+    answer: (text: string) => Promise<void>;
+  }): Promise<void> {
+    const link = await this.prisma.leaderboardBotPlayerLink.findUnique({
+      where: {
+        botIntegrationId_telegramUserId: {
+          botIntegrationId: input.integration.id,
+          telegramUserId: input.telegramUserId
+        }
+      }
+    });
+    if (!link || link.ownerCoadminUserId !== input.integration.ownerCoadminUserId) {
+      await input.answer("Send /start first.");
+      try {
+        await this.client.sendMessage(
+          input.token,
+          Number(input.telegramUserId),
+          "Send /start first to connect to this leaderboard."
+        );
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    const participant = await this.prisma.leaderboardParticipant.findUnique({
+      where: {
+        workspaceId_crmContactId: {
+          workspaceId: input.integration.workspaceId,
+          crmContactId: link.crmContactId
+        }
+      }
+    });
+    if (
+      !participant ||
+      participant.ownerCoadminUserId !== input.integration.ownerCoadminUserId
+    ) {
+      await input.answer("Send /start first.");
+      return;
+    }
+
+    const active = await this.prisma.leaderboardCompetition.findFirst({
+      where: {
+        workspaceId: input.integration.workspaceId,
+        ownerCoadminUserId: input.integration.ownerCoadminUserId,
+        status: "ACTIVE"
+      },
+      orderBy: { sequence: "desc" }
+    });
+    if (!active) {
+      await input.answer("No active competition.");
+      return;
+    }
+
+    // Identity comes only from BotPlayerLink + integration — never from callback payload.
+    const idempotencyKey = `tg:wheel:${input.integration.id}:${input.updateId}`;
+
+    let result: WheelSpinResult;
+    try {
+      result = await this.wheel.spin({
+        workspaceId: input.integration.workspaceId,
+        crmContactId: link.crmContactId,
+        idempotencyKey,
+        actorUserId: input.integration.ownerCoadminUserId,
+        rng: this.createWheelRng()
+      });
+    } catch (error) {
+      await input.answer(mapWheelSpinCallbackError(error));
+      return;
+    }
+
+    await input.answer("Spin complete! 🎡");
+
+    const gaps = await this.loadStandingGaps(
+      active.id,
+      input.integration.ownerCoadminUserId,
+      link.crmContactId
+    );
+
+    const resultText = formatWheelSpinResultMessage({
+      pointsAwarded: result.spin.pointsAwarded,
+      previousRank: result.spin.previousRank,
+      resultingRank: result.spin.resultingRank,
+      totalPoints: result.standing.totalPoints,
+      pointsAbove: gaps?.pointsAbove ?? null
+    });
+
+    try {
+      await this.client.sendMessage(input.token, Number(input.telegramUserId), resultText);
+    } catch {
+      // Telegram failure must never roll back committed wheel points.
+    }
+
+    if (this.outbox && !result.replay) {
+      try {
+        await this.outbox.enqueueRefresh(
+          input.integration.workspaceId,
+          input.integration.ownerCoadminUserId,
+          result.spin.competitionId
+        );
+      } catch {
+        // Public refresh is best-effort after spin commit.
+      }
     }
   }
 
@@ -339,7 +564,6 @@ export class LeaderboardBotUpdateHandler {
 
     const gaps = computeStandingGaps(ranked, link.crmContactId);
 
-    // Wheel status for /rank only — bot Spin callback DEFERRED (Atlas UI spin first).
     let wheelStatus: {
       qualifyingDepositCents: number;
       qualificationCentsRequired: number;
@@ -349,8 +573,7 @@ export class LeaderboardBotUpdateHandler {
       cycleSequence: number | null;
     } | null = null;
     try {
-      const wheelService = new PrismaWheelService(this.prisma);
-      const status = await wheelService.getStatus(
+      const status = await this.wheel.getStatus(
         input.integration.workspaceId,
         input.integration.ownerCoadminUserId,
         link.crmContactId,
@@ -382,11 +605,39 @@ export class LeaderboardBotUpdateHandler {
       wheelStatus
     });
 
-    await this.client.sendMessage(input.token, Number(input.telegramUserId), text);
+    const sendOptions =
+      wheelStatus?.available === true
+        ? { replyMarkup: buildWheelSpinInlineKeyboard() }
+        : undefined;
+
+    await this.client.sendMessage(
+      input.token,
+      Number(input.telegramUserId),
+      text,
+      sendOptions
+    );
     await this.prisma.leaderboardBotPlayerLink.update({
       where: { id: link.id },
       data: { lastRankRequestedAt: new Date() }
     });
+  }
+
+  private async loadStandingGaps(
+    competitionId: string,
+    ownerCoadminUserId: string,
+    crmContactId: string
+  ) {
+    const standings = await this.prisma.leaderboardStanding.findMany({
+      where: { competitionId, ownerCoadminUserId }
+    });
+    const ranked = withRanks(
+      standings.map((s) => ({
+        crmContactId: s.crmContactId,
+        totalPoints: s.totalPoints,
+        pointsReachedAt: s.pointsReachedAt
+      }))
+    );
+    return computeStandingGaps(ranked, crmContactId);
   }
 
   private async upsertPrivateContact(input: {
@@ -440,6 +691,27 @@ export class LeaderboardBotUpdateHandler {
       throw error;
     }
   }
+}
+
+function mapWheelSpinCallbackError(error: unknown): string {
+  if (error instanceof LeaderboardError) {
+    switch (error.code) {
+      case "WHEEL_ALREADY_CONSUMED":
+        return "You already used your spin for this cycle.";
+      case "WHEEL_NOT_AVAILABLE":
+      case "WHEEL_NOT_ENABLED":
+      case "WHEEL_NOT_CONFIGURED":
+      case "WHEEL_POLICY_UNSET":
+        return "Wheel is not available yet.";
+      case "WHEEL_COMPETITION_NOT_ACTIVE":
+        return "No active competition.";
+      case "PARTICIPANT_NOT_BOUND":
+        return "Send /start first.";
+      default:
+        return "Could not spin right now. Try again later.";
+    }
+  }
+  return "Could not spin right now. Try again later.";
 }
 
 function payloadIsRank(text: string): boolean {
