@@ -14,6 +14,7 @@ import {
   type LeaderboardTelegramClient
 } from "./leaderboard-telegram.client";
 import type { LeaderboardTelegramOutboxService } from "./leaderboard-telegram.outbox";
+import { publishPublicLeaderboardSnapshot } from "./public-leaderboard-publisher";
 
 export interface LeaderboardTelegramIntegrationDeps {
   readonly prisma: PrismaClient;
@@ -405,14 +406,7 @@ export class LeaderboardTelegramIntegrationService {
       );
     }
     if (!row.postingEnabled) {
-      throw new AppError(
-        400,
-        "TELEGRAM_POSTING_DISABLED",
-        "Enable posting first."
-      );
-    }
-    if (!this.outbox) {
-      throw new AppError(503, "TELEGRAM_OUTBOX_UNAVAILABLE", "Leaderboard Telegram outbox is not available.");
+      throw new AppError(400, "TELEGRAM_POSTING_DISABLED", "Enable posting first.");
     }
 
     const competition = await this.prisma.leaderboardCompetition.findFirst({
@@ -431,15 +425,58 @@ export class LeaderboardTelegramIntegrationService {
       );
     }
 
-    const jobId = await this.outbox.enqueueRefresh(workspaceId, ownerCoadminUserId, competition.id, {
-      // Manual publish is a snapshot only — never emit rank-achievement side effects.
-      skipRankAnnouncements: true
-    });
     const channelLabel =
       row.channelTitle?.trim() ||
       (row.channelUsername ? `@${row.channelUsername.replace(/^@/, "")}` : null) ||
       "Telegram channel";
-    const mode = row.persistentMessageId ? "edit" : "send";
+
+    let token: string;
+    try {
+      token = this.decryptToken(row.encryptedBotToken);
+    } catch {
+      throw new AppError(500, "TELEGRAM_TOKEN_DECRYPT_FAILED", "Stored bot token could not be decrypted.");
+    }
+
+    let published;
+    try {
+      published = await publishPublicLeaderboardSnapshot({
+        prisma: this.prisma,
+        client: this.client,
+        token,
+        workspaceId,
+        ownerCoadminUserId,
+        competitionId: competition.id,
+        integrationId: row.id,
+        channelId: row.channelId,
+        botUsername: row.botUsername,
+        // Manual send always posts a fresh message (never silently edit a historical one).
+        persistentMessageId: null,
+        persistentMessageCompetitionId: row.persistentMessageCompetitionId,
+        lastPublicTop10Json: row.lastPublicTop10Json,
+        mode: "send_new",
+        skipRankAnnouncements: true
+      });
+    } catch (error) {
+      if (error instanceof LeaderboardTelegramApiError) {
+        await this.prisma.leaderboardBotIntegration.update({
+          where: { id: row.id },
+          data: { lastError: error.description.slice(0, 500) }
+        });
+        throw new AppError(
+          502,
+          "TELEGRAM_SEND_FAILED",
+          `Telegram rejected the leaderboard post: ${error.description}`
+        );
+      }
+      if (error instanceof Error && error.message === "COMPETITION_NOT_FOUND") {
+        throw new AppError(
+          404,
+          "COMPETITION_NOT_FOUND",
+          "No active leaderboard competition is available."
+        );
+      }
+      throw error;
+    }
 
     await this.audit.record({
       workspaceId,
@@ -448,19 +485,21 @@ export class LeaderboardTelegramIntegrationService {
       metadata: {
         ownerCoadminUserId,
         competitionId: competition.id,
-        jobId,
-        mode,
-        channelId: row.channelId,
+        channelId: published.channelId,
+        telegramMessageId: published.messageId,
+        deliveryAction: published.deliveryAction,
         skipRankAnnouncements: true
       }
     });
 
     return {
-      queued: true,
-      jobId,
+      queued: false,
       competitionId: competition.id,
-      mode,
+      channelId: published.channelId,
       channelTitle: row.channelTitle?.trim() || null,
+      telegramMessageId: published.messageId,
+      deliveryAction: "SENT_NEW",
+      mode: "send",
       message: `Leaderboard sent to ${channelLabel}`
     };
   }

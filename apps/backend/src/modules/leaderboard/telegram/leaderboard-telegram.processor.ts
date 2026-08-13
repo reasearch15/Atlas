@@ -4,10 +4,7 @@ import {
   type EncryptedSecret
 } from "@atlas/shared/session-encryption";
 import { AuditService } from "../../audit/audit.service";
-import { LEADERBOARD_TIMEZONE } from "../leaderboard.constants";
 import { PrismaLeaderboardService } from "../leaderboard.prisma-service";
-import { withRanks } from "../ranking";
-import { detectRankAnnouncements, previousTop10ForAnnouncements } from "./announcement-policy";
 import {
   HttpLeaderboardTelegramClient,
   LeaderboardTelegramApiError,
@@ -17,10 +14,10 @@ import { mapTelegramChatMemberStatus } from "./membership-status";
 import { planMembershipVerification } from "./membership-verify-plan";
 import type { LeaderboardTelegramOutboxService } from "./leaderboard-telegram.outbox";
 import {
-  formatPublicLeaderboardMessage,
   formatPublicResultsMessage,
   formatRankAnnouncement
 } from "./public-message";
+import { publishPublicLeaderboardSnapshot } from "./public-leaderboard-publisher";
 import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
 import {
   formatPersonalAnnouncementDm,
@@ -168,126 +165,41 @@ export class LeaderboardTelegramProcessor {
       throw permanentError("CHANNEL_OR_COMPETITION_MISSING", "Channel or competition missing for refresh");
     }
 
-    const competition = await this.prisma.leaderboardCompetition.findFirst({
-      where: {
-        id: row.competitionId,
-        workspaceId: row.workspaceId,
-        ownerCoadminUserId: row.ownerCoadminUserId
-      }
-    });
-    if (!competition) {
-      throw permanentError("COMPETITION_NOT_FOUND", "Competition not found for refresh");
-    }
-
-    const settings = await this.prisma.leaderboardSettings.findUnique({
-      where: { ownerCoadminUserId: row.ownerCoadminUserId }
-    });
-
-    const standings = await this.prisma.leaderboardStanding.findMany({
-      where: { competitionId: competition.id, ownerCoadminUserId: row.ownerCoadminUserId },
-      include: {
-        crmContact: {
-          select: {
-            displayName: true,
-            username: true,
-            chats: {
-              select: { firstName: true, lastName: true, username: true, updatedAt: true },
-              orderBy: { updatedAt: "desc" },
-              take: 1
-            }
-          }
-        }
-      }
-    });
-    const ranked = withRanks(
-      standings.map((s) => ({
-        crmContactId: s.crmContactId,
-        totalPoints: s.totalPoints,
-        pointsReachedAt: s.pointsReachedAt
-      }))
-    ).slice(0, 10);
-
-    const displayById = new Map(
-      standings.map((s) => {
-        const chat = Array.isArray(s.crmContact.chats) ? s.crmContact.chats[0] : undefined;
-        return [
-          s.crmContactId,
-          resolvePublicLeaderboardDisplayName({
-            displayName: s.crmContact.displayName,
-            firstName: chat?.firstName ?? null,
-            lastName: chat?.lastName ?? null,
-            username: s.crmContact.username ?? chat?.username ?? null
-          })
-        ] as const;
-      })
-    );
-    const nextTop10 = ranked.map((r) => ({
-      crmContactId: r.crmContactId,
-      rank: r.rank,
-      displayName: displayById.get(r.crmContactId) ?? "Player",
-      totalPoints: r.totalPoints
-    }));
-
-    const text = formatPublicLeaderboardMessage({
-      title: "BIWEEKLY LEADERBOARD",
-      top10: nextTop10.map((r) => ({
-        rank: r.rank,
-        displayName: r.displayName,
-        points: r.totalPoints
-      })),
-      prizePoolCents: competition.prizePoolCents,
-      endsAt: competition.endsAt,
-      timezone: settings?.timezone ?? LEADERBOARD_TIMEZONE,
-      botUsername: integration.botUsername
-    });
-
-    let messageId = integration.persistentMessageId;
-    let recovered = false;
-
-    if (messageId) {
-      try {
-        await this.client.editMessageText(token, integration.channelId, Number(messageId), text);
-      } catch (error) {
-        if (!isMessageEditRecoverable(error)) throw error;
-        const sent = await this.client.sendMessage(token, integration.channelId, text);
-        messageId = String(sent.messageId);
-        recovered = true;
-      }
-    } else {
-      const sent = await this.client.sendMessage(token, integration.channelId, text);
-      messageId = String(sent.messageId);
-    }
-
-    const prevTop10 = previousTop10ForAnnouncements(
-      integration.persistentMessageCompetitionId,
-      competition.id,
-      integration.lastPublicTop10Json
-    );
     const skipRankAnnouncements =
       row.payloadJson != null &&
       typeof row.payloadJson === "object" &&
       (row.payloadJson as { skipRankAnnouncements?: unknown }).skipRankAnnouncements === true;
-    const announcements =
-      !skipRankAnnouncements && competition.status === "ACTIVE"
-        ? detectRankAnnouncements(prevTop10, nextTop10)
-        : [];
 
-    await this.prisma.leaderboardBotIntegration.update({
-      where: { id: integration.id },
-      data: {
-        persistentMessageId: messageId,
-        persistentMessageCompetitionId: competition.id,
-        lastSuccessfulPostAt: new Date(),
-        lastPublicTop10Json: nextTop10 as unknown as Prisma.InputJsonValue,
-        lastError: null
+    let published;
+    try {
+      published = await publishPublicLeaderboardSnapshot({
+        prisma: this.prisma,
+        client: this.client,
+        token,
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        competitionId: row.competitionId,
+        integrationId: integration.id,
+        channelId: integration.channelId,
+        botUsername: integration.botUsername,
+        persistentMessageId: integration.persistentMessageId,
+        persistentMessageCompetitionId: integration.persistentMessageCompetitionId,
+        lastPublicTop10Json: integration.lastPublicTop10Json,
+        mode: "edit_or_create",
+        skipRankAnnouncements
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "COMPETITION_NOT_FOUND") {
+        throw permanentError("COMPETITION_NOT_FOUND", "Competition not found for refresh");
       }
-    });
+      throw error;
+    }
 
-    for (const event of announcements) {
+    for (const event of published.announcements) {
       await this.outbox.enqueueRankAnnouncement({
         workspaceId: row.workspaceId,
         ownerCoadminUserId: row.ownerCoadminUserId,
-        competitionId: competition.id,
+        competitionId: row.competitionId,
         crmContactId: event.crmContactId,
         fromRank: event.fromRank,
         toRank: event.toRank,
@@ -313,7 +225,7 @@ export class LeaderboardTelegramProcessor {
           select: { id: true }
         });
         const decision = decidePlayerNotification({
-          competitionId: competition.id,
+          competitionId: row.competitionId,
           crmContactId: event.crmContactId,
           kind: announcementKindToPlayerKind(event.kind),
           hasPlayerLink: link != null,
@@ -321,11 +233,11 @@ export class LeaderboardTelegramProcessor {
           botOwnerCoadminUserId: row.ownerCoadminUserId
         });
         if (decision.shouldNotify) {
-          const standing = nextTop10.find((r) => r.crmContactId === event.crmContactId);
+          const standing = published.nextTop10.find((r) => r.crmContactId === event.crmContactId);
           await this.outbox.enqueuePlayerDm({
             workspaceId: row.workspaceId,
             ownerCoadminUserId: row.ownerCoadminUserId,
-            competitionId: competition.id,
+            competitionId: row.competitionId,
             crmContactId: event.crmContactId,
             kind: decision.kind,
             fromRank: event.fromRank,
@@ -336,25 +248,26 @@ export class LeaderboardTelegramProcessor {
         }
       } catch (error) {
         this.logger?.warn(
-          { err: error, crmContactId: event.crmContactId, competitionId: competition.id },
+          { err: error, crmContactId: event.crmContactId, competitionId: row.competitionId },
           "Leaderboard personal DM enqueue skipped"
         );
       }
     }
 
-    if (recovered) {
+    if (published.recoveredFromFailedEdit) {
       await this.audit.record({
         workspaceId: row.workspaceId,
         actorId: null,
         action: "leaderboard.telegram.persistent_message_recovered",
         metadata: {
           ownerCoadminUserId: row.ownerCoadminUserId,
-          competitionId: competition.id,
-          messageId
+          competitionId: row.competitionId,
+          messageId: published.messageId
         }
       });
     }
   }
+
 
   private async processVerifyMembership(
     row: { id: string; workspaceId: string; ownerCoadminUserId: string; competitionId: string | null },

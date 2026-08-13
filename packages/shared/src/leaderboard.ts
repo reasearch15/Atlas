@@ -268,15 +268,17 @@ export interface LeaderboardTelegramIntegrationDto {
   readonly webhookConfigured: boolean;
 }
 
-/** Result of Coadmin manual "Send Leaderboard" (queues snapshot-only outbox refresh). */
+/** Result of Coadmin manual "Send Leaderboard" after Telegram Bot API confirms delivery. */
 export interface LeaderboardTelegramSendLatestDto {
-  readonly queued: true;
-  readonly jobId: string;
+  readonly queued: false;
   readonly competitionId: string;
-  /** edit = persistent message exists for this channel; send = new message path */
-  readonly mode: "edit" | "send";
+  readonly channelId: string;
   /** Verified channel title when available (for UI success copy). */
   readonly channelTitle: string | null;
+  readonly telegramMessageId: string;
+  /** Manual send always posts a fresh message. */
+  readonly deliveryAction: "SENT_NEW";
+  readonly mode: "send";
   readonly message: string;
 }
 
