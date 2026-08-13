@@ -285,6 +285,75 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     expect((b.prisma._state.integrations[0].lastPublicTop10Json as any)[0].displayName).toBe("OwnerBStar");
   });
 
+  it("editMessageMedia 'message is not modified' keeps same message id", async () => {
+    const { prisma, integrationId } = seedOwner({
+      workspaceId: workspaceA,
+      ownerId: ownerA,
+      competitionId: competitionA,
+      channelId: channelA,
+      token: "tokA",
+      playerId: playerA,
+      displayName: "Picasso",
+      points: 10,
+      poolCents: 25000,
+      messageId: "42"
+    });
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tokA", { id: 1, isBot: true, firstName: "Bot", username: "tokA_bot" }]]),
+      chats: new Map([
+        [
+          Number(channelA),
+          {
+            id: Number(channelA),
+            type: "channel",
+            members: new Map([[1, "administrator"]]),
+            messages: [
+              {
+                messageId: 42,
+                photo: true,
+                photoBytes: 1200,
+                caption: "🔥 Competition is live. Keep climbing.",
+                deleted: false
+              }
+            ],
+            nextMessageId: 43
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    vi.spyOn(client, "editMessageMedia").mockRejectedValue(
+      new LeaderboardTelegramApiError({
+        httpStatus: 400,
+        telegramErrorCode: 400,
+        description:
+          "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message",
+        permanent: false
+      })
+    );
+    const sendSpy = vi.spyOn(client, "sendPhoto");
+    const published = await publishPublicLeaderboardSnapshot({
+      prisma: prisma as never,
+      client,
+      token: "tokA",
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      integrationId,
+      channelId: channelA,
+      botUsername: "tokA_bot",
+      persistentMessageId: "42",
+      persistentMessageCompetitionId: competitionA,
+      lastPublicTop10Json: [],
+      mode: "replace",
+      skipRankAnnouncements: true
+    });
+    expect(published.deliveryAction).toBe("UPDATED_EXISTING");
+    expect(published.messageId).toBe("42");
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("42");
+  });
+
   it("falls back to text when render path is forced to fail via client media permanent photo error after render", async () => {
     const { prisma, integrationId } = seedOwner({
       workspaceId: workspaceA,

@@ -342,6 +342,34 @@ async function deliverPhotoBoard(input: {
         deletedPreviousMessageId: null
       };
     } catch (error) {
+      // Telegram returns this when photo/caption/markup are byte-identical — treat as success.
+      if (isUnmodifiedTelegramEditError(error)) {
+        await persistBoardMeta({
+          prisma: input.prisma,
+          integrationId: input.integrationId,
+          channelId: publishChannelId,
+          expectedPersistentMessageId: previousMessageId,
+          persistentMessageId: previousMessageId,
+          competitionId: input.competitionId,
+          nextTop10: input.nextTop10
+        });
+        input.logger?.info?.(
+          {
+            ownerCoadminUserId: input.ownerCoadminUserId,
+            competitionId: input.competitionId,
+            messageId: previousMessageId,
+            channelId: publishChannelId,
+            unchanged: true
+          },
+          "[LEADERBOARD_MEDIA_EDITED]"
+        );
+        return {
+          messageId: previousMessageId,
+          deliveryAction: "UPDATED_EXISTING",
+          recoveredFromFailedEdit: false,
+          deletedPreviousMessageId: null
+        };
+      }
       input.logger?.warn?.(
         {
           err: error,
@@ -624,4 +652,9 @@ function shouldFallbackToText(error: unknown): boolean {
     d.includes("mime") ||
     d.includes("too big")
   );
+}
+
+function isUnmodifiedTelegramEditError(error: unknown): boolean {
+  if (!(error instanceof LeaderboardTelegramApiError)) return false;
+  return /message is not modified/i.test(error.description);
 }
