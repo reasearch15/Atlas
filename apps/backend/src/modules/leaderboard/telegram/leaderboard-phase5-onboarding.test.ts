@@ -249,6 +249,25 @@ function createPhase5Prisma() {
         const row = outbox.find((r) => r.id === where.id);
         Object.assign(row, data, { updatedAt: new Date() });
         return row;
+      },
+      updateMany: async ({ where, data }: any) => {
+        let count = 0;
+        for (const row of outbox) {
+          if (where.id && row.id !== where.id) continue;
+          if (where.ownerCoadminUserId && row.ownerCoadminUserId !== where.ownerCoadminUserId) continue;
+          if (where.status?.in && !where.status.in.includes(row.status)) continue;
+          for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+            if (value && typeof value === "object" && value !== null && "increment" in value) {
+              const current = typeof row[key] === "number" ? row[key] : 0;
+              row[key] = current + (value as { increment: number }).increment;
+            } else {
+              row[key] = value;
+            }
+          }
+          row.updatedAt = new Date();
+          count += 1;
+        }
+        return { count };
       }
     },
     giveawayEligibilityCandidate: {

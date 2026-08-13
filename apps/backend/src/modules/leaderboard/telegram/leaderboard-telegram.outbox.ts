@@ -1,10 +1,24 @@
+import { randomBytes } from "node:crypto";
 import type { LeaderboardTelegramJobType, Prisma, PrismaClient } from "@prisma/client";
 import type { Queue } from "bullmq";
 
 const PENDING_STATUSES = ["QUEUED", "DISPATCHING", "RETRY_SCHEDULED"] as const;
 const TERMINAL_STATUSES = ["SUCCEEDED", "FAILED", "CANCELLED"] as const;
 
+/** Statuses from which a processor may atomically claim an outbox row. */
+export const CLAIMABLE_OUTBOX_STATUSES = ["QUEUED", "RETRY_SCHEDULED"] as const;
+
 export type LeaderboardTelegramWakeFn = (jobId: string, delayMs?: number) => Promise<void>;
+
+/**
+ * BullMQ wake-only job id. Must be unique per wake attempt so a completed
+ * `removeOnComplete` retention entry cannot suppress a later re-queue of the
+ * same Postgres outbox row (static `:now` caused permanent QUEUED stalls).
+ */
+export function buildLeaderboardTelegramWakeJobId(outboxId: string, nowMs = Date.now()): string {
+  const nonce = randomBytes(4).toString("hex");
+  return `lb-tg:${outboxId}:${nowMs}:${nonce}`.slice(0, 120);
+}
 
 export interface RankAnnouncementEnqueueInput {
   readonly workspaceId: string;
@@ -31,12 +45,13 @@ export class LeaderboardTelegramOutboxService {
   ) {}
 
   public static createWakeFromQueue(queue: Queue): LeaderboardTelegramWakeFn {
-    return async (jobId: string, delayMs = 0) => {
+    return async (outboxId: string, delayMs = 0) => {
       await queue.add(
         "process",
-        { outboxId: jobId },
+        { outboxId },
         {
-          jobId: `lb-tg:${jobId}:${delayMs > 0 ? Math.floor(Date.now() / 1000) : "now"}`.slice(0, 120),
+          // Unique every call — BullMQ must not dedupe future wakes for this outbox row.
+          jobId: buildLeaderboardTelegramWakeJobId(outboxId),
           delay: Math.max(0, delayMs),
           attempts: 1,
           removeOnComplete: 5_000,
@@ -245,7 +260,13 @@ export class LeaderboardTelegramOutboxService {
       }
       await this.prisma.leaderboardTelegramOutbox.update({
         where: { id: existing.id },
-        data: { payloadJson: payloadJson as Prisma.InputJsonValue }
+        data: {
+          payloadJson: payloadJson as Prisma.InputJsonValue,
+          // Re-open stuck DISPATCHING so atomic claim (QUEUED|RETRY_SCHEDULED only) can proceed.
+          ...(existing.status === "DISPATCHING"
+            ? { status: "QUEUED" as const, nextAttemptAt: null }
+            : {})
+        }
       });
       await this.wake(existing.id, 0);
       return existing.id;
@@ -329,7 +350,12 @@ export class LeaderboardTelegramOutboxService {
         }
         await this.prisma.leaderboardTelegramOutbox.update({
           where: { id: raced.id },
-          data: { payloadJson: payloadJson as Prisma.InputJsonValue }
+          data: {
+            payloadJson: payloadJson as Prisma.InputJsonValue,
+            ...(raced.status === "DISPATCHING"
+              ? { status: "QUEUED" as const, nextAttemptAt: null }
+              : {})
+          }
         });
       }
       await this.wake(raced.id, 0);

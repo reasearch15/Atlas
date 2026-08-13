@@ -13,6 +13,7 @@ import {
 import { mapTelegramChatMemberStatus } from "./membership-status";
 import { planMembershipVerification } from "./membership-verify-plan";
 import type { LeaderboardTelegramOutboxService } from "./leaderboard-telegram.outbox";
+import { CLAIMABLE_OUTBOX_STATUSES } from "./leaderboard-telegram.outbox";
 import {
   formatPublicResultsMessage,
   formatRankAnnouncement
@@ -65,15 +66,24 @@ export class LeaderboardTelegramProcessor {
   }
 
   public async processJob(jobId: string): Promise<void> {
+    // Atomic claim — duplicate BullMQ wakes for the same outbox row must not double-deliver.
+    const claimed = await this.prisma.leaderboardTelegramOutbox.updateMany({
+      where: {
+        id: jobId,
+        status: { in: [...CLAIMABLE_OUTBOX_STATUSES] }
+      },
+      data: {
+        status: "DISPATCHING",
+        attemptCount: { increment: 1 },
+        nextAttemptAt: null
+      }
+    });
+    if (claimed.count !== 1) return;
+
     const row = await this.prisma.leaderboardTelegramOutbox.findUnique({ where: { id: jobId } });
     if (!row) return;
-    if (row.status === "CANCELLED" || row.status === "SUCCEEDED") return;
 
-    const attempt = row.attemptCount + 1;
-    await this.prisma.leaderboardTelegramOutbox.update({
-      where: { id: row.id },
-      data: { status: "DISPATCHING", attemptCount: attempt, nextAttemptAt: null }
-    });
+    const attempt = row.attemptCount;
 
     const integration = await this.prisma.leaderboardBotIntegration.findUnique({
       where: { ownerCoadminUserId: row.ownerCoadminUserId }
