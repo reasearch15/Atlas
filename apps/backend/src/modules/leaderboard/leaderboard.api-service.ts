@@ -33,6 +33,7 @@ import type { RequestUser } from "../auth/auth.types";
 import { AuditService } from "../audit/audit.service";
 import { TelegramService } from "../telegram/telegram.service";
 import { AppError, forbidden } from "../../utils/errors";
+import { resolveAuthenticatedCrmDisplayNameFromContact } from "./authenticated-crm-display-name";
 import { buildGiveInfoMessage } from "./give-info-message";
 import { ALLOWED_POOL_RATE_BPS } from "./leaderboard.constants";
 import {
@@ -1117,13 +1118,24 @@ export class LeaderboardApiService {
     this.assertCoadmin(user);
     const workspaceId = this.requireWorkspaceId(user);
     const owner = user.id;
+    const caps = customerPrivacyCapabilities(user.role as Role);
+    const contactIdentitySelect = {
+      displayName: true,
+      username: true,
+      chats: {
+        where: { chatType: "PRIVATE" as const },
+        select: { firstName: true, lastName: true, username: true },
+        orderBy: { updatedAt: "desc" as const },
+        take: 3
+      }
+    };
 
     const referrals = await this.app.prisma.leaderboardReferral.findMany({
       where: { workspaceId, ownerCoadminUserId: owner },
       orderBy: { createdAt: "desc" },
       include: {
-        referrer: { select: { displayName: true } },
-        referred: { select: { displayName: true } },
+        referrer: { select: contactIdentitySelect },
+        referred: { select: contactIdentitySelect },
         milestoneAwards: {
           where: { status: "ACTIVE" },
           orderBy: { awardedAt: "asc" }
@@ -1145,9 +1157,13 @@ export class LeaderboardApiService {
     return referrals.map((row) => ({
       id: row.id,
       referrerCrmContactId: row.referrerCrmContactId,
-      referrerDisplayName: row.referrer.displayName,
+      referrerDisplayName: resolveAuthenticatedCrmDisplayNameFromContact(row.referrer, {
+        allowUsername: caps.canViewTelegramUsername
+      }),
       referredCrmContactId: row.referredCrmContactId,
-      referredDisplayName: row.referred.displayName,
+      referredDisplayName: resolveAuthenticatedCrmDisplayNameFromContact(row.referred, {
+        allowUsername: caps.canViewTelegramUsername
+      }),
       createdAt: row.createdAt.toISOString(),
       lifetimeQualifyingDepositCents: lifetimeByContact.get(row.referredCrmContactId) ?? 0,
       milestones: row.milestoneAwards.map((m) => ({

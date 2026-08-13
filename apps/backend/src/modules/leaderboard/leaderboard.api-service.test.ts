@@ -249,3 +249,103 @@ describe("LeaderboardApiService.searchPlayers", () => {
     expect((captured.where[0] as { ownerCoadminUserId: string }).ownerCoadminUserId).toBe(coadminId);
   });
 });
+
+describe("LeaderboardApiService.listReferrals display names", () => {
+  const referrerId = "b1111111-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
+  const referredId = "b2222222-bbbb-4bbb-8bbb-bbbbbbbbbbb2";
+  const referralId = "b3333333-bbbb-4bbb-8bbb-bbbbbbbbbbb3";
+  const foreignOwnerReferralId = "b4444444-bbbb-4bbb-8bbb-bbbbbbbbbbb4";
+
+  it("resolves Unknown* CRM names from Telegram identity and keeps referral direction", async () => {
+    const capturedWhere: unknown[] = [];
+    const service = makeService({
+      leaderboardReferral: {
+        findMany: async ({
+          where
+        }: {
+          where: { workspaceId: string; ownerCoadminUserId: string };
+        }) => {
+          capturedWhere.push(where);
+          expect(where.workspaceId).toBe(workspaceId);
+          expect(where.ownerCoadminUserId).toBe(coadminId);
+          return [
+            {
+              id: referralId,
+              referrerCrmContactId: referrerId,
+              referredCrmContactId: referredId,
+              createdAt: new Date("2026-01-10T12:00:00Z"),
+              overriddenAt: null,
+              overrideReason: null,
+              referrer: {
+                displayName: "Unknown User",
+                username: null,
+                chats: [{ firstName: "Picasso", lastName: null, username: null }]
+              },
+              referred: {
+                displayName: "Unknown User",
+                username: null,
+                chats: [{ firstName: "Charles", lastName: "McBride", username: null }]
+              },
+              milestoneAwards: []
+            }
+          ];
+        }
+      },
+      leaderboardPlayerStats: {
+        findMany: async () => []
+      }
+    });
+
+    const rows = await service.listReferrals(coadmin);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.referrerCrmContactId).toBe(referrerId);
+    expect(rows[0]?.referredCrmContactId).toBe(referredId);
+    expect(rows[0]?.referrerDisplayName).toBe("Picasso");
+    expect(rows[0]?.referredDisplayName).toBe("Charles McBride");
+    expect(capturedWhere[0]).toMatchObject({
+      workspaceId,
+      ownerCoadminUserId: coadminId
+    });
+    void foreignOwnerReferralId;
+  });
+
+  it("keeps usable CRM initials and rejects Staff via assertCoadmin", async () => {
+    const service = makeService({
+      leaderboardReferral: {
+        findMany: async () => [
+          {
+            id: referralId,
+            referrerCrmContactId: referrerId,
+            referredCrmContactId: referredId,
+            createdAt: new Date("2026-01-10T12:00:00Z"),
+            overriddenAt: null,
+            overrideReason: null,
+            referrer: {
+              displayName: "A.",
+              username: null,
+              chats: [{ firstName: "Ignored", lastName: "Name", username: null }]
+            },
+            referred: {
+              displayName: "Unknown User",
+              username: "Piccaso47",
+              chats: []
+            },
+            milestoneAwards: []
+          }
+        ]
+      },
+      leaderboardPlayerStats: {
+        findMany: async () => [{ crmContactId: referredId, lifetimeQualifyingDepositCents: 500 }]
+      }
+    });
+
+    const rows = await service.listReferrals(coadmin);
+    expect(rows[0]?.referrerDisplayName).toBe("A.");
+    expect(rows[0]?.referredDisplayName).toBe("Piccaso47");
+    expect(rows[0]?.lifetimeQualifyingDepositCents).toBe(500);
+
+    await expect(service.listReferrals(staff)).rejects.toMatchObject({
+      statusCode: 403
+    } satisfies Partial<AppError>);
+  });
+});
