@@ -131,9 +131,9 @@ interface CrmPanelProps {
 }
 
 /**
- * Collapsible right-hand CRM panel: contact, assignee, status, tags, internal
- * notes, and activity history. Future modules (payment/AppBeg/vendor/automation)
- * render as brief "Not linked" placeholders until those integrations exist.
+ * Collapsible right-hand CRM panel: leaderboard ops (top), contact, assignee,
+ * status, tags, internal notes, and activity history.
+ * Payment / AppBeg / Vendor link status cards live inside the leaderboard section.
  */
 export function CrmPanel({ state, identity, avatarColor, onClose, embedded = false }: CrmPanelProps) {
   const { panel, loading, error, busy, createNote } = state;
@@ -198,6 +198,12 @@ export function CrmPanel({ state, identity, avatarColor, onClose, embedded = fal
           <p className="text-sm text-muted-foreground">No CRM data available.</p>
         ) : (
           <div className="space-y-4">
+            <CrmGiveawaySection
+              chatId={panel.chatId}
+              crmContactId={panel.contact?.id ?? null}
+              role={user?.role}
+            />
+
             <Section title="Contact details">
               <div className="space-y-1 text-sm">
                 {identity.firstName || identity.lastName ? (
@@ -318,23 +324,6 @@ export function CrmPanel({ state, identity, avatarColor, onClose, embedded = fal
                   ))}
                 </ul>
               )}
-            </Section>
-
-            <CrmGiveawaySection
-              chatId={panel.chatId}
-              crmContactId={panel.contact?.id ?? null}
-              canBind={user?.role === "COADMIN"}
-              role={user?.role}
-            />
-
-            <Section title="Payment">
-              <p className="text-sm text-muted-foreground">Not linked</p>
-            </Section>
-            <Section title="AppBeg">
-              <p className="text-sm text-muted-foreground">Not linked</p>
-            </Section>
-            <Section title="Vendor automation">
-              <p className="text-sm text-muted-foreground">Not linked</p>
             </Section>
           </div>
         )}

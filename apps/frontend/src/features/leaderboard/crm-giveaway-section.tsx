@@ -1,12 +1,12 @@
 "use client";
 
 import type { LeaderboardPlayerSearchHitDto, LeaderboardPlayerStatusDto, Role } from "@atlas/shared";
-import { hasPermission } from "@atlas/shared";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
+import { crmGiveawayCapabilities } from "./crm-giveaway-capabilities";
 import {
   formatMoneyFromCents,
   mapLeaderboardError,
@@ -16,23 +16,22 @@ import {
 import { WheelSpinPanel } from "./wheel-spin-panel";
 
 const SUBSCRIPTION_REMINDER =
-  "To receive a leaderboard prize, winners must be subscribed to the official leaderboard Telegram channel at the eligibility deadline.";
+  "Prize reminder: winners must be subscribed to the official leaderboard Telegram channel at the eligibility deadline.";
 
 type PendingAction = "deposit" | "referral" | "promotion" | "give-info" | "bind" | null;
 
 export interface CrmGiveawaySectionProps {
   readonly chatId: string;
   readonly crmContactId: string | null;
-  /** Coadmin-only bind control when the contact is unbound. */
-  readonly canBind: boolean;
   readonly role: Role | null | undefined;
 }
 
 /**
- * CRM side-panel Giveaway / Leaderboard controls for the open conversation contact.
- * Failures stay local so the rest of the CRM panel keeps working.
+ * CRM side-panel Leaderboard / Giveaway operational controls (Staff + Coadmin).
+ * Coadmin-only admin controls live on the Leaderboard settings page — never here.
  */
-export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmGiveawaySectionProps) {
+export function CrmGiveawaySection({ chatId, crmContactId, role }: CrmGiveawaySectionProps) {
+  const caps = crmGiveawayCapabilities(role);
   const [status, setStatus] = useState<LeaderboardPlayerStatusDto | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +40,7 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
   const [confirming, setConfirming] = useState<PendingAction>(null);
 
   const [depositDollars, setDepositDollars] = useState("");
+  const [depositFieldError, setDepositFieldError] = useState<string | null>(null);
   const [referralQuery, setReferralQuery] = useState("");
   const [referralHits, setReferralHits] = useState<readonly LeaderboardPlayerSearchHitDto[]>([]);
   const [selectedReferred, setSelectedReferred] = useState<LeaderboardPlayerSearchHitDto | null>(null);
@@ -50,23 +50,17 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
   const promotionKeyRef = useRef(newIdempotencyKey());
   const referralKeyRef = useRef(newIdempotencyKey());
   const giveInfoKeyRef = useRef(newIdempotencyKey());
-
-  const canDeposit = role ? hasPermission(role, "leaderboard:deposit") : false;
-  const canReferral = role ? hasPermission(role, "leaderboard:referral:set") : false;
-  const canPromotion = role ? hasPermission(role, "leaderboard:promotion") : false;
-  const canGiveInfo = role ? hasPermission(role, "leaderboard:give-info") : false;
-  const canRead = role ? hasPermission(role, "leaderboard:read") : false;
-  const canWheelSpin = role ? hasPermission(role, "leaderboard:wheel:spin") : false;
+  const depositInputId = useId();
+  const referralInputId = useId();
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!crmContactId || !canRead) {
+    if (!crmContactId || !caps.canRead) {
       setStatus(null);
       return;
     }
     setLoading(true);
     try {
-      // Try deterministic auto-bind before showing unbound state (Coadmin sole-owner workspaces).
-      if (canBind) {
+      if (caps.canBind) {
         try {
           await api.leaderboardEnsureAutoBind(crmContactId);
         } catch {
@@ -82,12 +76,13 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
     } finally {
       setLoading(false);
     }
-  }, [canBind, canRead, crmContactId]);
+  }, [caps.canBind, caps.canRead, crmContactId]);
 
   useEffect(() => {
     setSuccess(null);
     setConfirming(null);
     setDepositDollars("");
+    setDepositFieldError(null);
     setReferralQuery("");
     setReferralHits([]);
     setSelectedReferred(null);
@@ -99,7 +94,7 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
   }, [refresh]);
 
   useEffect(() => {
-    if (!crmContactId || !canReferral || referralQuery.trim().length < 1) {
+    if (!crmContactId || !caps.canReferral || referralQuery.trim().length < 1) {
       setReferralHits([]);
       return;
     }
@@ -126,19 +121,17 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [canReferral, crmContactId, referralQuery]);
+  }, [caps.canReferral, crmContactId, referralQuery]);
 
-  if (!canRead) {
+  if (!caps.canRead) {
     return null;
   }
 
   if (!crmContactId) {
     return (
-      <section>
-        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          Giveaway
-        </p>
-        <p className="text-sm text-muted-foreground">CRM contact not linked yet.</p>
+      <section className="rounded-xl border border-amber-200/80 bg-gradient-to-b from-amber-50/80 to-white p-3 shadow-sm">
+        <h2 className="text-sm font-semibold tracking-wide text-foreground">🏆 Leaderboard</h2>
+        <p className="mt-1.5 text-sm text-muted-foreground">CRM contact not linked yet.</p>
       </section>
     );
   }
@@ -159,9 +152,10 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
   async function submitDeposit(): Promise<void> {
     const amountCents = parseDollarsToCents(depositDollars);
     if (amountCents == null) {
-      setError("Enter a valid deposit amount (e.g. 40 or 40.50).");
+      setDepositFieldError("Enter a valid USD amount (e.g. 40 or 40.50).");
       return;
     }
+    setDepositFieldError(null);
     await runAction(async () => {
       const result = await api.leaderboardDeposit({
         crmContactId: crmContactId!,
@@ -181,6 +175,10 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
   async function submitReferral(): Promise<void> {
     if (!selectedReferred) {
       setError("Select a referred player first.");
+      return;
+    }
+    if (selectedReferred.crmContactId === crmContactId) {
+      setError("A player cannot refer themselves.");
       return;
     }
     await runAction(async () => {
@@ -230,9 +228,7 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
   async function submitBind(): Promise<void> {
     await runAction(async () => {
       await api.leaderboardBindParticipant(crmContactId!);
-      setSuccess(
-        "Player bound — enable leaderboard in Leaderboard settings to start scoring."
-      );
+      setSuccess("Player bound — enable leaderboard in Leaderboard settings to start scoring.");
       toast.success("Connected to your leaderboard.");
       await refresh();
     });
@@ -240,57 +236,65 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
 
   const bound = status?.bound === true;
   const competition = status?.competition ?? null;
-  const showBind = canBind && canDeposit && status != null && !bound;
+  const showBind = caps.canBind && status != null && !bound;
+  const prizePool = competition ? formatMoneyFromCents(competition.prizePoolCents) : "—";
 
   return (
-    <section>
-      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-        Giveaway
-      </p>
+    <section
+      className="rounded-xl border border-amber-200/70 bg-gradient-to-b from-amber-50/90 via-white to-white p-3 shadow-sm"
+      aria-labelledby="crm-leaderboard-heading"
+      data-testid="crm-leaderboard-panel"
+    >
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h2 id="crm-leaderboard-heading" className="text-sm font-semibold tracking-wide text-foreground">
+          🏆 Leaderboard
+        </h2>
+        {bound ? (
+          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-800">
+            Bound
+          </span>
+        ) : (
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-900">
+            Unbound
+          </span>
+        )}
+      </div>
 
       {error ? (
-        <p className="mb-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">
+        <p className="mb-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700" role="alert">
           {error}
         </p>
       ) : null}
       {success ? (
-        <p className="mb-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-xs text-emerald-800">
+        <p
+          className="mb-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-xs text-emerald-800"
+          role="status"
+        >
           {success}
         </p>
       ) : null}
 
       {loading && !status ? (
-        <p className="text-sm text-muted-foreground">Loading giveaway status…</p>
+        <p className="text-sm text-muted-foreground">Loading leaderboard status…</p>
       ) : (
         <div className="space-y-3">
-          <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-            <Stat label="Rank" value={status?.rank != null ? `#${status.rank}` : "—"} />
-            <Stat label="Bound" value={bound ? "Yes" : "No"} />
-            <Stat label="Total points" value={formatPoints(status?.totalPoints)} />
-            <Stat label="Deposit points" value={formatPoints(status?.depositPoints)} />
-            <Stat label="Referral points" value={formatPoints(status?.referralPoints)} />
-            <Stat label="Promotion points" value={formatPoints(status?.promotionPoints)} />
-            <Stat label="Wheel points" value={formatPoints(status?.wheelPoints)} />
-            <Stat
-              label="Qualifying deposits"
-              value={
-                status?.qualifyingDepositCents != null
-                  ? formatMoneyFromCents(status.qualifyingDepositCents)
-                  : "—"
-              }
-            />
-            <Stat
-              label="Prize pool"
-              value={
-                competition ? formatMoneyFromCents(competition.prizePoolCents) : "—"
-              }
-            />
-            <Stat
-              label="Competition ends"
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-2">
+            <MetricCard label="Rank" value={status?.rank != null ? `#${status.rank}` : "—"} emphasize />
+            <MetricCard label="Points" value={formatPoints(status?.totalPoints)} emphasize />
+            <MetricCard label="Prize Pool" value={prizePool} emphasize accent="pool" wide />
+            <MetricCard
+              label="Ends"
               value={competition ? formatCompetitionEnd(competition.endsAt) : "—"}
               wide
             />
-          </dl>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+            <BreakdownChip label="Deposit" value={formatPoints(status?.depositPoints)} />
+            <BreakdownChip label="Referral" value={formatPoints(status?.referralPoints)} />
+            <BreakdownChip label="Promotion" value={formatPoints(status?.promotionPoints)} />
+            <BreakdownChip label="Wheel" value={formatPoints(status?.wheelPoints)} />
+          </div>
 
           <p className="text-[11px] leading-snug text-muted-foreground">{SUBSCRIPTION_REMINDER}</p>
 
@@ -298,72 +302,103 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
             <WheelSpinPanel
               crmContactId={crmContactId}
               status={status.wheel}
-              canSpin={canWheelSpin}
+              canSpin={caps.canWheelSpin}
               onRefresh={refresh}
             />
           ) : null}
 
           {showBind ? (
-            <ActionRow
+            <ConfirmAction
               label="Connect to my leaderboard"
+              confirmLabel="Confirm bind"
               confirming={confirming === "bind"}
               pending={pending}
               onAsk={() => setConfirming("bind")}
               onCancel={() => setConfirming(null)}
               onConfirm={() => void submitBind()}
+              variant="secondary"
             />
           ) : null}
 
-          {bound ? (
-            <p className="text-[11px] leading-snug text-muted-foreground">
-              Player bound — enable leaderboard in Leaderboard settings to start scoring.
+          {bound && !competition ? (
+            <p className="text-[11px] leading-snug text-amber-800">
+              Player bound — enable the leaderboard in Leaderboard settings to open the active competition.
             </p>
           ) : null}
 
-          {bound && canDeposit ? (
-            <div className="space-y-1.5">
-              <label className="block text-[11px] font-medium text-muted-foreground" htmlFor="lb-deposit">
-                Deposit amount (USD)
+          {bound && caps.canDeposit ? (
+            <div className="space-y-2 rounded-lg border bg-white/80 p-2.5">
+              <label className="block text-xs font-semibold text-foreground" htmlFor={depositInputId}>
+                Deposit amount
               </label>
-              <Input
-                id="lb-deposit"
-                inputMode="decimal"
-                placeholder="e.g. 40"
-                value={depositDollars}
-                disabled={pending}
-                onChange={(event) => setDepositDollars(event.target.value)}
-                className="h-8 text-sm"
-              />
-              <ActionRow
-                label="Record deposit"
+              <div className="flex items-stretch gap-2">
+                <div className="relative min-w-0 flex-1">
+                  <span
+                    className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm font-semibold text-muted-foreground"
+                    aria-hidden="true"
+                  >
+                    $
+                  </span>
+                  <Input
+                    id={depositInputId}
+                    inputMode="decimal"
+                    placeholder="40.00"
+                    value={depositDollars}
+                    disabled={pending}
+                    aria-invalid={depositFieldError != null}
+                    aria-describedby={depositFieldError ? `${depositInputId}-error` : undefined}
+                    onChange={(event) => {
+                      setDepositDollars(event.target.value);
+                      setDepositFieldError(null);
+                    }}
+                    className="h-11 pl-7 text-base font-medium tabular-nums"
+                  />
+                </div>
+              </div>
+              {depositFieldError ? (
+                <p id={`${depositInputId}-error`} className="text-xs text-red-600" role="alert">
+                  {depositFieldError}
+                </p>
+              ) : (
+                <p className="text-[11px] text-muted-foreground">USD · $1 = 1 deposit point</p>
+              )}
+              <ConfirmAction
+                label="Record Deposit"
                 confirmLabel="Confirm deposit"
                 confirming={confirming === "deposit"}
                 pending={pending}
                 disabled={depositDollars.trim().length === 0}
-                onAsk={() => setConfirming("deposit")}
+                onAsk={() => {
+                  setDepositFieldError(null);
+                  setConfirming("deposit");
+                }}
                 onCancel={() => setConfirming(null)}
                 onConfirm={() => void submitDeposit()}
+                variant="primary"
+                fullWidth
               />
             </div>
           ) : null}
 
-          {bound && canReferral ? (
-            <div className="space-y-1.5">
-              <label className="block text-[11px] font-medium text-muted-foreground" htmlFor="lb-referral">
-                Link referred player
+          {bound && caps.canReferral ? (
+            <div className="space-y-2 rounded-lg border bg-white/80 p-2.5">
+              <label className="block text-xs font-semibold text-foreground" htmlFor={referralInputId}>
+                Referred player
               </label>
               {selectedReferred ? (
-                <div className="flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-2 py-1.5 text-xs">
-                  <span className="min-w-0 truncate">
-                    {selectedReferred.displayName}
-                    {selectedReferred.telegramUsername
-                      ? ` (@${selectedReferred.telegramUsername})`
-                      : ""}{" "}
-                    <span className="text-muted-foreground">· {selectedReferred.shortId}</span>
-                  </span>
+                <div className="flex items-start justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50/80 px-2.5 py-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">{selectedReferred.displayName}</p>
+                    <p className="truncate text-[11px] text-muted-foreground">
+                      {selectedReferred.telegramUsername
+                        ? `@${selectedReferred.telegramUsername} · `
+                        : ""}
+                      {selectedReferred.shortId}
+                    </p>
+                  </div>
                   <button
                     type="button"
-                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-white hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     disabled={pending}
                     onClick={() => setSelectedReferred(null)}
                   >
@@ -373,22 +408,24 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
               ) : (
                 <>
                   <Input
-                    id="lb-referral"
-                    placeholder="Search players…"
+                    id={referralInputId}
+                    placeholder="Search player by name..."
                     value={referralQuery}
                     disabled={pending}
                     onChange={(event) => setReferralQuery(event.target.value)}
-                    className="h-8 text-sm"
+                    className="h-10 text-sm"
+                    autoComplete="off"
                   />
                   {searching ? (
                     <p className="text-[11px] text-muted-foreground">Searching…</p>
                   ) : referralHits.length > 0 ? (
-                    <ul className="max-h-36 overflow-y-auto rounded-md border">
+                    <ul className="max-h-40 overflow-y-auto rounded-md border bg-white" role="listbox">
                       {referralHits.map((hit) => (
                         <li key={hit.crmContactId}>
                           <button
                             type="button"
-                            className="flex w-full flex-col items-start gap-0.5 px-2 py-1.5 text-left text-xs hover:bg-muted"
+                            role="option"
+                            className="flex w-full flex-col items-start gap-0.5 px-2.5 py-2 text-left text-xs hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
                             disabled={pending}
                             onClick={() => {
                               setSelectedReferred(hit);
@@ -408,8 +445,8 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
                   ) : null}
                 </>
               )}
-              <ActionRow
-                label="Link referral"
+              <ConfirmAction
+                label="Link Referral"
                 confirmLabel="Confirm referral"
                 confirming={confirming === "referral"}
                 pending={pending}
@@ -417,52 +454,114 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
                 onAsk={() => setConfirming("referral")}
                 onCancel={() => setConfirming(null)}
                 onConfirm={() => void submitReferral()}
+                variant="primary"
+                fullWidth
               />
             </div>
           ) : null}
 
-          {bound && canPromotion ? (
-            <ActionRow
-              label="Verify Promotion"
-              confirmLabel="Confirm promotion"
-              confirming={confirming === "promotion"}
-              pending={pending}
-              onAsk={() => setConfirming("promotion")}
-              onCancel={() => setConfirming(null)}
-              onConfirm={() => void submitPromotion()}
-            />
+          {bound && (caps.canPromotion || caps.canGiveInfo) ? (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {caps.canPromotion ? (
+                <ConfirmAction
+                  label="Verify Promotion"
+                  confirmLabel="Confirm promotion"
+                  confirming={confirming === "promotion"}
+                  pending={pending}
+                  onAsk={() => setConfirming("promotion")}
+                  onCancel={() => setConfirming(null)}
+                  onConfirm={() => void submitPromotion()}
+                  variant="action"
+                  fullWidth
+                />
+              ) : null}
+              {caps.canGiveInfo ? (
+                <ConfirmAction
+                  label="Give Info"
+                  confirmLabel="Send info message"
+                  confirming={confirming === "give-info"}
+                  pending={pending}
+                  onAsk={() => setConfirming("give-info")}
+                  onCancel={() => setConfirming(null)}
+                  onConfirm={() => void submitGiveInfo()}
+                  variant="action-alt"
+                  fullWidth
+                />
+              ) : null}
+            </div>
           ) : null}
 
-          {bound && canGiveInfo ? (
-            <ActionRow
-              label="Give Info"
-              confirmLabel="Send info message"
-              confirming={confirming === "give-info"}
-              pending={pending}
-              onAsk={() => setConfirming("give-info")}
-              onCancel={() => setConfirming(null)}
-              onConfirm={() => void submitGiveInfo()}
-            />
-          ) : null}
+          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3" data-testid="crm-link-status">
+            <LinkStatusCard label="Payment" linked={false} />
+            <LinkStatusCard label="AppBeg" linked={false} />
+            <LinkStatusCard label="Vendor Automation" linked={false} />
+          </div>
         </div>
       )}
     </section>
   );
 }
 
-function Stat({
+function MetricCard({
   label,
   value,
+  emphasize = false,
+  accent,
   wide = false
 }: {
   readonly label: string;
   readonly value: string;
+  readonly emphasize?: boolean;
+  readonly accent?: "pool";
   readonly wide?: boolean;
 }) {
+  const pool = accent === "pool";
   return (
-    <div className={wide ? "col-span-2" : undefined}>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="font-medium text-foreground">{value}</dd>
+    <div
+      className={[
+        "rounded-lg border px-2.5 py-2",
+        wide ? "col-span-2" : "",
+        pool
+          ? "border-emerald-300/80 bg-emerald-50/90"
+          : emphasize
+            ? "border-border/80 bg-white"
+            : "border-border/60 bg-muted/20"
+      ].join(" ")}
+    >
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p
+        className={[
+          "mt-0.5 break-words font-semibold tabular-nums text-foreground",
+          pool ? "text-lg text-emerald-900" : emphasize ? "text-base" : "text-sm"
+        ].join(" ")}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function BreakdownChip({ label, value }: { readonly label: string; readonly value: string }) {
+  return (
+    <div className="rounded-md border bg-muted/30 px-2 py-1">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="ml-1 font-semibold tabular-nums text-foreground">{value}</span>
+    </div>
+  );
+}
+
+function LinkStatusCard({ label, linked }: { readonly label: string; readonly linked: boolean }) {
+  return (
+    <div
+      className={[
+        "rounded-lg border px-2 py-1.5",
+        linked ? "border-emerald-200 bg-emerald-50/80" : "border-amber-200/80 bg-amber-50/50"
+      ].join(" ")}
+    >
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className={`text-xs font-medium ${linked ? "text-emerald-800" : "text-amber-900"}`}>
+        {linked ? "Linked" : "Not linked"}
+      </p>
     </div>
   );
 }
@@ -474,16 +573,27 @@ function formatPoints(value: number | null | undefined): string {
 function formatCompetitionEnd(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZoneName: "short"
-  });
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short"
+    }).format(date);
+  } catch {
+    return date.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short"
+    });
+  }
 }
 
-function ActionRow({
+function ConfirmAction({
   label,
   confirmLabel = "Confirm",
   confirming,
@@ -491,7 +601,9 @@ function ActionRow({
   disabled = false,
   onAsk,
   onCancel,
-  onConfirm
+  onConfirm,
+  variant = "secondary",
+  fullWidth = false
 }: {
   readonly label: string;
   readonly confirmLabel?: string;
@@ -501,14 +613,17 @@ function ActionRow({
   readonly onAsk: () => void;
   readonly onCancel: () => void;
   readonly onConfirm: () => void;
+  readonly variant?: "primary" | "secondary" | "action" | "action-alt";
+  readonly fullWidth?: boolean;
 }) {
+  const width = fullWidth ? "w-full" : "";
   if (confirming) {
     return (
-      <div className="flex flex-wrap gap-1.5">
+      <div className={`flex flex-wrap gap-1.5 ${fullWidth ? "w-full" : ""}`}>
         <Button
           type="button"
           variant="secondary"
-          className="h-8 px-3 text-xs"
+          className={`h-10 px-3 text-xs ${width}`}
           disabled={pending}
           onClick={onCancel}
         >
@@ -516,7 +631,7 @@ function ActionRow({
         </Button>
         <Button
           type="button"
-          className="h-8 px-3 text-xs"
+          className={`h-10 px-3 text-xs ${width} ${buttonTone(variant)}`}
           disabled={pending || disabled}
           onClick={onConfirm}
         >
@@ -529,12 +644,19 @@ function ActionRow({
   return (
     <Button
       type="button"
-      variant="secondary"
-      className="h-8 px-3 text-xs"
+      variant={variant === "primary" ? "primary" : "secondary"}
+      className={`h-10 px-3 text-xs font-semibold ${width} ${buttonTone(variant)}`}
       disabled={pending || disabled}
       onClick={onAsk}
     >
       {label}
     </Button>
   );
+}
+
+function buttonTone(variant: "primary" | "secondary" | "action" | "action-alt"): string {
+  if (variant === "primary") return "bg-emerald-800 text-white hover:bg-emerald-900";
+  if (variant === "action") return "border-sky-300 bg-sky-50 text-sky-950 hover:bg-sky-100";
+  if (variant === "action-alt") return "border-violet-300 bg-violet-50 text-violet-950 hover:bg-violet-100";
+  return "";
 }

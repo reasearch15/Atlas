@@ -74,6 +74,7 @@ describe("enable initializes ACTIVE competition + zero-point standings", () => {
     const ranked = sortStandings(standings);
     expect(ranked).toHaveLength(10);
     expect(new Set(ranked.map((s) => s.crmContactId)).size).toBe(10);
+    expect(service.listStandings(competitions[0]!.id)).toHaveLength(10);
 
     // Repeated enable remains idempotent.
     await service.setEnabled(workspaceId, ownerA, true, ownerA, now);

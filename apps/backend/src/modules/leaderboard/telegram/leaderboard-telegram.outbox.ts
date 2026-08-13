@@ -16,6 +16,9 @@ export interface RankAnnouncementEnqueueInput {
   readonly displayName: string;
   readonly reason: string;
   readonly kind: string;
+  readonly totalPoints?: number | null;
+  readonly pointsGained?: number | null;
+  readonly pointsBehindNext?: number | null;
 }
 
 /**
@@ -108,7 +111,10 @@ export class LeaderboardTelegramOutboxService {
         toRank: input.toRank,
         displayName: input.displayName,
         reason: input.reason,
-        kind: input.kind
+        kind: input.kind,
+        totalPoints: input.totalPoints ?? null,
+        pointsGained: input.pointsGained ?? null,
+        pointsBehindNext: input.pointsBehindNext ?? null
       }
     });
   }

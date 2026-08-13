@@ -252,7 +252,10 @@ export class LeaderboardTelegramProcessor {
         toRank: event.toRank,
         displayName: event.displayName,
         reason: event.reason,
-        kind: event.kind
+        kind: event.kind,
+        ...(event.totalPoints != null ? { totalPoints: event.totalPoints } : {}),
+        ...(event.pointsGained != null ? { pointsGained: event.pointsGained } : {}),
+        ...(event.pointsBehindNext != null ? { pointsBehindNext: event.pointsBehindNext } : {})
       });
 
       // Personal DMs must never fail the public refresh / scoring path.
@@ -517,6 +520,10 @@ export class LeaderboardTelegramProcessor {
       fromRank?: number | null;
       toRank?: number;
       reason?: string;
+      kind?: string;
+      totalPoints?: number | null;
+      pointsGained?: number | null;
+      pointsBehindNext?: number | null;
     };
     if (payload.toRank == null || !payload.displayName) {
       throw permanentError("ANNOUNCEMENT_PAYLOAD_INVALID", "Rank announcement payload incomplete");
@@ -525,7 +532,16 @@ export class LeaderboardTelegramProcessor {
       displayName: payload.displayName,
       fromRank: payload.fromRank ?? null,
       toRank: payload.toRank,
-      reason: payload.reason ?? "a ranking update"
+      reason: payload.reason ?? "a ranking update",
+      ...(payload.kind === "REACHED_NUMBER_1" ||
+      payload.kind === "ENTER_TOP_3" ||
+      payload.kind === "ENTER_TOP_10" ||
+      payload.kind === "TOP_3_ORDER_CHANGED"
+        ? { kind: payload.kind }
+        : {}),
+      ...(payload.totalPoints != null ? { totalPoints: payload.totalPoints } : {}),
+      ...(payload.pointsGained != null ? { pointsGained: payload.pointsGained } : {}),
+      ...(payload.pointsBehindNext != null ? { pointsBehindNext: payload.pointsBehindNext } : {})
     });
     await this.client.sendMessage(token, integration.channelId, text);
     await this.prisma.leaderboardBotIntegration.update({

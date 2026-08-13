@@ -9,7 +9,7 @@ import {
 const endsAt = new Date("2026-08-18T02:00:00.000Z");
 
 describe("formatPublicLeaderboardMessage", () => {
-  it("formats top 10 with medals, pool dollars, and exact subscription reminder", () => {
+  it("puts prize pool near the top with premium Top 3 formatting", () => {
     const text = formatPublicLeaderboardMessage({
       title: "BIWEEKLY LEADERBOARD",
       top10: [
@@ -19,22 +19,23 @@ describe("formatPublicLeaderboardMessage", () => {
         { rank: 4, displayName: "Alex Reed", points: 610 },
         { rank: 10, displayName: "David Lee", points: 390 }
       ],
-      prizePoolCents: 48_500,
+      prizePoolCents: 62_000,
       endsAt,
       timezone: "America/Chicago"
     });
 
     expect(text).toContain("🏆 BIWEEKLY LEADERBOARD");
+    expect(text.indexOf("💰 PRIZE POOL")).toBeLessThan(text.indexOf("🥇 1."));
+    expect(text.indexOf("💵 $620.00")).toBeLessThan(text.indexOf("🥇 1."));
     expect(text).toContain("🥇 1. John — 720 pts");
     expect(text).toContain("🥈 2. Sarah — 681 pts");
     expect(text).toContain("🥉 3. Mike — 640 pts");
     expect(text).toContain("4. Alex — 610 pts");
     expect(text).toContain("10. David — 390 pts");
-    expect(text).toContain("Current Prize Pool: $485.00");
     expect(text).toContain(PUBLIC_LEADERBOARD_SUBSCRIPTION_REMINDER);
-    expect(text).toContain(
-      "To receive a prize, winners must be subscribed to this channel at the eligibility deadline."
-    );
+    expect(text).toContain("🔥 Keep climbing.");
+    expect(text).not.toMatch(/\b2%\b/);
+    expect(text).not.toMatch(/rateBps/i);
   });
 
   it("never includes pool %, rateBps, or internal ids", () => {
@@ -63,9 +64,8 @@ describe("formatPublicLeaderboardMessage", () => {
       timezone: "America/Chicago",
       botUsername: "AtlasBoardBot"
     });
-    expect(text).toContain(
-      "➡️ Check your personal rank: https://t.me/AtlasBoardBot?start=rank"
-    );
+    expect(text).toContain("➡️ Check your personal rank:");
+    expect(text).toContain("https://t.me/AtlasBoardBot?start=rank");
   });
 
   it("omits personal rank CTA when botUsername is missing", () => {
@@ -90,6 +90,28 @@ describe("formatPublicLeaderboardMessage", () => {
     expect(text).toContain("1. Player — 50 pts");
     expect(text).not.toContain("@secretuser");
   });
+
+  it("renders intentional zero-point board copy", () => {
+    const text = formatPublicLeaderboardMessage({
+      title: "BIWEEKLY LEADERBOARD",
+      top10: [
+        { rank: 1, displayName: "Homer", points: 0 },
+        { rank: 2, displayName: "Player", points: 0 },
+        { rank: 3, displayName: "TanDra", points: 0 }
+      ],
+      prizePoolCents: 0,
+      endsAt,
+      timezone: "America/Chicago"
+    });
+
+    expect(text).toContain("💵 $0.00");
+    expect(text.indexOf("💰 PRIZE POOL")).toBeLessThan(text.indexOf("🥇 1. Homer — 0 pts"));
+    expect(text).toContain("🥇 1. Homer — 0 pts");
+    expect(text).toContain("🥈 2. Player — 0 pts");
+    expect(text).toContain("🥉 3. TanDra — 0 pts");
+    expect(text).toContain("🔥 The competition has started — every point matters.");
+    expect(text).not.toContain("Keep climbing.");
+  });
 });
 
 describe("formatPublicResultsMessage", () => {
@@ -107,21 +129,37 @@ describe("formatPublicResultsMessage", () => {
     expect(text).toContain("🥇 1. Sarah — $250.00");
     expect(text).toContain("🥈 2. Mike — $150.00");
     expect(text).toContain("🥉 3. Alex — $100.00");
-    expect(text).toContain("Prize Pool: $500.00");
+    expect(text).toContain("💵 $500.00");
     expect(text).not.toMatch(/not subscribed|ineligible|NOT_ELIGIBLE/i);
     expect(text).not.toMatch(/\b2%\b|rateBps/i);
   });
 });
 
 describe("formatRankAnnouncement", () => {
-  it("formats a short movement announcement", () => {
+  it("formats NEW #1 announcements premium-style", () => {
     expect(
       formatRankAnnouncement({
         displayName: "Sarah Connor",
-        fromRank: 5,
-        toRank: 2,
-        reason: "earning +75 referral points"
+        fromRank: 2,
+        toRank: 1,
+        reason: "reaching #1",
+        kind: "REACHED_NUMBER_1",
+        totalPoints: 742
       })
-    ).toBe("🔥 Sarah moved from #5 → #2 after earning +75 referral points.");
+    ).toBe("👑 NEW #1\nSarah just took the top spot with 742 points.");
+  });
+
+  it("formats climb announcements with optional gap copy", () => {
+    expect(
+      formatRankAnnouncement({
+        displayName: "Homer",
+        fromRank: 6,
+        toRank: 3,
+        reason: "entering Top 3",
+        kind: "ENTER_TOP_3",
+        pointsGained: 35,
+        pointsBehindNext: 18
+      })
+    ).toBe("🔥 Homer moved #6 → #3!\n+35 points\nNow only 18 points behind #2.");
   });
 });

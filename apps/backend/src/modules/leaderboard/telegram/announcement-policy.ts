@@ -24,6 +24,9 @@ export interface AnnouncementEvent {
   readonly toRank: number;
   /** Short reason fragment for formatRankAnnouncement. */
   readonly reason: string;
+  readonly totalPoints?: number;
+  readonly pointsGained?: number | null;
+  readonly pointsBehindNext?: number | null;
 }
 
 const KIND_PRIORITY: Record<AnnouncementKind, number> = {
@@ -49,6 +52,15 @@ export function detectRankAnnouncements(
     const prev = prevById.get(row.crmContactId);
     const fromRank = prev?.rank ?? null;
     const toRank = row.rank;
+    const totalPoints = row.totalPoints;
+    const pointsGained =
+      totalPoints != null && prev?.totalPoints != null ? totalPoints - prev.totalPoints : null;
+    const pointsBehindNext = gapToRankAbove(nextOrdered, toRank, totalPoints);
+    const extras = {
+      ...(totalPoints != null ? { totalPoints } : {}),
+      ...(pointsGained != null ? { pointsGained } : {}),
+      ...(pointsBehindNext != null ? { pointsBehindNext } : {})
+    };
 
     if (toRank === 1 && fromRank !== 1) {
       events.push({
@@ -57,7 +69,9 @@ export function detectRankAnnouncements(
         displayName: row.displayName,
         fromRank,
         toRank,
-        reason: "reaching #1"
+        reason: "reaching #1",
+        ...extras,
+        pointsBehindNext: null
       });
       continue;
     }
@@ -69,7 +83,8 @@ export function detectRankAnnouncements(
         displayName: row.displayName,
         fromRank,
         toRank,
-        reason: "entering Top 3"
+        reason: "entering Top 3",
+        ...extras
       });
       continue;
     }
@@ -81,7 +96,8 @@ export function detectRankAnnouncements(
         displayName: row.displayName,
         fromRank,
         toRank,
-        reason: "entering Top 10"
+        reason: "entering Top 10",
+        ...extras
       });
       continue;
     }
@@ -99,7 +115,8 @@ export function detectRankAnnouncements(
         displayName: row.displayName,
         fromRank,
         toRank,
-        reason: "a Top 3 reorder"
+        reason: "a Top 3 reorder",
+        ...extras
       });
     }
   }
@@ -136,4 +153,15 @@ function orderedTop3Ids(rows: readonly AnnouncementStandingRow[]): string[] {
     .filter((r) => r.rank >= 1 && r.rank <= 3)
     .sort((a, b) => a.rank - b.rank)
     .map((r) => r.crmContactId);
+}
+
+function gapToRankAbove(
+  ordered: readonly AnnouncementStandingRow[],
+  rank: number,
+  totalPoints: number | undefined
+): number | null {
+  if (rank <= 1 || totalPoints == null) return null;
+  const above = ordered.find((r) => r.rank === rank - 1);
+  if (above?.totalPoints == null) return null;
+  return Math.max(0, above.totalPoints - totalPoints);
 }

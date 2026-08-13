@@ -97,12 +97,18 @@ export function WheelSpinPanel({
     return `🎡 +${spun.pointsAwarded} POINTS!${from}${prizeZone}`;
   }
 
+  const tone = status.consumed
+    ? "border-border/70 bg-muted/30"
+    : status.available
+      ? "border-emerald-300 bg-emerald-50/90"
+      : "border-amber-200 bg-amber-50/70";
+
   return (
-    <div className="space-y-2 rounded-md border bg-muted/20 p-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+    <div className={`space-y-2 rounded-lg border p-2.5 ${tone}`} data-testid="crm-wheel-panel">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-semibold tracking-wide text-foreground">
           {status.consumed
-            ? "🎡 Spin used for this cycle"
+            ? "🎡 Spin used this cycle"
             : status.available
               ? "🎡 SPIN AVAILABLE"
               : "🎡 Next Spin"}
@@ -120,18 +126,18 @@ export function WheelSpinPanel({
 
       {!status.consumed ? (
         <>
-          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+          <div className="h-2 overflow-hidden rounded-full bg-white/80" aria-hidden="true">
             <div
               className="h-full rounded-full bg-emerald-700 transition-[width] duration-500"
               style={{ width: `${progress}%` }}
             />
           </div>
-          <p className="text-xs text-foreground">
-            ${have} / ${need} qualifying deposits
-            {status.available
-              ? null
-              : ` · $${remaining} remaining to unlock`}
+          <p className="text-sm font-semibold tabular-nums text-foreground">
+            ${have} / ${need}
           </p>
+          {status.available ? null : (
+            <p className="text-xs text-amber-900">${remaining} remaining</p>
+          )}
         </>
       ) : (
         <p className="text-xs text-foreground">
@@ -140,7 +146,7 @@ export function WheelSpinPanel({
       )}
 
       {status.qualificationInvalidated ? (
-        <p className="text-[11px] text-amber-700">
+        <p className="text-[11px] text-amber-800">
           Qualification invalidated after reversal — historical spin points kept.
         </p>
       ) : null}
@@ -148,7 +154,7 @@ export function WheelSpinPanel({
       {canSpin && status.available && !status.consumed ? (
         <Button
           type="button"
-          className="h-8 w-full text-xs"
+          className="h-10 w-full text-xs font-semibold bg-emerald-800 text-white hover:bg-emerald-900"
           disabled={pending}
           onClick={() => {
             setOpen(true);

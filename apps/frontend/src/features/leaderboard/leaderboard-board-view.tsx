@@ -71,13 +71,13 @@ export function LeaderboardBoardView() {
 
   return (
     <main className="space-y-4 p-4 pb-8 md:p-6 lg:p-8">
-      <section className="rounded-lg border bg-white p-5">
+      <section className="rounded-xl border border-emerald-200/70 bg-gradient-to-br from-emerald-50 via-white to-white p-5 shadow-sm">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Current Prize Pool
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-800/80">
+              💰 Prize Pool
             </p>
-            <p className="text-3xl font-semibold tracking-tight text-foreground">
+            <p className="text-3xl font-semibold tracking-tight text-emerald-950 md:text-4xl">
               {competition ? formatMoneyFromCents(competition.prizePoolCents) : "—"}
             </p>
           </div>
