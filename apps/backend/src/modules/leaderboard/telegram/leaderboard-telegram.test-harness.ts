@@ -22,8 +22,13 @@ export function createMemoryPrisma() {
         }) ?? null
     },
     leaderboardBotIntegration: {
-      findUnique: async ({ where }: any) =>
-        integrations.find((r) => r.ownerCoadminUserId === where.ownerCoadminUserId) ?? null,
+      findUnique: async ({ where }: any) => {
+        if (where.id) return integrations.find((r) => r.id === where.id) ?? null;
+        if (where.ownerCoadminUserId) {
+          return integrations.find((r) => r.ownerCoadminUserId === where.ownerCoadminUserId) ?? null;
+        }
+        return null;
+      },
       upsert: async ({ where, create, update }: any) => {
         const existing = integrations.find((r) => r.ownerCoadminUserId === where.ownerCoadminUserId);
         if (!existing) {
@@ -57,6 +62,20 @@ export function createMemoryPrisma() {
         if (!row) throw new Error("integration missing");
         Object.assign(row, data, { updatedAt: new Date() });
         return row;
+      },
+      updateMany: async ({ where, data }: any) => {
+        let count = 0;
+        for (const row of integrations) {
+          if (where.id && row.id !== where.id) continue;
+          if (where.ownerCoadminUserId && row.ownerCoadminUserId !== where.ownerCoadminUserId) continue;
+          if ("channelId" in where && row.channelId !== where.channelId) continue;
+          if ("persistentMessageId" in where && row.persistentMessageId !== where.persistentMessageId) {
+            continue;
+          }
+          Object.assign(row, data, { updatedAt: new Date() });
+          count += 1;
+        }
+        return { count };
       }
     },
     leaderboardTelegramOutbox: {

@@ -47,8 +47,13 @@ function createMemoryPrisma() {
         }) ?? null
     },
     leaderboardBotIntegration: {
-      findUnique: async ({ where }: any) =>
-        integrations.find((r) => r.ownerCoadminUserId === where.ownerCoadminUserId) ?? null,
+      findUnique: async ({ where }: any) => {
+        if (where.id) return integrations.find((r) => r.id === where.id) ?? null;
+        if (where.ownerCoadminUserId) {
+          return integrations.find((r) => r.ownerCoadminUserId === where.ownerCoadminUserId) ?? null;
+        }
+        return null;
+      },
       upsert: async ({ where, create, update }: any) => {
         const existing = integrations.find((r) => r.ownerCoadminUserId === where.ownerCoadminUserId);
         if (!existing) {
@@ -82,6 +87,20 @@ function createMemoryPrisma() {
         if (!row) throw new Error("integration missing");
         Object.assign(row, data, { updatedAt: new Date() });
         return row;
+      },
+      updateMany: async ({ where, data }: any) => {
+        let count = 0;
+        for (const row of integrations) {
+          if (where.id && row.id !== where.id) continue;
+          if (where.ownerCoadminUserId && row.ownerCoadminUserId !== where.ownerCoadminUserId) continue;
+          if ("channelId" in where && row.channelId !== where.channelId) continue;
+          if ("persistentMessageId" in where && row.persistentMessageId !== where.persistentMessageId) {
+            continue;
+          }
+          Object.assign(row, data, { updatedAt: new Date() });
+          count += 1;
+        }
+        return { count };
       }
     },
     leaderboardTelegramOutbox: {
@@ -755,7 +774,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
     expect(board?.text).toMatch(/\$0(\.00)?/);
   });
 
-  it("D: existing canonical message still gets a fresh sendMessage on manual Send", async () => {
+  it("D: existing canonical message is replaced (send new + delete old) on manual Send", async () => {
     const prisma = createMemoryPrisma();
     const { service, tgState } = await readyIntegration(prisma);
     seedActiveCompetition(prisma);
@@ -770,7 +789,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
     expect(prisma._state.integrations[0].persistentMessageId).toBe("43");
 
     const channel = tgState.chats.get(-1001)!;
-    expect(channel.messages.find((m) => m.messageId === 42)?.text).toBe("old canonical board");
+    expect(channel.messages.find((m) => m.messageId === 42)?.deleted).toBe(true);
     expect(channel.messages.find((m) => m.messageId === 43)?.text).toContain("BIWEEKLY LEADERBOARD");
   });
 
@@ -894,11 +913,11 @@ describe("sendLatestLeaderboard manual refresh", () => {
     expect(board?.text).toContain("BIWEEKLY LEADERBOARD");
     expect(board?.text).toContain("Climber");
     expect(board?.text).not.toMatch(/moved from unranked/i);
-    // Old canonical left untouched; manual send posts fresh.
-    expect(tgState.chats.get(-1001)!.messages.find((m) => m.messageId === 7)?.text).toBe("old board");
+    // Previous full board deleted; rank announcements are separate and untouched by this path.
+    expect(tgState.chats.get(-1001)!.messages.find((m) => m.messageId === 7)?.deleted).toBe(true);
   });
 
-  it("G: automatic refresh still edits the canonical message", async () => {
+  it("G: automatic refresh replaces canonical board (send + delete), manual uses same semantics", async () => {
     const prisma = createMemoryPrisma();
     const { service, outboxSvc, client, tgState } = await readyIntegration(prisma);
     seedActiveCompetition(prisma, 1000);
@@ -938,13 +957,12 @@ describe("sendLatestLeaderboard manual refresh", () => {
     await processor.processJob(job2.id);
     expect(job2.status).toBe("SUCCEEDED");
     expect(boards()).toHaveLength(1);
-    expect(prisma._state.integrations[0].persistentMessageId).toBe(canonicalId);
+    expect(prisma._state.integrations[0].persistentMessageId).not.toBe(canonicalId);
 
-    // Manual send still posts a second visible message.
     const manual = await service.sendLatestLeaderboard(workspaceA, ownerA, ownerA);
     expect(manual.deliveryAction).toBe("SENT_NEW");
-    expect(manual.telegramMessageId).not.toBe(canonicalId);
-    expect(boards()).toHaveLength(2);
+    expect(manual.telegramMessageId).toBe(prisma._state.integrations[0].persistentMessageId);
+    expect(boards()).toHaveLength(1);
   });
 
   it("rejects posting disabled / unverified / no ACTIVE competition", async () => {
@@ -1020,7 +1038,7 @@ describe("sendLatestLeaderboard manual refresh", () => {
     const boardMessages = (tgState.chats.get(-1001)?.messages ?? []).filter(
       (m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD")
     );
-    expect(boardMessages).toHaveLength(2);
+    expect(boardMessages).toHaveLength(1);
     expect(boardMessages.some((m) => m.text.includes("🥇 1."))).toBe(true);
     expect(boardMessages.some((m) => /moved from unranked/i.test(m.text))).toBe(false);
     expect(

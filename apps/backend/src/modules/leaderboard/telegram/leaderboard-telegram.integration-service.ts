@@ -449,11 +449,11 @@ export class LeaderboardTelegramIntegrationService {
         integrationId: row.id,
         channelId: row.channelId,
         botUsername: row.botUsername,
-        // Manual send always posts a fresh message (never silently edit a historical one).
-        persistentMessageId: null,
+        // Replace previous canonical board after successful send.
+        persistentMessageId: row.persistentMessageId,
         persistentMessageCompetitionId: row.persistentMessageCompetitionId,
         lastPublicTop10Json: row.lastPublicTop10Json,
-        mode: "send_new",
+        mode: "replace",
         skipRankAnnouncements: true
       });
     } catch (error) {

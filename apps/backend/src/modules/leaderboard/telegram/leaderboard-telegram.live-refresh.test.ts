@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { encryptSecret } from "@atlas/shared/session-encryption";
 import {
   createFakeLeaderboardTelegramClient,
+  LeaderboardTelegramApiError,
   type FakeLeaderboardTelegramState,
   type FakeTelegramChatState
 } from "./leaderboard-telegram.client";
@@ -11,6 +12,7 @@ import {
   mergeRefreshPayload
 } from "./leaderboard-telegram.outbox";
 import { LeaderboardTelegramProcessor } from "./leaderboard-telegram.processor";
+import { publishPublicLeaderboardSnapshot } from "./public-leaderboard-publisher";
 import { createMemoryPrisma } from "./leaderboard-telegram.test-harness";
 
 const workspaceA = "11111111-1111-4111-8111-111111111111";
@@ -85,7 +87,7 @@ describe("immediate live Telegram refresh after scoring", () => {
     expect(isRefreshPayloadDirty(merged)).toBe(true);
   });
 
-  it("$10 deposit standing is reflected on public snapshot via edit_or_create", async () => {
+  it("$10 deposit standing is reflected via sendMessage replace (not edit)", async () => {
     const { prisma } = seedBoard(10, 20);
     const tgState: FakeLeaderboardTelegramState = {
       bots: new Map([["tok", { id: 1, isBot: true, firstName: "Bot", username: "atlas_lb_bot" }]]),
@@ -94,6 +96,7 @@ describe("immediate live Telegram refresh after scoring", () => {
     const client = createFakeLeaderboardTelegramClient(tgState);
     const editSpy = vi.spyOn(client, "editMessageText");
     const sendSpy = vi.spyOn(client, "sendMessage");
+    const deleteSpy = vi.spyOn(client, "deleteMessage");
     const outbox = new LeaderboardTelegramOutboxService(prisma as never, async () => undefined);
     const processor = new LeaderboardTelegramProcessor({
       prisma: prisma as never,
@@ -106,12 +109,16 @@ describe("immediate live Telegram refresh after scoring", () => {
     await processor.processJob(outboxId);
 
     expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
-    expect(editSpy).toHaveBeenCalledTimes(1);
-    expect(sendSpy).not.toHaveBeenCalled();
-    const editedText = String(editSpy.mock.calls[0]?.[3] ?? "");
-    expect(editedText).toMatch(/Picasso/i);
-    expect(editedText).toMatch(/\b10\b/);
-    expect(prisma._state.integrations[0].persistentMessageId).toBe("42");
+    expect(editSpy).not.toHaveBeenCalled();
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith("tok", channelId, 42);
+    const sentText = String(sendSpy.mock.calls[0]?.[2] ?? "");
+    expect(sentText).toMatch(/Picasso/i);
+    expect(sentText).toMatch(/\b10\b/);
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("43");
+    expect(tgState.chats.get(Number(channelId))!.messages.find((m) => m.messageId === 42)?.deleted).toBe(
+      true
+    );
   });
 
   it("previous SUCCEEDED refresh is re-armed by a second deposit-style enqueue", async () => {
@@ -141,8 +148,11 @@ describe("immediate live Telegram refresh after scoring", () => {
     expect(prisma._state.outbox[0].status).toBe("QUEUED");
     await processor.processJob(id2);
     expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
-    const text = tgState.chats.get(Number(channelId))!.messages.find((m) => !m.deleted)!.text;
-    expect(text).toMatch(/\b10\b/);
+    const live = tgState.chats
+      .get(Number(channelId))!
+      .messages.filter((m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD"));
+    expect(live).toHaveLength(1);
+    expect(live[0]!.text).toMatch(/\b10\b/);
   });
 
   it("10 sequential deposits keep re-arming and converge to latest points", async () => {
@@ -168,9 +178,11 @@ describe("immediate live Telegram refresh after scoring", () => {
       expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
     }
 
-    const text = tgState.chats.get(Number(channelId))!.messages.find((m) => !m.deleted)!.text;
-    expect(text).toMatch(/\b100\b/);
-    expect(tgState.chats.get(Number(channelId))!.messages.filter((m) => !m.deleted)).toHaveLength(1);
+    const live = tgState.chats
+      .get(Number(channelId))!
+      .messages.filter((m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD"));
+    expect(live).toHaveLength(1);
+    expect(live[0]!.text).toMatch(/\b100\b/);
   });
 
   it("mutation during DISPATCHING dirties payload and final snapshot is latest", async () => {
@@ -189,9 +201,9 @@ describe("immediate live Telegram refresh after scoring", () => {
     });
 
     const outboxId = await outbox.enqueueRefresh(workspaceA, ownerA, competitionA);
-    const originalEdit = client.editMessageText.bind(client);
+    const originalSend = client.sendMessage.bind(client);
     let dirtied = false;
-    vi.spyOn(client, "editMessageText").mockImplementation(async (...args) => {
+    vi.spyOn(client, "sendMessage").mockImplementation(async (...args) => {
       if (!dirtied) {
         dirtied = true;
         prisma._state.standings[0].totalPoints = 30;
@@ -200,14 +212,17 @@ describe("immediate live Telegram refresh after scoring", () => {
         expect(prisma._state.outbox[0].status).toBe("DISPATCHING");
         expect(isRefreshPayloadDirty(prisma._state.outbox[0].payloadJson)).toBe(true);
       }
-      return originalEdit(...(args as [string, string, string, string]));
+      return originalSend(...(args as [string, string, string]));
     });
 
     await processor.processJob(outboxId);
     expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
     expect(isRefreshPayloadDirty(prisma._state.outbox[0].payloadJson)).toBe(false);
-    const text = tgState.chats.get(Number(channelId))!.messages.find((m) => !m.deleted)!.text;
-    expect(text).toMatch(/\b30\b/);
+    const live = tgState.chats
+      .get(Number(channelId))!
+      .messages.filter((m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD"));
+    expect(live).toHaveLength(1);
+    expect(live[0]!.text).toMatch(/\b30\b/);
   });
 
   it("Telegram temporary failure leaves deposit-like standing intact and schedules retry", async () => {
@@ -217,9 +232,8 @@ describe("immediate live Telegram refresh after scoring", () => {
       chats: new Map([[Number(channelId), makeChannel(42)]]),
       failures: new Map()
     };
-    const { LeaderboardTelegramApiError } = await import("./leaderboard-telegram.client");
     tgState.failures!.set(
-      "tok:editMessageText",
+      "tok:sendMessage",
       new LeaderboardTelegramApiError({
         httpStatus: 429,
         telegramErrorCode: 429,
@@ -244,6 +258,10 @@ describe("immediate live Telegram refresh after scoring", () => {
 
     expect(prisma._state.standings[0].totalPoints).toBe(10);
     expect(prisma._state.outbox[0].status).toBe("RETRY_SCHEDULED");
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("42");
+    expect(tgState.chats.get(Number(channelId))!.messages.find((m) => m.messageId === 42)?.deleted).not.toBe(
+      true
+    );
     expect(wakes.some((w) => w.id === outboxId && w.delay > 0)).toBe(true);
 
     tgState.failures!.clear();
@@ -279,7 +297,207 @@ describe("immediate live Telegram refresh after scoring", () => {
 
     await processor.processJob(outboxId);
     expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
-    const text = tgState.chats.get(Number(channelId))!.messages.find((m) => !m.deleted)!.text;
-    expect(text).toMatch(/\b10\b/);
+    const live = tgState.chats
+      .get(Number(channelId))!
+      .messages.filter((m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD"));
+    expect(live).toHaveLength(1);
+    expect(live[0]!.text).toMatch(/\b10\b/);
+  });
+});
+
+describe("public leaderboard replace (send new + delete old)", () => {
+  it("sendMessage fails → old message is NOT deleted", async () => {
+    const { prisma, integrationId } = seedBoard(10, 20);
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tok", { id: 1, isBot: true, firstName: "Bot", username: "atlas_lb_bot" }]]),
+      chats: new Map([[Number(channelId), makeChannel(42)]]),
+      failures: new Map([
+        [
+          "tok:sendMessage",
+          new LeaderboardTelegramApiError({
+            httpStatus: 400,
+            telegramErrorCode: 400,
+            description: "chat not found",
+            permanent: true
+          })
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    await expect(
+      publishPublicLeaderboardSnapshot({
+        prisma: prisma as never,
+        client,
+        token: "tok",
+        workspaceId: workspaceA,
+        ownerCoadminUserId: ownerA,
+        competitionId: competitionA,
+        integrationId,
+        channelId,
+        botUsername: "atlas_lb_bot",
+        persistentMessageId: "42",
+        persistentMessageCompetitionId: competitionA,
+        lastPublicTop10Json: [],
+        mode: "replace",
+        skipRankAnnouncements: true
+      })
+    ).rejects.toBeTruthy();
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("42");
+    expect(tgState.chats.get(Number(channelId))!.messages.find((m) => m.messageId === 42)?.deleted).not.toBe(
+      true
+    );
+  });
+
+  it("delete old fails → new message remains canonical", async () => {
+    const { prisma, integrationId } = seedBoard(10, 20);
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tok", { id: 1, isBot: true, firstName: "Bot", username: "atlas_lb_bot" }]]),
+      chats: new Map([[Number(channelId), makeChannel(42)]]),
+      failures: new Map()
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    tgState.failures!.set(
+      "tok:deleteMessage",
+      new LeaderboardTelegramApiError({
+        httpStatus: 400,
+        telegramErrorCode: 400,
+        description: "message to delete not found",
+        permanent: true
+      })
+    );
+    const published = await publishPublicLeaderboardSnapshot({
+      prisma: prisma as never,
+      client,
+      token: "tok",
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      integrationId,
+      channelId,
+      botUsername: "atlas_lb_bot",
+      persistentMessageId: "42",
+      persistentMessageCompetitionId: competitionA,
+      lastPublicTop10Json: [],
+      mode: "replace",
+      skipRankAnnouncements: true
+    });
+    expect(published.messageId).toBe("43");
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("43");
+    expect(published.deletedPreviousMessageId).toBeNull();
+  });
+
+  it("concurrent publishes do not delete the newest canonical message", async () => {
+    const { prisma, integrationId } = seedBoard(10, 20);
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tok", { id: 1, isBot: true, firstName: "Bot", username: "atlas_lb_bot" }]]),
+      chats: new Map([[Number(channelId), makeChannel(42)]])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+
+    const [a, b] = await Promise.all([
+      publishPublicLeaderboardSnapshot({
+        prisma: prisma as never,
+        client,
+        token: "tok",
+        workspaceId: workspaceA,
+        ownerCoadminUserId: ownerA,
+        competitionId: competitionA,
+        integrationId,
+        channelId,
+        botUsername: "atlas_lb_bot",
+        persistentMessageId: "42",
+        persistentMessageCompetitionId: competitionA,
+        lastPublicTop10Json: [],
+        mode: "replace",
+        skipRankAnnouncements: true
+      }),
+      publishPublicLeaderboardSnapshot({
+        prisma: prisma as never,
+        client,
+        token: "tok",
+        workspaceId: workspaceA,
+        ownerCoadminUserId: ownerA,
+        competitionId: competitionA,
+        integrationId,
+        channelId,
+        botUsername: "atlas_lb_bot",
+        persistentMessageId: "42",
+        persistentMessageCompetitionId: competitionA,
+        lastPublicTop10Json: [],
+        mode: "replace",
+        skipRankAnnouncements: true
+      })
+    ]);
+
+    const canonical = prisma._state.integrations[0].persistentMessageId;
+    expect(canonical).toBeTruthy();
+    expect([a.messageId, b.messageId]).toContain(canonical);
+    const liveBoards = tgState.chats
+      .get(Number(channelId))!
+      .messages.filter((m) => !m.deleted && m.text.includes("BIWEEKLY LEADERBOARD"));
+    // Winner remains; loser orphan deleted when possible → at most one live board.
+    expect(liveBoards.length).toBeLessThanOrEqual(1);
+    expect(liveBoards.some((m) => String(m.messageId) === canonical)).toBe(true);
+    // Newest canonical must not be deleted.
+    expect(tgState.chats.get(Number(channelId))!.messages.find((m) => String(m.messageId) === canonical)?.deleted).not.toBe(
+      true
+    );
+  });
+
+  it("channel switch cleared id → does not delete foreign-channel message id", async () => {
+    const { prisma, integrationId } = seedBoard(10, 20);
+    // Simulate setChannel: clear canonical pointer before posting to new channel.
+    prisma._state.integrations[0].persistentMessageId = null;
+    prisma._state.integrations[0].channelId = "-100999";
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tok", { id: 1, isBot: true, firstName: "Bot", username: "atlas_lb_bot" }]]),
+      chats: new Map([
+        [
+          -100999,
+          {
+            id: -100999,
+            type: "channel",
+            title: "Hub",
+            members: new Map([[1, "administrator"]]),
+            messages: [],
+            nextMessageId: 1
+          }
+        ],
+        [
+          Number(channelId),
+          {
+            id: Number(channelId),
+            type: "channel",
+            title: "Old Test",
+            members: new Map([[1, "administrator"]]),
+            messages: [{ messageId: 42, text: "OLD ZERO BOARD", deleted: false }],
+            nextMessageId: 43
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    const deleteSpy = vi.spyOn(client, "deleteMessage");
+    await publishPublicLeaderboardSnapshot({
+      prisma: prisma as never,
+      client,
+      token: "tok",
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      integrationId,
+      channelId: "-100999",
+      botUsername: "atlas_lb_bot",
+      persistentMessageId: null,
+      persistentMessageCompetitionId: null,
+      lastPublicTop10Json: [],
+      mode: "replace",
+      skipRankAnnouncements: true
+    });
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(tgState.chats.get(Number(channelId))!.messages.find((m) => m.messageId === 42)?.deleted).not.toBe(
+      true
+    );
+    expect(prisma._state.integrations[0].persistentMessageId).toBe("1");
   });
 });

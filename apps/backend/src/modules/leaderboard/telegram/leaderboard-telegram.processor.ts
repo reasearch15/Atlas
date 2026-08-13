@@ -277,8 +277,9 @@ export class LeaderboardTelegramProcessor {
         persistentMessageId: integration.persistentMessageId,
         persistentMessageCompetitionId: integration.persistentMessageCompetitionId,
         lastPublicTop10Json: integration.lastPublicTop10Json,
-        mode: "edit_or_create",
-        skipRankAnnouncements
+        mode: "replace",
+        skipRankAnnouncements,
+        ...(this.logger ? { logger: this.logger } : {})
       });
     } catch (error) {
       if (error instanceof Error && error.message === "COMPETITION_NOT_FOUND") {

@@ -9,11 +9,12 @@ import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
 
 export type PublicLeaderboardDeliveryAction = "SENT_NEW" | "UPDATED_EXISTING";
 
-export type PublicLeaderboardPublishMode =
-  /** Manual Send Leaderboard — always posts a fresh channel message. */
-  | "send_new"
-  /** Automatic refresh — edit canonical message when present, else send. */
-  | "edit_or_create";
+/**
+ * Public full-board delivery.
+ * All modes use replace semantics: sendMessage → persist → delete previous.
+ * `edit_or_create` is retained as a deprecated alias (no longer edits in place).
+ */
+export type PublicLeaderboardPublishMode = "replace" | "send_new" | "edit_or_create";
 
 export interface PublicLeaderboardTop10Row {
   readonly crmContactId: string;
@@ -25,7 +26,9 @@ export interface PublicLeaderboardTop10Row {
 export interface PublishPublicLeaderboardResult {
   readonly messageId: string;
   readonly deliveryAction: PublicLeaderboardDeliveryAction;
+  /** Always false — full boards are never edit-in-place anymore. */
   readonly recoveredFromFailedEdit: boolean;
+  readonly deletedPreviousMessageId: string | null;
   readonly nextTop10: readonly PublicLeaderboardTop10Row[];
   readonly announcements: ReturnType<typeof detectRankAnnouncements>;
   readonly text: string;
@@ -42,17 +45,27 @@ export interface PublishPublicLeaderboardInput {
   readonly integrationId: string;
   readonly channelId: string;
   readonly botUsername: string | null;
+  /** Canonical full-board message to replace (same channel only). */
   readonly persistentMessageId: string | null;
   readonly persistentMessageCompetitionId: string | null;
   readonly lastPublicTop10Json: unknown;
   readonly mode: PublicLeaderboardPublishMode;
   readonly skipRankAnnouncements: boolean;
+  readonly logger?: {
+    warn: (obj: unknown, msg?: string) => void;
+    info?: (obj: unknown, msg?: string) => void;
+  };
 }
 
 /**
  * Builds the elegant public leaderboard snapshot and delivers it via Bot API.
- * Manual mode always sendMessage; auto mode edits the canonical message when possible.
- * Does not enqueue announcement jobs — callers decide.
+ *
+ * Replacement order (never edit-in-place):
+ * 1) sendMessage latest snapshot
+ * 2) CAS-persist new canonical message id
+ * 3) delete previous canonical message (same channel only)
+ *
+ * Rank announcement messages are never deleted here.
  */
 export async function publishPublicLeaderboardSnapshot(
   input: PublishPublicLeaderboardInput
@@ -132,30 +145,12 @@ export async function publishPublicLeaderboardSnapshot(
     botUsername: input.botUsername
   });
 
-  let messageId = input.persistentMessageId;
-  let deliveryAction: PublicLeaderboardDeliveryAction = "SENT_NEW";
-  let recoveredFromFailedEdit = false;
+  const previousMessageId = input.persistentMessageId;
+  const publishChannelId = input.channelId;
 
-  if (input.mode === "send_new") {
-    const sent = await input.client.sendMessage(input.token, input.channelId, text);
-    messageId = String(sent.messageId);
-    deliveryAction = "SENT_NEW";
-  } else if (messageId) {
-    try {
-      await input.client.editMessageText(input.token, input.channelId, Number(messageId), text);
-      deliveryAction = "UPDATED_EXISTING";
-    } catch (error) {
-      if (!isMessageEditRecoverable(error)) throw error;
-      const sent = await input.client.sendMessage(input.token, input.channelId, text);
-      messageId = String(sent.messageId);
-      deliveryAction = "SENT_NEW";
-      recoveredFromFailedEdit = true;
-    }
-  } else {
-    const sent = await input.client.sendMessage(input.token, input.channelId, text);
-    messageId = String(sent.messageId);
-    deliveryAction = "SENT_NEW";
-  }
+  // 1) Send NEW full board first — never delete old until this succeeds.
+  const sent = await input.client.sendMessage(input.token, publishChannelId, text);
+  const newMessageId = String(sent.messageId);
 
   const prevTop10 = previousTop10ForAnnouncements(
     input.persistentMessageCompetitionId,
@@ -167,35 +162,136 @@ export async function publishPublicLeaderboardSnapshot(
       ? detectRankAnnouncements(prevTop10, nextTop10)
       : [];
 
-  await input.prisma.leaderboardBotIntegration.update({
-    where: { id: input.integrationId },
-    data: {
-      persistentMessageId: messageId,
-      persistentMessageCompetitionId: competition.id,
-      lastSuccessfulPostAt: new Date(),
-      lastPublicTop10Json: nextTop10 as unknown as Prisma.InputJsonValue,
-      lastError: null
-    }
+  const boardData = {
+    persistentMessageId: newMessageId,
+    persistentMessageCompetitionId: competition.id,
+    lastSuccessfulPostAt: new Date(),
+    lastPublicTop10Json: nextTop10 as unknown as Prisma.InputJsonValue,
+    lastError: null
+  };
+
+  // 2) CAS persist — only win if canonical still matches what we intended to replace.
+  //    setChannel clears persistentMessageId, so channel-switch never CAS-matches an old id.
+  const claimed = await input.prisma.leaderboardBotIntegration.updateMany({
+    where: {
+      id: input.integrationId,
+      channelId: publishChannelId,
+      persistentMessageId: previousMessageId
+    },
+    data: boardData
   });
 
+  let deletedPreviousMessageId: string | null = null;
+
+  if (claimed.count === 1) {
+    // 3) Delete previous canonical board only after we own the new one.
+    if (
+      previousMessageId &&
+      previousMessageId !== newMessageId &&
+      (await stillCanonical(input.prisma, input.integrationId, newMessageId, publishChannelId))
+    ) {
+      deletedPreviousMessageId = await deletePreviousBoardSafely({
+        client: input.client,
+        token: input.token,
+        channelId: publishChannelId,
+        previousMessageId,
+        newMessageId,
+        logger: input.logger
+      });
+    }
+  } else {
+    // Lost the race — another refresh became canonical. Do not delete their board.
+    // Drop our orphaned send so the channel does not accumulate stale boards.
+    const current = await input.prisma.leaderboardBotIntegration.findUnique({
+      where: { id: input.integrationId },
+      select: { persistentMessageId: true, channelId: true }
+    });
+    if (
+      current?.channelId === publishChannelId &&
+      current.persistentMessageId !== newMessageId
+    ) {
+      try {
+        await input.client.deleteMessage(input.token, publishChannelId, Number(newMessageId));
+      } catch (error) {
+        input.logger?.warn(
+          {
+            err: error,
+            channelId: publishChannelId,
+            orphanMessageId: newMessageId,
+            canonicalMessageId: current.persistentMessageId
+          },
+          "leaderboard.telegram.orphan_delete_failed"
+        );
+      }
+    }
+
+    // If nothing else owns canonical yet (unexpected), force-persist ours.
+    if (!current?.persistentMessageId) {
+      await input.prisma.leaderboardBotIntegration.update({
+        where: { id: input.integrationId },
+        data: boardData
+      });
+    }
+  }
+
+  const finalRow = await input.prisma.leaderboardBotIntegration.findUnique({
+    where: { id: input.integrationId },
+    select: { persistentMessageId: true }
+  });
+  const messageId = finalRow?.persistentMessageId ?? newMessageId;
+
   return {
-    messageId: messageId!,
-    deliveryAction,
-    recoveredFromFailedEdit,
+    messageId,
+    deliveryAction: "SENT_NEW",
+    recoveredFromFailedEdit: false,
+    deletedPreviousMessageId,
     nextTop10,
     announcements,
     text,
-    channelId: input.channelId
+    channelId: publishChannelId
   };
 }
 
-function isMessageEditRecoverable(error: unknown): boolean {
-  if (!(error instanceof LeaderboardTelegramApiError)) return false;
-  const d = error.description.toLowerCase();
-  return (
-    d.includes("message to edit not found") ||
-    d.includes("message can't be edited") ||
-    d.includes("message is not modified") ||
-    d.includes("message_id_invalid")
-  );
+async function stillCanonical(
+  prisma: PrismaClient,
+  integrationId: string,
+  messageId: string,
+  channelId: string
+): Promise<boolean> {
+  const row = await prisma.leaderboardBotIntegration.findUnique({
+    where: { id: integrationId },
+    select: { persistentMessageId: true, channelId: true }
+  });
+  return row?.persistentMessageId === messageId && row.channelId === channelId;
+}
+
+async function deletePreviousBoardSafely(input: {
+  readonly client: LeaderboardTelegramClient;
+  readonly token: string;
+  readonly channelId: string;
+  readonly previousMessageId: string;
+  readonly newMessageId: string;
+  readonly logger?: PublishPublicLeaderboardInput["logger"];
+}): Promise<string | null> {
+  if (input.previousMessageId === input.newMessageId) return null;
+  try {
+    await input.client.deleteMessage(
+      input.token,
+      input.channelId,
+      Number(input.previousMessageId)
+    );
+    return input.previousMessageId;
+  } catch (error) {
+    // New board stays; delete failure must not roll back publication.
+    input.logger?.warn(
+      {
+        err: error,
+        channelId: input.channelId,
+        previousMessageId: input.previousMessageId,
+        newMessageId: input.newMessageId
+      },
+      "leaderboard.telegram.previous_board_delete_failed"
+    );
+    return null;
+  }
 }
