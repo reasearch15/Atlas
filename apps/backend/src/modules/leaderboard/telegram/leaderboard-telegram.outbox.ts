@@ -113,6 +113,61 @@ export class LeaderboardTelegramOutboxService {
     });
   }
 
+  public async enqueuePlayerDm(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly competitionId: string;
+    readonly crmContactId: string;
+    readonly kind: string;
+    readonly fromRank?: number | null;
+    readonly toRank?: number;
+    readonly totalPoints?: number;
+    readonly text?: string;
+    readonly dedupeKey?: string;
+  }): Promise<string> {
+    const key =
+      input.dedupeKey ??
+      `lb:pdm:${input.ownerCoadminUserId}:${input.competitionId}:${input.crmContactId}:${input.kind}`;
+    return this.upsertJob({
+      workspaceId: input.workspaceId,
+      ownerCoadminUserId: input.ownerCoadminUserId,
+      competitionId: input.competitionId,
+      jobType: "SEND_PLAYER_DM",
+      idempotencyKey: key.slice(0, 320),
+      payloadJson: {
+        competitionId: input.competitionId,
+        crmContactId: input.crmContactId,
+        kind: input.kind,
+        fromRank: input.fromRank ?? null,
+        toRank: input.toRank ?? null,
+        totalPoints: input.totalPoints ?? null,
+        text: input.text ?? null
+      }
+    });
+  }
+
+  public async enqueueFinalResultDm(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly competitionId: string;
+    readonly crmContactId: string;
+    readonly kind: "FINAL_RESULT_WINNER" | "FINAL_RESULT_INELIGIBLE" | "FINAL_RESULT" | string;
+  }): Promise<string> {
+    const key = `lb:fdm:${input.ownerCoadminUserId}:${input.competitionId}:${input.crmContactId}:${input.kind}`;
+    return this.upsertJob({
+      workspaceId: input.workspaceId,
+      ownerCoadminUserId: input.ownerCoadminUserId,
+      competitionId: input.competitionId,
+      jobType: "SEND_FINAL_RESULT_DM",
+      idempotencyKey: key.slice(0, 320),
+      payloadJson: {
+        competitionId: input.competitionId,
+        crmContactId: input.crmContactId,
+        kind: input.kind
+      }
+    });
+  }
+
   public async cancelPendingForOwner(ownerCoadminUserId: string): Promise<number> {
     const now = new Date();
     const result = await this.prisma.leaderboardTelegramOutbox.updateMany({

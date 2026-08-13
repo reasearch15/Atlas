@@ -262,6 +262,14 @@ enum LeaderboardEventType {
   PROMOTION
   PROMOTION_REVERSAL
   MANUAL_ADJUSTMENT
+  WHEEL_SPIN
+}
+
+/// PRODUCT DECISION REQUIRED: Coadmin must set policy before enabling wheel (UNSET blocks enable).
+enum LeaderboardWheelQualificationCreditPolicy {
+  UNSET
+  CYCLE_DEPOSITS_ALL
+  CYCLE_DEPOSITS_AFTER_ENABLE
 }
 
 enum ReferralMilestoneCode {
@@ -298,6 +306,9 @@ enum LeaderboardTelegramJobType {
   POST_RANK_ANNOUNCEMENT
   VERIFY_MEMBERSHIP
   POST_PUBLIC_RESULTS
+  SEND_PLAYER_DM
+  SEND_FINAL_RESULT_DM
+  PROCESS_BOT_UPDATE
 }
 
 enum LeaderboardTelegramJobStatus {
@@ -357,6 +368,12 @@ model Workspace {
   giveawayEligibilityCandidates GiveawayEligibilityCandidate[]
   leaderboardBotIntegrations LeaderboardBotIntegration[]
   leaderboardTelegramOutbox LeaderboardTelegramOutbox[]
+  leaderboardBotPlayerLinks LeaderboardBotPlayerLink[]
+  leaderboardWheelConfigs LeaderboardWheelConfig[]
+  leaderboardWheelConfigVersions LeaderboardWheelConfigVersion[]
+  leaderboardWheelCycles LeaderboardWheelCycle[]
+  leaderboardWheelQualifications LeaderboardWheelQualification[]
+  leaderboardWheelSpins LeaderboardWheelSpin[]
 
   @@map("workspaces")
 }
@@ -427,6 +444,13 @@ model User {
   ownedGiveawayEligibilityCandidates GiveawayEligibilityCandidate[] @relation("GiveawayEligibilityOwner")
   ownedLeaderboardBotIntegrations LeaderboardBotIntegration[] @relation("LeaderboardBotIntegrationOwner")
   ownedLeaderboardTelegramOutbox LeaderboardTelegramOutbox[] @relation("LeaderboardTelegramOutboxOwner")
+  ownedLeaderboardBotPlayerLinks LeaderboardBotPlayerLink[] @relation("LeaderboardBotPlayerLinkOwner")
+  ownedLeaderboardWheelConfigs LeaderboardWheelConfig[] @relation("LeaderboardWheelConfigOwner")
+  ownedLeaderboardWheelConfigVersions LeaderboardWheelConfigVersion[] @relation("LeaderboardWheelConfigVersionOwner")
+  createdLeaderboardWheelConfigVersions LeaderboardWheelConfigVersion[] @relation("LeaderboardWheelConfigVersionCreatedBy")
+  ownedLeaderboardWheelCycles LeaderboardWheelCycle[] @relation("LeaderboardWheelCycleOwner")
+  ownedLeaderboardWheelQualifications LeaderboardWheelQualification[] @relation("LeaderboardWheelQualificationOwner")
+  ownedLeaderboardWheelSpins LeaderboardWheelSpin[] @relation("LeaderboardWheelSpinOwner")
 
   @@index([username])
   @@index([workspaceId, role])
@@ -660,6 +684,9 @@ model CrmContact {
   promotionAwards PromotionAward[]
   giveawayPayouts GiveawayPayout[]
   giveawayEligibilityCandidates GiveawayEligibilityCandidate[]
+  leaderboardBotPlayerLinks LeaderboardBotPlayerLink[]
+  leaderboardWheelQualifications LeaderboardWheelQualification[]
+  leaderboardWheelSpins LeaderboardWheelSpin[]
 
   @@unique([workspaceId, telegramPeerId])
   @@index([workspaceId, lastSeenAt])
@@ -1149,6 +1176,9 @@ model LeaderboardCompetition {
   eligibilityCandidates      GiveawayEligibilityCandidate[]
   referralMilestoneAwards    ReferralMilestoneAward[]
   telegramOutbox             LeaderboardTelegramOutbox[]
+  wheelCycles                LeaderboardWheelCycle[]
+  wheelQualifications        LeaderboardWheelQualification[]
+  wheelSpins                 LeaderboardWheelSpin[]
 
   @@unique([ownerCoadminUserId, sequence])
   @@index([workspaceId, ownerCoadminUserId, status])
@@ -1186,6 +1216,7 @@ model LeaderboardEvent {
   milestoneReversals    ReferralMilestoneAward[] @relation("MilestoneReversalEvent")
   promotionAward        PromotionAward?
   standingLastEvents    LeaderboardStanding[] @relation("StandingLastEvent")
+  wheelSpin             LeaderboardWheelSpin?
 
   @@index([ownerCoadminUserId, competitionId, occurredAt])
   @@index([competitionId, crmContactId, occurredAt])
@@ -1204,6 +1235,7 @@ model LeaderboardStanding {
   depositPoints           Int      @default(0) @map("deposit_points")
   referralPoints          Int      @default(0) @map("referral_points")
   promotionPoints         Int      @default(0) @map("promotion_points")
+  wheelPoints             Int      @default(0) @map("wheel_points")
   qualifyingDepositCents  Int      @default(0) @map("qualifying_deposit_cents")
   successfulReferralCount Int      @default(0) @map("successful_referral_count")
   pointsReachedAt         DateTime @map("points_reached_at")
@@ -1458,6 +1490,10 @@ model LeaderboardBotIntegration {
   persistentMessageCompetitionId String?                       @map("persistent_message_competition_id") @db.Uuid
   /** Last publicly posted Top 10 snapshot for conservative rank announcements. */
   lastPublicTop10Json           Json?                          @map("last_public_top10_json")
+  /** EncryptedSecret envelope for X-Telegram-Bot-Api-Secret-Token verification. */
+  encryptedWebhookSecret        Json?                          @map("encrypted_webhook_secret")
+  webhookRegisteredAt           DateTime?                      @map("webhook_registered_at")
+  lastInboundAt                 DateTime?                      @map("last_inbound_at")
   lastError                     String?                        @map("last_error") @db.VarChar(500)
   disconnectedAt                DateTime?                      @map("disconnected_at")
   createdAt                     DateTime                       @default(now()) @map("created_at")
@@ -1466,9 +1502,49 @@ model LeaderboardBotIntegration {
   ownerCoadmin                  User                           @relation("LeaderboardBotIntegrationOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
   outboxJobs                    LeaderboardTelegramOutbox[]
   eligibilityCandidates         GiveawayEligibilityCandidate[]
+  playerLinks                   LeaderboardBotPlayerLink[]
+  telegramUpdates               LeaderboardTelegramUpdate[]
 
   @@index([workspaceId])
   @@map("leaderboard_bot_integrations")
+}
+
+/// Links a Telegram Bot API user to a CRM contact for personal /rank DMs (per Coadmin bot).
+model LeaderboardBotPlayerLink {
+  id                   String   @id @default(uuid()) @db.Uuid
+  workspaceId          String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId   String   @map("owner_coadmin_user_id") @db.Uuid
+  botIntegrationId     String   @map("bot_integration_id") @db.Uuid
+  crmContactId         String   @map("crm_contact_id") @db.Uuid
+  telegramUserId       String   @map("telegram_user_id") @db.VarChar(32)
+  startedAt            DateTime @default(now()) @map("started_at")
+  lastRankRequestedAt  DateTime? @map("last_rank_requested_at")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+  workspace            Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin         User      @relation("LeaderboardBotPlayerLinkOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  botIntegration       LeaderboardBotIntegration @relation(fields: [botIntegrationId], references: [id], onDelete: Cascade)
+  crmContact           CrmContact @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+
+  @@unique([botIntegrationId, telegramUserId])
+  @@unique([ownerCoadminUserId, telegramUserId])
+  @@unique([botIntegrationId, crmContactId])
+  @@index([workspaceId, ownerCoadminUserId])
+  @@index([crmContactId])
+  @@map("leaderboard_bot_player_links")
+}
+
+/// Idempotency ledger for inbound Telegram Bot API updates (webhook or polling).
+model LeaderboardTelegramUpdate {
+  id               String   @id @default(uuid()) @db.Uuid
+  botIntegrationId String   @map("bot_integration_id") @db.Uuid
+  updateId         BigInt   @map("update_id")
+  processedAt      DateTime @default(now()) @map("processed_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  botIntegration   LeaderboardBotIntegration @relation(fields: [botIntegrationId], references: [id], onDelete: Cascade)
+
+  @@unique([botIntegrationId, updateId])
+  @@map("leaderboard_telegram_updates")
 }
 
 /// Durable leaderboard Telegram outbox. Postgres is source of truth; BullMQ wakes workers.
@@ -1500,4 +1576,125 @@ model LeaderboardTelegramOutbox {
   @@index([ownerCoadminUserId, status])
   @@index([competitionId])
   @@map("leaderboard_telegram_outbox")
+}
+
+/// Phase 6 wheel config per Coadmin.
+/// NO PRODUCTION DISTRIBUTION SELECTED — enabled defaults false; activeVersionId null until publish+activate.
+/// PRODUCT DECISION REQUIRED: qualificationCreditPolicy UNSET blocks enable.
+model LeaderboardWheelConfig {
+  id                        String                                      @id @default(uuid()) @db.Uuid
+  workspaceId               String                                      @map("workspace_id") @db.Uuid
+  ownerCoadminUserId        String                                      @unique @map("owner_coadmin_user_id") @db.Uuid
+  enabled                   Boolean                                     @default(false)
+  qualificationCreditPolicy LeaderboardWheelQualificationCreditPolicy   @default(UNSET) @map("qualification_credit_policy")
+  enabledAt                 DateTime?                                   @map("enabled_at")
+  activeVersionId           String?                                     @map("active_version_id") @db.Uuid
+  createdAt                 DateTime                                    @default(now()) @map("created_at")
+  updatedAt                 DateTime                                    @updatedAt @map("updated_at")
+  workspace                 Workspace                                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin              User                                        @relation("LeaderboardWheelConfigOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  activeVersion             LeaderboardWheelConfigVersion?              @relation("LeaderboardWheelConfigActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@map("leaderboard_wheel_configs")
+}
+
+/// Immutable published wheel reward distribution versions.
+model LeaderboardWheelConfigVersion {
+  id                     String   @id @default(uuid()) @db.Uuid
+  ownerCoadminUserId     String   @map("owner_coadmin_user_id") @db.Uuid
+  workspaceId            String   @map("workspace_id") @db.Uuid
+  /// [{points:0-40, weight:positive number}] — NO PRODUCTION DISTRIBUTION SELECTED as default.
+  rewardDistributionJson Json     @map("reward_distribution_json")
+  createdAt              DateTime @default(now()) @map("created_at")
+  createdByUserId        String   @map("created_by_user_id") @db.Uuid
+  activatedAt            DateTime? @map("activated_at")
+  workspace              Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin           User      @relation("LeaderboardWheelConfigVersionOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  createdBy              User      @relation("LeaderboardWheelConfigVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  activeForConfigs       LeaderboardWheelConfig[] @relation("LeaderboardWheelConfigActiveVersion")
+  spins                  LeaderboardWheelSpin[]
+
+  @@index([ownerCoadminUserId, createdAt])
+  @@index([workspaceId])
+  @@map("leaderboard_wheel_config_versions")
+}
+
+/// Explicit 48h wheel cycle rows for audit (7 per competition).
+model LeaderboardWheelCycle {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  competitionId      String   @map("competition_id") @db.Uuid
+  sequence           Int
+  startsAt           DateTime @map("starts_at")
+  endsAt             DateTime @map("ends_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User      @relation("LeaderboardWheelCycleOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition        LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  qualifications     LeaderboardWheelQualification[]
+  spins              LeaderboardWheelSpin[]
+
+  @@unique([competitionId, sequence])
+  @@index([ownerCoadminUserId, competitionId])
+  @@map("leaderboard_wheel_cycles")
+}
+
+model LeaderboardWheelQualification {
+  id                     String   @id @default(uuid()) @db.Uuid
+  workspaceId            String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId     String   @map("owner_coadmin_user_id") @db.Uuid
+  competitionId          String   @map("competition_id") @db.Uuid
+  cycleId                String   @map("cycle_id") @db.Uuid
+  crmContactId           String   @map("crm_contact_id") @db.Uuid
+  qualifyingDepositCents Int      @default(0) @map("qualifying_deposit_cents")
+  qualifiedAt            DateTime? @map("qualified_at")
+  available              Boolean  @default(false)
+  consumedAt             DateTime? @map("consumed_at")
+  spinId                 String?  @map("spin_id") @db.Uuid
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+  workspace              Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin           User      @relation("LeaderboardWheelQualificationOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition            LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  cycle                  LeaderboardWheelCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  crmContact             CrmContact @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  spin                   LeaderboardWheelSpin? @relation(fields: [spinId], references: [id], onDelete: SetNull)
+
+  @@unique([cycleId, crmContactId])
+  @@index([ownerCoadminUserId, competitionId])
+  @@map("leaderboard_wheel_qualifications")
+}
+
+model LeaderboardWheelSpin {
+  id                         String   @id @default(uuid()) @db.Uuid
+  workspaceId                String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId         String   @map("owner_coadmin_user_id") @db.Uuid
+  competitionId              String   @map("competition_id") @db.Uuid
+  cycleId                    String   @map("cycle_id") @db.Uuid
+  crmContactId               String   @map("crm_contact_id") @db.Uuid
+  pointsAwarded              Int      @map("points_awarded")
+  configVersionId            String   @map("config_version_id") @db.Uuid
+  idempotencyKey             String   @unique @map("idempotency_key") @db.VarChar(160)
+  spunAt                     DateTime @map("spun_at")
+  leaderboardEventId         String   @unique @map("leaderboard_event_id") @db.Uuid
+  previousRank               Int?     @map("previous_rank")
+  resultingRank              Int?     @map("resulting_rank")
+  rngMetaJson                Json?    @map("rng_meta_json")
+  /// Set when post-spin deposit reversals drop cycle deposits below $40; points are NOT clawed back.
+  qualificationInvalidatedAt DateTime? @map("qualification_invalidated_at")
+  createdAt                  DateTime @default(now()) @map("created_at")
+  workspace                  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin               User      @relation("LeaderboardWheelSpinOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition                LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  cycle                      LeaderboardWheelCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  crmContact                 CrmContact @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  configVersion              LeaderboardWheelConfigVersion @relation(fields: [configVersionId], references: [id], onDelete: Restrict)
+  leaderboardEvent           LeaderboardEvent @relation(fields: [leaderboardEventId], references: [id], onDelete: Restrict)
+  qualifications             LeaderboardWheelQualification[]
+
+  @@unique([cycleId, crmContactId])
+  @@index([ownerCoadminUserId, competitionId])
+  @@map("leaderboard_wheel_spins")
 }

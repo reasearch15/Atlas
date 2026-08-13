@@ -22,6 +22,14 @@ import {
   formatRankAnnouncement
 } from "./public-message";
 import { toPublicLeaderboardDisplayName } from "./public-display-name";
+import {
+  formatPersonalAnnouncementDm,
+  formatPersonalFinalResultMessage
+} from "./personal-rank-message";
+import {
+  announcementKindToPlayerKind,
+  decidePlayerNotification
+} from "./player-notification-policy";
 
 const MAX_VERIFY_CANDIDATES = 20;
 const VERIFY_CONCURRENCY = 3;
@@ -101,6 +109,15 @@ export class LeaderboardTelegramProcessor {
         case "POST_RANK_ANNOUNCEMENT":
           await this.processRankAnnouncement(row, integration, token);
           break;
+        case "SEND_PLAYER_DM":
+          await this.processPlayerDm(row, integration, token);
+          break;
+        case "SEND_FINAL_RESULT_DM":
+          await this.processFinalResultDm(row, integration, token);
+          break;
+        case "PROCESS_BOT_UPDATE":
+          // Updates are handled inline by the webhook/poller — no-op succeed.
+          break;
         default:
           await this.failPermanent(row.id, integration.id, "UNKNOWN_JOB_TYPE", `Unknown job type ${row.jobType}`);
           return;
@@ -130,6 +147,7 @@ export class LeaderboardTelegramProcessor {
       persistentMessageId: string | null;
       persistentMessageCompetitionId: string | null;
       lastPublicTop10Json: unknown;
+      botUsername: string | null;
     },
     token: string
   ): Promise<void> {
@@ -188,7 +206,8 @@ export class LeaderboardTelegramProcessor {
       })),
       prizePoolCents: competition.prizePoolCents,
       endsAt: competition.endsAt,
-      timezone: settings?.timezone ?? LEADERBOARD_TIMEZONE
+      timezone: settings?.timezone ?? LEADERBOARD_TIMEZONE,
+      botUsername: integration.botUsername
     });
 
     let messageId = integration.persistentMessageId;
@@ -235,6 +254,48 @@ export class LeaderboardTelegramProcessor {
         reason: event.reason,
         kind: event.kind
       });
+
+      // Personal DMs must never fail the public refresh / scoring path.
+      try {
+        const linkModel = (this.prisma as { leaderboardBotPlayerLink?: { findFirst: Function } })
+          .leaderboardBotPlayerLink;
+        if (!linkModel) continue;
+        const link = await linkModel.findFirst({
+          where: {
+            ownerCoadminUserId: row.ownerCoadminUserId,
+            crmContactId: event.crmContactId,
+            botIntegrationId: integration.id
+          },
+          select: { id: true }
+        });
+        const decision = decidePlayerNotification({
+          competitionId: competition.id,
+          crmContactId: event.crmContactId,
+          kind: announcementKindToPlayerKind(event.kind),
+          hasPlayerLink: link != null,
+          ownerCoadminUserId: row.ownerCoadminUserId,
+          botOwnerCoadminUserId: row.ownerCoadminUserId
+        });
+        if (decision.shouldNotify) {
+          const standing = nextTop10.find((r) => r.crmContactId === event.crmContactId);
+          await this.outbox.enqueuePlayerDm({
+            workspaceId: row.workspaceId,
+            ownerCoadminUserId: row.ownerCoadminUserId,
+            competitionId: competition.id,
+            crmContactId: event.crmContactId,
+            kind: decision.kind,
+            fromRank: event.fromRank,
+            toRank: event.toRank,
+            ...(standing?.totalPoints != null ? { totalPoints: standing.totalPoints } : {}),
+            dedupeKey: decision.dedupeKey
+          });
+        }
+      } catch (error) {
+        this.logger?.warn(
+          { err: error, crmContactId: event.crmContactId, competitionId: competition.id },
+          "Leaderboard personal DM enqueue skipped"
+        );
+      }
     }
 
     if (recovered) {
@@ -471,6 +532,124 @@ export class LeaderboardTelegramProcessor {
       where: { id: integration.id },
       data: { lastSuccessfulPostAt: new Date(), lastError: null }
     });
+  }
+
+  private async processPlayerDm(
+    row: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+      competitionId: string | null;
+      payloadJson: unknown;
+    },
+    integration: { id: string; ownerCoadminUserId: string },
+    token: string
+  ): Promise<void> {
+    const payload = (row.payloadJson ?? {}) as {
+      crmContactId?: string;
+      kind?: string;
+      fromRank?: number | null;
+      toRank?: number;
+      totalPoints?: number | null;
+      text?: string | null;
+    };
+    if (!payload.crmContactId || !payload.kind) {
+      throw permanentError("PLAYER_DM_PAYLOAD_INVALID", "Player DM payload incomplete");
+    }
+
+    const link = await this.prisma.leaderboardBotPlayerLink.findFirst({
+      where: {
+        botIntegrationId: integration.id,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        crmContactId: payload.crmContactId
+      }
+    });
+    if (!link) return;
+    if (integration.ownerCoadminUserId !== row.ownerCoadminUserId) return;
+
+    const text =
+      payload.text?.trim() ||
+      formatPersonalAnnouncementDm({
+        kind: payload.kind,
+        fromRank: payload.fromRank ?? null,
+        toRank: payload.toRank ?? 0,
+        ...(payload.totalPoints != null ? { totalPoints: payload.totalPoints } : {})
+      });
+
+    await this.client.sendMessage(token, link.telegramUserId, text);
+  }
+
+  private async processFinalResultDm(
+    row: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+      competitionId: string | null;
+      payloadJson: unknown;
+    },
+    integration: { id: string; ownerCoadminUserId: string },
+    token: string
+  ): Promise<void> {
+    const payload = (row.payloadJson ?? {}) as { crmContactId?: string };
+    if (!payload.crmContactId || !row.competitionId) {
+      throw permanentError("FINAL_DM_PAYLOAD_INVALID", "Final result DM payload incomplete");
+    }
+    if (integration.ownerCoadminUserId !== row.ownerCoadminUserId) return;
+
+    const link = await this.prisma.leaderboardBotPlayerLink.findFirst({
+      where: {
+        botIntegrationId: integration.id,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        crmContactId: payload.crmContactId
+      }
+    });
+    if (!link) return;
+
+    const competition = await this.prisma.leaderboardCompetition.findFirst({
+      where: {
+        id: row.competitionId,
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        status: "FINALIZED"
+      }
+    });
+    if (!competition) {
+      throw permanentError("COMPETITION_NOT_FINALIZED", "Final DMs require FINALIZED competition");
+    }
+
+    const candidate = await this.prisma.giveawayEligibilityCandidate.findFirst({
+      where: {
+        competitionId: competition.id,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        crmContactId: payload.crmContactId
+      }
+    });
+    const payout = await this.prisma.giveawayPayout.findFirst({
+      where: {
+        competitionId: competition.id,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        crmContactId: payload.crmContactId
+      }
+    });
+    const standing = await this.prisma.leaderboardStanding.findFirst({
+      where: {
+        competitionId: competition.id,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        crmContactId: payload.crmContactId
+      }
+    });
+
+    const text = formatPersonalFinalResultMessage({
+      leaderboardRank: candidate?.leaderboardRank ?? payout?.leaderboardRank ?? 0,
+      totalPoints: standing?.totalPoints ?? payout?.points ?? 0,
+      prizeRank: payout?.prizeRank ?? null,
+      payoutCents: payout?.payoutCents ?? null,
+      membershipStatus: candidate?.membershipStatus ?? "PENDING_REVIEW",
+      ineligibilityReason: candidate?.ineligibilityReason ?? null,
+      prizePoolCents: competition.prizePoolCents
+    });
+
+    await this.client.sendMessage(token, link.telegramUserId, text);
   }
 
   private async handleFailure(

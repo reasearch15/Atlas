@@ -1125,12 +1125,17 @@ export class LeaderboardService {
 
           standing.qualifyingDepositCents = qualifyingDepositCents;
           standing.depositPoints = correctDepositPoints;
-          standing.totalPoints = correctDepositPoints + standing.referralPoints + standing.promotionPoints;
+          standing.totalPoints =
+            correctDepositPoints +
+            standing.referralPoints +
+            standing.promotionPoints +
+            standing.wheelPoints;
           standing.pointsReachedAt = reconstructPointsReachedAt({
             events: ledgerEvents,
             correctDepositPoints,
             referralPoints: standing.referralPoints,
             promotionPoints: standing.promotionPoints,
+            wheelPoints: standing.wheelPoints,
             fallback: standing.pointsReachedAt
           });
 
@@ -1520,6 +1525,7 @@ export class LeaderboardService {
         depositPoints: 0,
         referralPoints: 0,
         promotionPoints: 0,
+        wheelPoints: 0,
         qualifyingDepositCents: 0,
         successfulReferralCount: 0,
         pointsReachedAt: now,

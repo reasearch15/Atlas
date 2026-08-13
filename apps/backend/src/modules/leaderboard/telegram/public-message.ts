@@ -16,6 +16,8 @@ export interface PublicLeaderboardMessageInput {
   readonly prizePoolCents: number;
   readonly endsAt: Date;
   readonly timezone: string;
+  /** Optional Coadmin bot username for persistent personal-rank CTA. */
+  readonly botUsername?: string | null;
 }
 
 export interface PublicResultsWinner {
@@ -48,6 +50,10 @@ export function formatPublicLeaderboardMessage(input: PublicLeaderboardMessageIn
 
   const pool = formatPrizePoolDisplay(input.prizePoolCents);
   const ends = formatEndsLine(input.endsAt, input.timezone);
+  const botUsername = normalizeBotUsername(input.botUsername);
+  const cta = botUsername
+    ? `\n➡️ Check your personal rank: https://t.me/${botUsername}?start=rank`
+    : "";
 
   return [
     `🏆 ${input.title.trim() || "BIWEEKLY LEADERBOARD"}`,
@@ -57,7 +63,7 @@ export function formatPublicLeaderboardMessage(input: PublicLeaderboardMessageIn
     `🎁 Current Prize Pool: ${pool}`,
     `⏰ ${ends}`,
     "",
-    `📢 ${SUBSCRIPTION_REMINDER}`
+    `📢 ${SUBSCRIPTION_REMINDER}${cta}`
   ].join("\n");
 }
 
@@ -122,3 +128,10 @@ function formatEndsLine(endsAt: Date, timezone: string): string {
 }
 
 export const PUBLIC_LEADERBOARD_SUBSCRIPTION_REMINDER = SUBSCRIPTION_REMINDER;
+
+function normalizeBotUsername(username: string | null | undefined): string | null {
+  if (!username) return null;
+  const trimmed = username.trim().replace(/^@/, "");
+  if (!/^[A-Za-z0-9_]{5,}$/.test(trimmed)) return null;
+  return trimmed;
+}

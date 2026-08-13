@@ -104,6 +104,14 @@ export const leaderboardTelegramDisconnectBodySchema = z.object({
   confirm: z.literal(true)
 });
 
+export const leaderboardEnsureAutoBindBodySchema = z.object({
+  crmContactId: z.string().uuid()
+});
+
+export const leaderboardParticipantsBackfillBodySchema = z.object({
+  dryRun: z.boolean().optional().default(true)
+});
+
 export const leaderboardPayoutMarkBodySchema = z.object({
   status: z.enum(["PAID", "VOID"]),
   notes: z.string().trim().max(500).optional(),
@@ -129,4 +137,29 @@ export const leaderboardReferralParamsSchema = z.object({
 
 export const leaderboardPayoutParamsSchema = z.object({
   payoutId: z.string().uuid()
+});
+
+export const leaderboardWheelSpinBodySchema = z.object({
+  crmContactId: z.string().uuid(),
+  idempotencyKey: z.string().min(8).max(160)
+});
+
+export const leaderboardWheelSettingsPatchSchema = z.object({
+  enabled: z.boolean().optional(),
+  qualificationCreditPolicy: z
+    .enum(["UNSET", "CYCLE_DEPOSITS_ALL", "CYCLE_DEPOSITS_AFTER_ENABLE"])
+    .optional()
+});
+
+export const leaderboardWheelDistributionOutcomeSchema = z.object({
+  points: z.number().int().min(0).max(40),
+  weight: z.number().positive()
+});
+
+export const leaderboardWheelConfigVersionBodySchema = z.object({
+  distribution: z.array(leaderboardWheelDistributionOutcomeSchema).min(1)
+});
+
+export const leaderboardWheelVersionParamsSchema = z.object({
+  id: z.string().uuid()
 });

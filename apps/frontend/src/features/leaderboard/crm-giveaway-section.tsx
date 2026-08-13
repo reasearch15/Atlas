@@ -13,6 +13,7 @@ import {
   newIdempotencyKey,
   parseDollarsToCents
 } from "./leaderboard-errors";
+import { WheelSpinPanel } from "./wheel-spin-panel";
 
 const SUBSCRIPTION_REMINDER =
   "To receive a leaderboard prize, winners must be subscribed to the official leaderboard Telegram channel at the eligibility deadline.";
@@ -55,6 +56,7 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
   const canPromotion = role ? hasPermission(role, "leaderboard:promotion") : false;
   const canGiveInfo = role ? hasPermission(role, "leaderboard:give-info") : false;
   const canRead = role ? hasPermission(role, "leaderboard:read") : false;
+  const canWheelSpin = role ? hasPermission(role, "leaderboard:wheel:spin") : false;
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!crmContactId || !canRead) {
@@ -63,6 +65,14 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
     }
     setLoading(true);
     try {
+      // Try deterministic auto-bind before showing unbound state (Coadmin sole-owner workspaces).
+      if (canBind) {
+        try {
+          await api.leaderboardEnsureAutoBind(crmContactId);
+        } catch {
+          // Non-fatal — fall through to player status.
+        }
+      }
       const next = await api.leaderboardPlayer(crmContactId);
       setStatus(next);
       setError(null);
@@ -72,7 +82,7 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
     } finally {
       setLoading(false);
     }
-  }, [canRead, crmContactId]);
+  }, [canBind, canRead, crmContactId]);
 
   useEffect(() => {
     setSuccess(null);
@@ -260,6 +270,7 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
             <Stat label="Deposit points" value={formatPoints(status?.depositPoints)} />
             <Stat label="Referral points" value={formatPoints(status?.referralPoints)} />
             <Stat label="Promotion points" value={formatPoints(status?.promotionPoints)} />
+            <Stat label="Wheel points" value={formatPoints(status?.wheelPoints)} />
             <Stat
               label="Qualifying deposits"
               value={
@@ -282,6 +293,15 @@ export function CrmGiveawaySection({ chatId, crmContactId, canBind, role }: CrmG
           </dl>
 
           <p className="text-[11px] leading-snug text-muted-foreground">{SUBSCRIPTION_REMINDER}</p>
+
+          {bound && status?.wheel ? (
+            <WheelSpinPanel
+              crmContactId={crmContactId}
+              status={status.wheel}
+              canSpin={canWheelSpin}
+              onRefresh={refresh}
+            />
+          ) : null}
 
           {showBind ? (
             <ActionRow

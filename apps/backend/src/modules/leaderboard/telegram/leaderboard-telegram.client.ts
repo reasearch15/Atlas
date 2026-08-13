@@ -32,6 +32,23 @@ export interface TelegramMessage {
 
 export type TelegramParseMode = "HTML" | "Markdown" | "MarkdownV2";
 
+export interface TelegramWebhookInfo {
+  readonly url: string;
+  readonly hasCustomCertificate: boolean;
+  readonly pendingUpdateCount: number;
+}
+
+export interface TelegramUpdate {
+  readonly updateId: number;
+  readonly message?: {
+    readonly messageId: number;
+    readonly text?: string;
+    readonly date: number;
+    readonly chat: TelegramChat;
+    readonly from?: TelegramUser;
+  };
+}
+
 export interface LeaderboardTelegramClient {
   getMe(token: string): Promise<TelegramUser>;
   getChat(token: string, chatId: string | number): Promise<TelegramChat>;
@@ -55,6 +72,17 @@ export interface LeaderboardTelegramClient {
     parseMode?: TelegramParseMode
   ): Promise<TelegramMessage | true>;
   deleteMessage(token: string, chatId: string | number, messageId: number): Promise<boolean>;
+  setWebhook?(
+    token: string,
+    url: string,
+    secretToken?: string
+  ): Promise<boolean>;
+  deleteWebhook?(token: string, dropPendingUpdates?: boolean): Promise<boolean>;
+  getUpdates?(
+    token: string,
+    options?: { readonly offset?: number; readonly timeout?: number; readonly limit?: number }
+  ): Promise<readonly TelegramUpdate[]>;
+  answerCallbackQuery?(token: string, callbackQueryId: string, text?: string): Promise<boolean>;
 }
 
 export class LeaderboardTelegramApiError extends Error {
@@ -184,6 +212,39 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
       chat_id: chatId,
       message_id: messageId
     });
+  }
+
+  async setWebhook(token: string, url: string, secretToken?: string): Promise<boolean> {
+    const body: Record<string, unknown> = {
+      url,
+      allowed_updates: ["message"]
+    };
+    if (secretToken) body.secret_token = secretToken;
+    return this.callTelegram<boolean>(token, "setWebhook", body);
+  }
+
+  async deleteWebhook(token: string, dropPendingUpdates = false): Promise<boolean> {
+    return this.callTelegram<boolean>(token, "deleteWebhook", {
+      drop_pending_updates: dropPendingUpdates
+    });
+  }
+
+  async getUpdates(
+    token: string,
+    options?: { readonly offset?: number; readonly timeout?: number; readonly limit?: number }
+  ): Promise<readonly TelegramUpdate[]> {
+    const body: Record<string, unknown> = {};
+    if (options?.offset != null) body.offset = options.offset;
+    if (options?.timeout != null) body.timeout = options.timeout;
+    if (options?.limit != null) body.limit = options.limit;
+    const raw = await this.callTelegram<readonly Record<string, unknown>[]>(token, "getUpdates", body);
+    return raw.map(mapUpdate);
+  }
+
+  async answerCallbackQuery(token: string, callbackQueryId: string, text?: string): Promise<boolean> {
+    const body: Record<string, unknown> = { callback_query_id: callbackQueryId };
+    if (text) body.text = text;
+    return this.callTelegram<boolean>(token, "answerCallbackQuery", body);
   }
 
   private async callTelegram<T>(
@@ -330,6 +391,8 @@ export interface FakeLeaderboardTelegramState {
   chats: Map<number, FakeTelegramChatState>;
   /** Forced failures keyed by `${token}:${method}` */
   failures?: Map<string, LeaderboardTelegramApiError>;
+  webhooks?: Map<string, { url: string; secretToken?: string }>;
+  pendingUpdates?: Map<string, TelegramUpdate[]>;
 }
 
 export function createFakeLeaderboardTelegramClient(
@@ -411,7 +474,19 @@ export function createFakeLeaderboardTelegramClient(
     async sendMessage(token, chatId, text) {
       fail(token, "sendMessage");
       requireBot(token);
-      const chat = requireChat(chatId);
+      const id = Number(chatId);
+      let chat = state.chats.get(id);
+      if (!chat) {
+        // Auto-create private DM chats for personal bot messages in tests.
+        chat = {
+          id,
+          type: "private",
+          members: new Map([[id, "member"]]),
+          messages: [],
+          nextMessageId: 1
+        };
+        state.chats.set(id, chat);
+      }
       const messageId = chat.nextMessageId++;
       chat.messages.push({ messageId, text });
       return {
@@ -458,6 +533,52 @@ export function createFakeLeaderboardTelegramClient(
       }
       msg.deleted = true;
       return true;
+    },
+    async setWebhook(token, url, secretToken) {
+      fail(token, "setWebhook");
+      requireBot(token);
+      if (!state.webhooks) state.webhooks = new Map();
+      state.webhooks.set(token, secretToken ? { url, secretToken } : { url });
+      return true;
+    },
+    async deleteWebhook(token) {
+      fail(token, "deleteWebhook");
+      requireBot(token);
+      state.webhooks?.delete(token);
+      return true;
+    },
+    async getUpdates(token, options) {
+      fail(token, "getUpdates");
+      requireBot(token);
+      const pending = state.pendingUpdates?.get(token) ?? [];
+      const offset = options?.offset ?? 0;
+      const filtered = pending.filter((u) => u.updateId >= offset);
+      const limit = options?.limit ?? filtered.length;
+      return filtered.slice(0, limit);
+    },
+    async answerCallbackQuery(token) {
+      fail(token, "answerCallbackQuery");
+      requireBot(token);
+      return true;
+    }
+  };
+}
+
+function mapUpdate(raw: Record<string, unknown>): TelegramUpdate {
+  const messageRaw = raw.message as Record<string, unknown> | undefined;
+  if (!messageRaw) {
+    return { updateId: Number(raw.update_id) };
+  }
+  const fromRaw = messageRaw.from as Record<string, unknown> | undefined;
+  const chatRaw = (messageRaw.chat ?? {}) as Record<string, unknown>;
+  return {
+    updateId: Number(raw.update_id),
+    message: {
+      messageId: Number(messageRaw.message_id),
+      date: Number(messageRaw.date ?? 0),
+      chat: mapChat(chatRaw),
+      ...(messageRaw.text != null ? { text: String(messageRaw.text) } : {}),
+      ...(fromRaw ? { from: mapUser(fromRaw) } : {})
     }
   };
 }

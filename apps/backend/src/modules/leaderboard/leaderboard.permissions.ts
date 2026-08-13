@@ -166,3 +166,25 @@ export function leaderboardTelegramVerifyGuard(app: FastifyInstance) {
     await app.requirePermission("leaderboard:telegram:verify")(request, reply);
   };
 }
+
+/**
+ * Staff + Coadmin wheel spin (Atlas UI). Bot Spin callback is DEFERRED.
+ */
+export function leaderboardWheelSpinGuard(app: FastifyInstance) {
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    await app.authenticate(request, reply);
+    await app.requireRole(["COADMIN", "STAFF"])(request, reply);
+    await app.requirePermission("leaderboard:wheel:spin")(request, reply);
+  };
+}
+
+/**
+ * Coadmin-only wheel configuration management.
+ */
+export function leaderboardWheelManageGuard(app: FastifyInstance) {
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    await app.authenticate(request, reply);
+    await app.requireRole(["COADMIN"])(request, reply);
+    await app.requirePermission("leaderboard:wheel:manage")(request, reply);
+  };
+}

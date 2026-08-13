@@ -40,6 +40,10 @@ import type {
   LeaderboardStandingFilter,
   LeaderboardStandingsPageDto,
   LeaderboardTelegramIntegrationDto,
+  LeaderboardWheelConfigVersionDto,
+  LeaderboardWheelSettingsDto,
+  LeaderboardWheelSpinResultDto,
+  LeaderboardWheelStatusDto,
   TelegramAccountDto,
   TelegramAccountPermanentDeleteResponse,
   TelegramChatDto,
@@ -552,6 +556,31 @@ export const api = {
       { method: "POST", body: JSON.stringify({ crmContactId }) }
     ),
 
+  leaderboardEnsureAutoBind: (crmContactId: string) =>
+    apiRequest<{
+      readonly crmContactId: string;
+      readonly status: string;
+      readonly ownerCoadminUserId: string;
+      readonly reason?: string;
+    }>("/api/leaderboard/participants/ensure-auto-bind", {
+      method: "POST",
+      body: JSON.stringify({ crmContactId })
+    }),
+
+  leaderboardParticipantsBackfill: (payload: { readonly dryRun?: boolean }) =>
+    apiRequest<{
+      readonly scanned: number;
+      readonly bound: number;
+      readonly alreadyBound: number;
+      readonly ambiguous: number;
+      readonly skipped: number;
+      readonly failed: number;
+      readonly dryRun: boolean;
+    }>("/api/leaderboard/participants/backfill", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
   leaderboardDeposit: (payload: {
     readonly crmContactId: string;
     readonly amountCents: number;
@@ -721,6 +750,12 @@ export const api = {
       body: JSON.stringify(payload)
     }),
 
+  leaderboardTelegramRegisterWebhook: () =>
+    apiRequest<LeaderboardTelegramIntegrationDto>(
+      "/api/leaderboard/telegram-integration/register-webhook",
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
   leaderboardVerifyMembership: (competitionId: string) =>
     apiRequest<{ readonly queued: boolean; readonly jobId: string; readonly competitionId: string }>(
       `/api/leaderboard/competitions/${competitionId}/verify-membership`,
@@ -755,7 +790,50 @@ export const api = {
     apiRequest<LeaderboardPayoutDto>(`/api/leaderboard/payouts/${payoutId}`, {
       method: "PATCH",
       body: JSON.stringify(payload)
-    })
+    }),
+
+  leaderboardWheelStatus: (crmContactId: string) =>
+    apiRequest<LeaderboardWheelStatusDto>(`/api/leaderboard/wheel/status/${crmContactId}`),
+
+  leaderboardWheelSpin: (payload: {
+    readonly crmContactId: string;
+    readonly idempotencyKey: string;
+  }) =>
+    apiRequest<LeaderboardWheelSpinResultDto>("/api/leaderboard/wheel/spin", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardWheelSettings: () =>
+    apiRequest<LeaderboardWheelSettingsDto>("/api/leaderboard/wheel/settings"),
+
+  leaderboardWheelPatchSettings: (payload: {
+    readonly enabled?: boolean;
+  }) =>
+    apiRequest<LeaderboardWheelSettingsDto>("/api/leaderboard/wheel/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardWheelEnsureApproved: () =>
+    apiRequest<LeaderboardWheelSettingsDto>("/api/leaderboard/wheel/config/ensure-approved", {
+      method: "POST",
+      body: JSON.stringify({})
+    }),
+
+  leaderboardWheelCreateVersion: (payload: {
+    readonly distribution: readonly { readonly points: number; readonly weight: number }[];
+  }) =>
+    apiRequest<LeaderboardWheelConfigVersionDto>("/api/leaderboard/wheel/config/versions", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardWheelActivateVersion: (versionId: string) =>
+    apiRequest<LeaderboardWheelSettingsDto>(
+      `/api/leaderboard/wheel/config/versions/${versionId}/activate`,
+      { method: "POST", body: JSON.stringify({}) }
+    )
 };
 
 export const apiBaseUrl = baseUrl;

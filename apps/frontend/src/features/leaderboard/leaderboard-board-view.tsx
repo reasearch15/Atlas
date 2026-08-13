@@ -153,6 +153,7 @@ export function LeaderboardBoardView() {
                   <th className="px-2 py-2 font-semibold">Deposit</th>
                   <th className="px-2 py-2 font-semibold">Referral</th>
                   <th className="px-2 py-2 font-semibold">Promotion</th>
+                  <th className="px-2 py-2 font-semibold">Wheel</th>
                   <th className="px-2 py-2 font-semibold">Qualifying deposits</th>
                   <th className="px-2 py-2 font-semibold">Successful referrals</th>
                   <th className="px-2 py-2 font-semibold">Last change</th>
@@ -175,6 +176,7 @@ export function LeaderboardBoardView() {
                     <td className="px-2 py-2 tabular-nums">{row.depositPoints}</td>
                     <td className="px-2 py-2 tabular-nums">{row.referralPoints}</td>
                     <td className="px-2 py-2 tabular-nums">{row.promotionPoints}</td>
+                    <td className="px-2 py-2 tabular-nums">{row.wheelPoints}</td>
                     <td className="px-2 py-2 tabular-nums">
                       {formatMoneyFromCents(row.qualifyingDepositCents)}
                     </td>

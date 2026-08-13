@@ -101,6 +101,7 @@ function injectLegacyDeposit(input: {
       depositPoints: 0,
       referralPoints: 0,
       promotionPoints: 0,
+      wheelPoints: 0,
       qualifyingDepositCents: 0,
       successfulReferralCount: 0,
       pointsReachedAt: input.occurredAt,
@@ -115,7 +116,8 @@ function injectLegacyDeposit(input: {
   }
   standing.qualifyingDepositCents += input.amountCents;
   standing.depositPoints += input.legacyPointsDelta;
-  standing.totalPoints = standing.depositPoints + standing.referralPoints + standing.promotionPoints;
+  standing.totalPoints =
+    standing.depositPoints + standing.referralPoints + standing.promotionPoints + standing.wheelPoints;
   standing.pointsReachedAt = input.occurredAt;
   standing.lastEventId = event.id;
   standing.lastEventAt = input.occurredAt;

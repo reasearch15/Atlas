@@ -1085,6 +1085,7 @@ export class PrismaLeaderboardService {
                 depositPoints: 0,
                 referralPoints: 0,
                 promotionPoints: 0,
+                wheelPoints: 0,
                 qualifyingDepositCents: 0,
                 successfulReferralCount: 0,
                 pointsReachedAt: now
@@ -1099,6 +1100,7 @@ export class PrismaLeaderboardService {
             correctDepositPoints,
             referralPoints: standing.referralPoints,
             promotionPoints: standing.promotionPoints,
+            wheelPoints: standing.wheelPoints,
             fallback: standing.pointsReachedAt
           });
 
@@ -1135,7 +1137,11 @@ export class PrismaLeaderboardService {
             data: {
               qualifyingDepositCents,
               depositPoints: correctDepositPoints,
-              totalPoints: correctDepositPoints + standing.referralPoints + standing.promotionPoints,
+              totalPoints:
+                correctDepositPoints +
+                standing.referralPoints +
+                standing.promotionPoints +
+                standing.wheelPoints,
               pointsReachedAt,
               lastEventId: event.id,
               lastEventAt: now,

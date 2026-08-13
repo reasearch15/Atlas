@@ -21,6 +21,11 @@ import type {
   LeaderboardStandingRowDto,
   LeaderboardStandingsPageDto,
   LeaderboardTelegramIntegrationDto,
+  LeaderboardWheelConfigVersionDto,
+  LeaderboardWheelSettingsDto,
+  LeaderboardWheelSpinResultDto,
+  LeaderboardWheelStatusDto,
+  LeaderboardWheelQualificationCreditPolicy,
   Role
 } from "@atlas/shared";
 import { customerPrivacyCapabilities } from "@atlas/shared";
@@ -44,8 +49,15 @@ import { PrismaLeaderboardService } from "./leaderboard.prisma-service";
 import { computeStandingGaps } from "./leaderboard.standing-helpers";
 import { selectPrizeWinnersFromEligibility } from "./prize-eligibility";
 import { withRanks } from "./ranking";
+import { tryAutoBindForActingCoadmin, tryAutoBindParticipant } from "./auto-bind";
+import { backfillLeaderboardParticipants } from "./backfill-participants";
+import { resolveDeterministicLeaderboardOwner } from "./ownership-resolution";
+import { decidePlayerNotification } from "./telegram/player-notification-policy";
 import type { LeaderboardTelegramIntegrationService } from "./telegram/leaderboard-telegram.integration-service";
 import type { LeaderboardTelegramOutboxService } from "./telegram/leaderboard-telegram.outbox";
+import { PrismaWheelService } from "./wheel.prisma-service";
+import { createCryptoWheelRng, type WheelRng } from "./wheel-rng";
+import { formatPersonalAnnouncementDm } from "./telegram/personal-rank-message";
 
 export interface LeaderboardEventsQuery {
   readonly page: number;
@@ -74,6 +86,7 @@ type RankedStanding = {
   depositPoints: number;
   referralPoints: number;
   promotionPoints: number;
+  wheelPoints: number;
   qualifyingDepositCents: number;
   successfulReferralCount: number;
   lastEventAt: Date | null;
@@ -113,6 +126,7 @@ export function applyStandingFilterRows<T extends RankedStanding>(
  */
 export class LeaderboardApiService {
   private readonly domain: PrismaLeaderboardService;
+  private readonly wheel: PrismaWheelService;
   private readonly audit: AuditService;
   private readonly outbox: LeaderboardTelegramOutboxService | undefined;
   private readonly telegramIntegration: LeaderboardTelegramIntegrationService | undefined;
@@ -136,6 +150,7 @@ export class LeaderboardApiService {
         }
       }
     });
+    this.wheel = new PrismaWheelService(app.prisma);
     this.audit = new AuditService(app.prisma);
   }
 
@@ -275,11 +290,13 @@ export class LeaderboardApiService {
           depositPoints: null,
           referralPoints: null,
           promotionPoints: null,
+          wheelPoints: null,
           qualifyingDepositCents: null,
           successfulReferralCount: null,
           lastEventAt: null,
           lastEventReason: null,
-          unboundReason: "PARTICIPANT_NOT_BOUND"
+          unboundReason: "PARTICIPANT_NOT_BOUND",
+          wheel: null
         };
       }
       throw error;
@@ -293,6 +310,13 @@ export class LeaderboardApiService {
       ? await this.domain.ensureCurrentCompetition(workspaceId, owner, now)
       : await this.findActiveCompetition(workspaceId, owner, now);
 
+    let wheel: LeaderboardWheelStatusDto | null = null;
+    try {
+      wheel = await this.wheel.getStatus(workspaceId, owner, crmContactId, now);
+    } catch {
+      wheel = null;
+    }
+
     if (!competition) {
       return {
         bound: true,
@@ -303,10 +327,12 @@ export class LeaderboardApiService {
         depositPoints: null,
         referralPoints: null,
         promotionPoints: null,
+        wheelPoints: null,
         qualifyingDepositCents: null,
         successfulReferralCount: null,
         lastEventAt: null,
-        lastEventReason: null
+        lastEventReason: null,
+        wheel
       };
     }
 
@@ -322,10 +348,12 @@ export class LeaderboardApiService {
       depositPoints: standing?.depositPoints ?? null,
       referralPoints: standing?.referralPoints ?? null,
       promotionPoints: standing?.promotionPoints ?? null,
+      wheelPoints: standing?.wheelPoints ?? null,
       qualifyingDepositCents: standing?.qualifyingDepositCents ?? null,
       successfulReferralCount: standing?.successfulReferralCount ?? null,
       lastEventAt: standing?.lastEventAt?.toISOString() ?? null,
-      lastEventReason: standing?.lastEventReason ?? null
+      lastEventReason: standing?.lastEventReason ?? null,
+      wheel
     };
   }
 
@@ -370,6 +398,7 @@ export class LeaderboardApiService {
         depositPoints: row.depositPoints,
         referralPoints: row.referralPoints,
         promotionPoints: row.promotionPoints,
+        wheelPoints: row.wheelPoints,
         qualifyingDepositCents: row.qualifyingDepositCents,
         successfulReferralCount: row.successfulReferralCount,
         lastEventAt: row.lastEventAt?.toISOString() ?? null,
@@ -446,6 +475,54 @@ export class LeaderboardApiService {
     return { crmContactId: row.crmContactId, ownerCoadminUserId: row.ownerCoadminUserId };
   }
 
+  /**
+   * Coadmin CRM hook: try deterministic auto-bind for a contact (never transfers).
+   */
+  public async ensureAutoBindForContact(user: RequestUser, crmContactId: string) {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    const result = await tryAutoBindParticipant(this.app.prisma, {
+      workspaceId,
+      crmContactId,
+      ownerCoadminUserId: user.id,
+      source: "CRM",
+      actorUserId: user.id
+    }, this.domain);
+    return {
+      crmContactId,
+      status: result.status,
+      ownerCoadminUserId: "ownerCoadminUserId" in result ? result.ownerCoadminUserId : user.id,
+      ...(result.status === "SKIPPED" || result.status === "FAILED"
+        ? { reason: result.reason }
+        : {}),
+      ...(result.status === "TRANSFER_REJECTED"
+        ? { existingOwnerId: result.existingOwnerId }
+        : {})
+    };
+  }
+
+  /**
+   * Coadmin-only backfill for sole-owner workspaces (dryRun supported).
+   */
+  public async backfillParticipants(user: RequestUser, dryRun: boolean) {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    const deterministic = await resolveDeterministicLeaderboardOwner(this.app.prisma, workspaceId);
+    if (deterministic != null && deterministic !== user.id) {
+      throw forbidden("Backfill is only available when you are the sole ACTIVE coadmin.");
+    }
+    return backfillLeaderboardParticipants(
+      this.app.prisma,
+      {
+        workspaceId,
+        ownerCoadminUserId: user.id,
+        dryRun,
+        actorUserId: user.id
+      },
+      this.domain
+    );
+  }
+
   public async recordDeposit(
     user: RequestUser,
     body: {
@@ -456,7 +533,28 @@ export class LeaderboardApiService {
     }
   ): Promise<LeaderboardDepositResultDto> {
     const workspaceId = this.requireWorkspaceId(user);
-    const owner = await this.domain.resolveLeaderboardOwner(workspaceId, body.crmContactId);
+    let owner: string;
+    try {
+      owner = await this.domain.resolveLeaderboardOwner(workspaceId, body.crmContactId);
+    } catch (error) {
+      if (
+        error instanceof LeaderboardError &&
+        error.code === "PARTICIPANT_NOT_BOUND" &&
+        user.role === "COADMIN"
+      ) {
+        const auto = await tryAutoBindForActingCoadmin(this.app.prisma, {
+          workspaceId,
+          crmContactId: body.crmContactId,
+          actingCoadminUserId: user.id
+        });
+        if (auto.status !== "BOUND" && auto.status !== "ALREADY_BOUND") {
+          throw error;
+        }
+        owner = user.id;
+      } else {
+        throw error;
+      }
+    }
     await this.assertActorMayMutatePlayer(user, owner);
 
     const previousRank = await this.rankForContact(workspaceId, owner, body.crmContactId);
@@ -480,6 +578,13 @@ export class LeaderboardApiService {
     }
 
     await this.projectAfterMutation(workspaceId, owner, competition.id);
+    await this.enqueueRecentReferralMilestoneDms(workspaceId, owner, competition.id);
+    await this.safeRecomputeWheelQualification({
+      workspaceId,
+      ownerCoadminUserId: owner,
+      competitionId: competition.id,
+      crmContactId: body.crmContactId
+    });
 
     return {
       amountCents: body.amountCents,
@@ -520,6 +625,10 @@ export class LeaderboardApiService {
     });
 
     await this.projectStandingsForOwner(workspaceId, owner);
+    const competition = await this.findActiveCompetition(workspaceId, owner, new Date());
+    if (competition) {
+      await this.enqueueRecentReferralMilestoneDms(workspaceId, owner, competition.id);
+    }
 
     return {
       referrerCrmContactId: body.referrerCrmContactId,
@@ -533,7 +642,28 @@ export class LeaderboardApiService {
     body: { crmContactId: string; idempotencyKey: string; reason?: string | undefined }
   ): Promise<LeaderboardPromotionResultDto> {
     const workspaceId = this.requireWorkspaceId(user);
-    const owner = await this.domain.resolveLeaderboardOwner(workspaceId, body.crmContactId);
+    let owner: string;
+    try {
+      owner = await this.domain.resolveLeaderboardOwner(workspaceId, body.crmContactId);
+    } catch (error) {
+      if (
+        error instanceof LeaderboardError &&
+        error.code === "PARTICIPANT_NOT_BOUND" &&
+        user.role === "COADMIN"
+      ) {
+        const auto = await tryAutoBindForActingCoadmin(this.app.prisma, {
+          workspaceId,
+          crmContactId: body.crmContactId,
+          actingCoadminUserId: user.id
+        });
+        if (auto.status !== "BOUND" && auto.status !== "ALREADY_BOUND") {
+          throw error;
+        }
+        owner = user.id;
+      } else {
+        throw error;
+      }
+    }
     await this.assertActorMayMutatePlayer(user, owner);
 
     const previousRank = await this.rankForContact(workspaceId, owner, body.crmContactId);
@@ -617,6 +747,7 @@ export class LeaderboardApiService {
         depositPoints: 0,
         referralPoints: 0,
         promotionPoints: 0,
+        wheelPoints: 0,
         qualifyingDepositCents: 0,
         successfulReferralCount: 0,
         lastEventAt: null,
@@ -842,6 +973,12 @@ export class LeaderboardApiService {
         reason
       });
       await this.projectAfterMutation(workspaceId, user.id, event.competitionId);
+      await this.safeRecomputeWheelQualification({
+        workspaceId,
+        ownerCoadminUserId: user.id,
+        competitionId: event.competitionId,
+        crmContactId: event.crmContactId
+      });
       return reversed;
     }
     if (event.type === "PROMOTION") {
@@ -972,6 +1109,7 @@ export class LeaderboardApiService {
         depositPoints: row?.depositPoints ?? 0,
         referralPoints: row?.referralPoints ?? 0,
         promotionPoints: row?.promotionPoints ?? 0,
+        wheelPoints: row?.wheelPoints ?? 0,
         qualifyingDepositCents: row?.qualifyingDepositCents ?? 0,
         successfulReferralCount: row?.successfulReferralCount ?? 0,
         lastEventAt: row?.lastEventAt?.toISOString() ?? null,
@@ -1081,10 +1219,17 @@ export class LeaderboardApiService {
     try {
       await this.outbox?.enqueuePostResults(workspaceId, user.id, competitionId);
       await this.outbox?.enqueueRefresh(workspaceId, user.id, competitionId);
+      await this.enqueueFinalResultDms(workspaceId, user.id, competitionId);
     } catch {
       // ignore projection errors
     }
     return finalized;
+  }
+
+  public async registerTelegramWebhook(user: RequestUser): Promise<LeaderboardTelegramIntegrationDto> {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    return this.requireTelegramIntegration().registerWebhook(workspaceId, user.id, user.id);
   }
 
   public async getTelegramIntegration(user: RequestUser): Promise<LeaderboardTelegramIntegrationDto> {
@@ -1296,6 +1441,7 @@ export class LeaderboardApiService {
         depositPoints: row.depositPoints,
         referralPoints: row.referralPoints,
         promotionPoints: row.promotionPoints,
+        wheelPoints: row.wheelPoints,
         qualifyingDepositCents: row.qualifyingDepositCents,
         successfulReferralCount: row.successfulReferralCount,
         lastEventAt: row.lastEventAt,
@@ -1380,6 +1526,7 @@ export class LeaderboardApiService {
         depositPoints: row.depositPoints,
         referralPoints: row.referralPoints,
         promotionPoints: row.promotionPoints,
+        wheelPoints: row.wheelPoints,
         qualifyingDepositCents: row.qualifyingDepositCents,
         successfulReferralCount: row.successfulReferralCount,
         lastEventAt: row.lastEventAt?.toISOString() ?? null,
@@ -1401,6 +1548,310 @@ export class LeaderboardApiService {
       top3: ranked.filter((r) => r.rank <= 3).map(toRow),
       top10: ranked.filter((r) => r.rank <= 10).map(toRow)
     };
+  }
+
+  private async enqueueRecentReferralMilestoneDms(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string
+  ): Promise<void> {
+    if (!this.outbox) return;
+    try {
+      const since = new Date(Date.now() - 15_000);
+      const events = await this.app.prisma.leaderboardEvent.findMany({
+        where: {
+          workspaceId,
+          ownerCoadminUserId,
+          competitionId,
+          type: "REFERRAL_MILESTONE",
+          occurredAt: { gte: since }
+        },
+        select: { crmContactId: true, pointsDelta: true }
+      });
+      for (const event of events) {
+        const link = await this.app.prisma.leaderboardBotPlayerLink.findFirst({
+          where: { ownerCoadminUserId, crmContactId: event.crmContactId },
+          select: { id: true }
+        });
+        const decision = decidePlayerNotification({
+          competitionId,
+          crmContactId: event.crmContactId,
+          kind: "REFERRAL_MILESTONE",
+          hasPlayerLink: link != null,
+          ownerCoadminUserId,
+          botOwnerCoadminUserId: ownerCoadminUserId
+        });
+        if (!decision.shouldNotify) continue;
+        await this.outbox.enqueuePlayerDm({
+          workspaceId,
+          ownerCoadminUserId,
+          competitionId,
+          crmContactId: event.crmContactId,
+          kind: "REFERRAL_MILESTONE",
+          totalPoints: event.pointsDelta,
+          dedupeKey: `${decision.dedupeKey}:${event.pointsDelta}:${since.toISOString().slice(0, 13)}`
+        });
+      }
+    } catch {
+      // Personal DMs must never affect scoring.
+    }
+  }
+
+  private async enqueueFinalResultDms(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string
+  ): Promise<void> {
+    if (!this.outbox) return;
+    const candidates = await this.app.prisma.giveawayEligibilityCandidate.findMany({
+      where: { workspaceId, ownerCoadminUserId, competitionId },
+      select: { crmContactId: true, membershipStatus: true }
+    });
+    const payouts = await this.app.prisma.giveawayPayout.findMany({
+      where: { workspaceId, ownerCoadminUserId, competitionId },
+      select: { crmContactId: true }
+    });
+    const payoutIds = new Set(payouts.map((p) => p.crmContactId));
+
+    for (const candidate of candidates) {
+      const isWinner = payoutIds.has(candidate.crmContactId);
+      const kind = isWinner
+        ? ("FINAL_RESULT_WINNER" as const)
+        : candidate.membershipStatus === "NOT_ELIGIBLE"
+          ? ("FINAL_RESULT_INELIGIBLE" as const)
+          : ("FINAL_RESULT" as const);
+
+      const link = await this.app.prisma.leaderboardBotPlayerLink.findFirst({
+        where: { ownerCoadminUserId, crmContactId: candidate.crmContactId },
+        select: { id: true }
+      });
+      const decision = decidePlayerNotification({
+        competitionId,
+        crmContactId: candidate.crmContactId,
+        kind,
+        hasPlayerLink: link != null,
+        ownerCoadminUserId,
+        botOwnerCoadminUserId: ownerCoadminUserId
+      });
+      if (!decision.shouldNotify) continue;
+
+      await this.outbox.enqueueFinalResultDm({
+        workspaceId,
+        ownerCoadminUserId,
+        competitionId,
+        crmContactId: candidate.crmContactId,
+        kind
+      });
+    }
+  }
+
+  public async getWheelStatus(
+    user: RequestUser,
+    crmContactId: string
+  ): Promise<LeaderboardWheelStatusDto> {
+    const workspaceId = this.requireWorkspaceId(user);
+    const owner = await this.domain.resolveLeaderboardOwner(workspaceId, crmContactId);
+    await this.assertActorMayMutatePlayer(user, owner);
+    return this.wheel.getStatus(workspaceId, owner, crmContactId, new Date());
+  }
+
+  public async spinWheel(
+    user: RequestUser,
+    body: { crmContactId: string; idempotencyKey: string },
+    rng?: WheelRng
+  ): Promise<LeaderboardWheelSpinResultDto> {
+    const workspaceId = this.requireWorkspaceId(user);
+    const owner = await this.domain.resolveLeaderboardOwner(workspaceId, body.crmContactId);
+    await this.assertActorMayMutatePlayer(user, owner);
+
+    const result = await this.wheel.spin({
+      workspaceId,
+      crmContactId: body.crmContactId,
+      idempotencyKey: body.idempotencyKey,
+      actorUserId: user.id,
+      rng: rng ?? createCryptoWheelRng()
+    });
+
+    await this.projectAfterMutation(workspaceId, result.ownerCoadminUserId, result.spin.competitionId);
+
+    if (!result.replay) {
+      try {
+        const link = await this.app.prisma.leaderboardBotPlayerLink.findFirst({
+          where: {
+            ownerCoadminUserId: result.ownerCoadminUserId,
+            crmContactId: body.crmContactId
+          },
+          select: { id: true }
+        });
+        if (link && this.outbox) {
+          const text = formatPersonalAnnouncementDm({
+            kind: "WHEEL_SPIN",
+            fromRank: result.spin.previousRank,
+            toRank: result.spin.resultingRank ?? result.spin.previousRank ?? 0,
+            totalPoints: result.spin.pointsAwarded
+          });
+          await this.outbox.enqueuePlayerDm({
+            workspaceId,
+            ownerCoadminUserId: result.ownerCoadminUserId,
+            competitionId: result.spin.competitionId,
+            crmContactId: body.crmContactId,
+            kind: "WHEEL_SPIN",
+            fromRank: result.spin.previousRank,
+            ...(result.spin.resultingRank != null
+              ? { toRank: result.spin.resultingRank }
+              : {}),
+            totalPoints: result.standing.totalPoints,
+            text,
+            dedupeKey: `lb:pdm:${result.ownerCoadminUserId}:${result.spin.competitionId}:${body.crmContactId}:WHEEL_SPIN:${result.spin.id}`
+          });
+        }
+      } catch {
+        // DM enqueue must not fail spin response.
+      }
+    }
+
+    const cycle = await this.app.prisma.leaderboardWheelCycle.findUnique({
+      where: { id: result.spin.cycleId },
+      select: { sequence: true }
+    });
+
+    return {
+      pointsAwarded: result.spin.pointsAwarded,
+      totalPoints: result.standing.totalPoints,
+      wheelPoints: result.standing.wheelPoints,
+      previousRank: result.spin.previousRank,
+      resultingRank: result.spin.resultingRank,
+      cycleSequence: cycle?.sequence ?? 0,
+      replay: result.replay,
+      spinId: result.spin.id
+    };
+  }
+
+  public async getWheelSettings(user: RequestUser): Promise<LeaderboardWheelSettingsDto> {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    const config = await this.wheel.ensureConfig(workspaceId, user.id);
+    const versions = await this.app.prisma.leaderboardWheelConfigVersion.findMany({
+      where: { ownerCoadminUserId: user.id, workspaceId },
+      orderBy: { createdAt: "desc" }
+    });
+    const mapped: LeaderboardWheelConfigVersionDto[] = versions.map((v) => {
+      const dist = Array.isArray(v.rewardDistributionJson)
+        ? (v.rewardDistributionJson as Array<{ points: number; weight: number }>)
+        : [];
+      return {
+        id: v.id,
+        createdAt: v.createdAt.toISOString(),
+        createdByUserId: v.createdByUserId,
+        activatedAt: v.activatedAt?.toISOString() ?? null,
+        distribution: dist,
+        isActive: config.activeVersionId === v.id
+      };
+    });
+    return {
+      enabled: config.enabled,
+      qualificationCreditPolicy: config.qualificationCreditPolicy,
+      enabledAt: config.enabledAt?.toISOString() ?? null,
+      activeVersionId: config.activeVersionId,
+      needsConfiguration: config.activeVersionId == null,
+      versions: mapped
+    };
+  }
+
+  public async ensureApprovedWheelDistribution(
+    user: RequestUser
+  ): Promise<LeaderboardWheelSettingsDto> {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    await this.wheel.ensureApprovedDistributionVersion({
+      workspaceId,
+      ownerCoadminUserId: user.id,
+      createdByUserId: user.id
+    });
+    await this.audit.record({
+      workspaceId,
+      actorId: user.id,
+      action: "leaderboard.wheel.ensure_approved_distribution",
+      metadata: {}
+    });
+    return this.getWheelSettings(user);
+  }
+
+  public async patchWheelSettings(
+    user: RequestUser,
+    body: {
+      enabled?: boolean;
+      /** Ignored — Phase 6.1 locks CYCLE_DEPOSITS_ALL server-side. */
+      qualificationCreditPolicy?: LeaderboardWheelQualificationCreditPolicy;
+    }
+  ): Promise<LeaderboardWheelSettingsDto> {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    await this.wheel.patchSettings({
+      workspaceId,
+      ownerCoadminUserId: user.id,
+      ...(body.enabled !== undefined ? { enabled: body.enabled } : {})
+    });
+    await this.audit.record({
+      workspaceId,
+      actorId: user.id,
+      action: "leaderboard.wheel.settings",
+      metadata: { enabled: body.enabled }
+    });
+    return this.getWheelSettings(user);
+  }
+
+  public async createWheelConfigVersion(
+    user: RequestUser,
+    distribution: Array<{ points: number; weight: number }>
+  ): Promise<LeaderboardWheelConfigVersionDto> {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    const version = await this.wheel.createVersion({
+      workspaceId,
+      ownerCoadminUserId: user.id,
+      createdByUserId: user.id,
+      distribution
+    });
+    return {
+      id: version.id,
+      createdAt: version.createdAt.toISOString(),
+      createdByUserId: version.createdByUserId,
+      activatedAt: version.activatedAt?.toISOString() ?? null,
+      distribution: version.rewardDistributionJson,
+      isActive: false
+    };
+  }
+
+  public async activateWheelConfigVersion(
+    user: RequestUser,
+    versionId: string
+  ): Promise<LeaderboardWheelSettingsDto> {
+    this.assertCoadmin(user);
+    await this.wheel.activateVersion({
+      ownerCoadminUserId: user.id,
+      versionId
+    });
+    await this.audit.record({
+      workspaceId: this.requireWorkspaceId(user),
+      actorId: user.id,
+      action: "leaderboard.wheel.activate_version",
+      metadata: { versionId }
+    });
+    return this.getWheelSettings(user);
+  }
+
+  private async safeRecomputeWheelQualification(input: {
+    workspaceId: string;
+    ownerCoadminUserId: string;
+    competitionId: string;
+    crmContactId: string;
+  }): Promise<void> {
+    try {
+      await this.wheel.recomputeAfterDepositMutation(input);
+    } catch {
+      // Never roll back deposit/reversal on wheel recompute failure.
+    }
   }
 
   private requireWorkspaceId(user: RequestUser): string {

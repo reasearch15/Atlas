@@ -43,7 +43,7 @@ export function correctDepositPointsFromLedger(
 
 /** Mutable timeline step for historical score reconstruction under v2 deposit math. */
 export function stepReconcileTimeline(
-  state: { cents: number; referral: number; promotion: number },
+  state: { cents: number; referral: number; promotion: number; wheel?: number },
   event: Pick<EventRow, "type" | "pointsDelta" | "depositAmountCents">
 ): void {
   const type = event.type as EventType;
@@ -57,6 +57,10 @@ export function stepReconcileTimeline(
   }
   if (type === "PROMOTION" || type === "PROMOTION_REVERSAL") {
     state.promotion += event.pointsDelta;
+    return;
+  }
+  if (type === "WHEEL_SPIN") {
+    state.wheel = (state.wheel ?? 0) + event.pointsDelta;
   }
   // MANUAL_ADJUSTMENT ignored — migration artifact, not a player action.
 }
@@ -70,9 +74,13 @@ export function reconstructPointsReachedAt(input: {
   readonly correctDepositPoints: number;
   readonly referralPoints: number;
   readonly promotionPoints: number;
+  /** Preserved wheel points — included in totalPoints formula. */
+  readonly wheelPoints?: number;
   readonly fallback: Date;
 }): Date {
-  const targetTotal = input.correctDepositPoints + input.referralPoints + input.promotionPoints;
+  const wheelPoints = input.wheelPoints ?? 0;
+  const targetTotal =
+    input.correctDepositPoints + input.referralPoints + input.promotionPoints + wheelPoints;
   if (targetTotal <= 0) return input.fallback;
 
   const sorted = [...input.events].sort((a, b) => {
@@ -81,11 +89,14 @@ export function reconstructPointsReachedAt(input: {
     return a.id.localeCompare(b.id);
   });
 
-  const state = { cents: 0, referral: 0, promotion: 0 };
+  const state = { cents: 0, referral: 0, promotion: 0, wheel: 0 };
   for (const event of sorted) {
     stepReconcileTimeline(state, event);
     const total =
-      depositPointsFromCumulativeCents(state.cents) + state.referral + state.promotion;
+      depositPointsFromCumulativeCents(state.cents) +
+      state.referral +
+      state.promotion +
+      state.wheel;
     if (total === targetTotal) {
       return event.occurredAt;
     }

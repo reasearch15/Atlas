@@ -38,3 +38,24 @@ export const MAX_REFERRAL_POINTS_PER_REFERRED = 300;
 
 export const FIRST_PLACE_PAYOUT_BPS = 5000;
 export const SECOND_PLACE_PAYOUT_BPS = 3000;
+
+/**
+ * Phase 6 — 48-hour Wheel.
+ *
+ * Phase 6.1 product locks:
+ * - Qualification threshold: $40 (4000 cents)
+ * - Fixed 48h cycles × 7 per competition
+ * - Max 1 spin per cycle
+ * - Qualification policy: CYCLE_DEPOSITS_ALL (enforced server-side)
+ * - Approved distribution: see approved-wheel-distribution.ts (EV 13.7)
+ * - No retroactive spins for completed cycles
+ * - No post-spin automatic clawback
+ */
+export const WHEEL_QUALIFICATION_CENTS = 4000; // $40
+export const WHEEL_CYCLE_HOURS = 48;
+export const WHEEL_CYCLES_PER_COMPETITION = 7;
+export const WHEEL_MIN_POINTS = 0;
+export const WHEEL_MAX_POINTS = 40;
+
+/** Product-locked qualification policy (enum retains other values for schema compat). */
+export const WHEEL_PRODUCT_QUALIFICATION_POLICY = "CYCLE_DEPOSITS_ALL" as const;

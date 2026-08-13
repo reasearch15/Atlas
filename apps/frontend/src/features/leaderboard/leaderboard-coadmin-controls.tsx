@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { formatMoneyFromCents, mapLeaderboardError, newIdempotencyKey } from "./leaderboard-errors";
+import { WheelCoadminControls } from "./wheel-coadmin-controls";
 
 const POOL_RATE_OPTIONS = [
   { bps: 200 as const, label: "2%" },
@@ -71,6 +72,7 @@ export function LeaderboardCoadminControls() {
   const [telegram, setTelegram] = useState<LeaderboardTelegramIntegrationDto | null>(null);
   const [botToken, setBotToken] = useState("");
   const [channelRef, setChannelRef] = useState("");
+  const [backfillSummary, setBackfillSummary] = useState<string | null>(null);
 
   const reverseKeyRef = useRef(newIdempotencyKey());
   const overrideKeyRef = useRef(newIdempotencyKey());
@@ -471,6 +473,8 @@ export function LeaderboardCoadminControls() {
 
           </section>
 
+          <WheelCoadminControls />
+
           {/* A2. Telegram bot integration (Coadmin only) */}
           <section className="space-y-4 rounded-lg border bg-white p-5">
             <div className="space-y-1">
@@ -550,6 +554,31 @@ export function LeaderboardCoadminControls() {
               </div>
             ) : (
               <div className="space-y-3">
+                {telegram.botDeepLink ? (
+                  <p className="text-sm text-muted-foreground">
+                    Player bot link:{" "}
+                    <a
+                      href={telegram.botDeepLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-medium text-foreground underline underline-offset-2"
+                    >
+                      {telegram.botDeepLink}
+                    </a>
+                  </p>
+                ) : null}
+                {telegram.webhookConfigured ? (
+                  <p className="text-xs text-muted-foreground">
+                    Webhook registered
+                    {telegram.lastInboundAt
+                      ? ` · last inbound ${new Date(telegram.lastInboundAt).toLocaleString()}`
+                      : ""}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Webhook not registered — players cannot use /start until configured.
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-2">
                   <Button
                     type="button"
@@ -565,6 +594,21 @@ export function LeaderboardCoadminControls() {
                     }
                   >
                     Test connection
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="h-8 px-3 text-xs"
+                    disabled={pending}
+                    onClick={() =>
+                      void runAction(async () => {
+                        const next = await api.leaderboardTelegramRegisterWebhook();
+                        setTelegram(next);
+                        toast.success("Webhook registered.");
+                      })
+                    }
+                  >
+                    Register webhook
                   </Button>
                   <Button
                     type="button"
@@ -725,6 +769,48 @@ export function LeaderboardCoadminControls() {
                     Verify membership now
                   </Button>
                 ) : null}
+
+                <div className="space-y-2 border-t pt-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Participant backfill (sole-owner workspaces)
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="h-8 px-3 text-xs"
+                      disabled={pending}
+                      onClick={() =>
+                        void runAction(async () => {
+                          const result = await api.leaderboardParticipantsBackfill({ dryRun: true });
+                          const summary = `Dry run: scanned ${result.scanned}, would bind ${result.bound}, already ${result.alreadyBound}, ambiguous ${result.ambiguous}, skipped ${result.skipped}`;
+                          setBackfillSummary(summary);
+                          toast.success("Backfill dry-run complete.");
+                        })
+                      }
+                    >
+                      Backfill dry-run
+                    </Button>
+                    <Button
+                      type="button"
+                      className="h-8 px-3 text-xs"
+                      disabled={pending}
+                      onClick={() =>
+                        void runAction(async () => {
+                          const result = await api.leaderboardParticipantsBackfill({ dryRun: false });
+                          const summary = `Bound ${result.bound}, already ${result.alreadyBound}, skipped ${result.skipped}, failed ${result.failed}`;
+                          setBackfillSummary(summary);
+                          toast.success("Backfill complete.");
+                        })
+                      }
+                    >
+                      Run backfill
+                    </Button>
+                  </div>
+                  {backfillSummary ? (
+                    <p className="text-xs text-muted-foreground">{backfillSummary}</p>
+                  ) : null}
+                </div>
               </div>
             )}
           </section>

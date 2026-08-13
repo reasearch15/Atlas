@@ -34,8 +34,18 @@ function createMemoryPrisma() {
   const settings: any[] = [];
   const payouts: any[] = [];
   const audits: any[] = [];
+  const playerLinks: any[] = [];
 
   const prisma = {
+    leaderboardBotPlayerLink: {
+      findFirst: async ({ where }: any) =>
+        playerLinks.find((l) => {
+          if (where.ownerCoadminUserId && l.ownerCoadminUserId !== where.ownerCoadminUserId) return false;
+          if (where.crmContactId && l.crmContactId !== where.crmContactId) return false;
+          if (where.botIntegrationId && l.botIntegrationId !== where.botIntegrationId) return false;
+          return true;
+        }) ?? null
+    },
     leaderboardBotIntegration: {
       findUnique: async ({ where }: any) =>
         integrations.find((r) => r.ownerCoadminUserId === where.ownerCoadminUserId) ?? null,

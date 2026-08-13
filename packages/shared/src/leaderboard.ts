@@ -19,6 +19,58 @@ export interface LeaderboardCurrentBoardDto {
   readonly prizePoolCents: number;
 }
 
+export interface LeaderboardWheelStatusDto {
+  readonly wheelEnabled: boolean;
+  readonly configured: boolean;
+  readonly competitionId: string | null;
+  readonly competitionStatus: string | null;
+  readonly cycleSequence: number | null;
+  readonly cycleStartsAt: string | null;
+  readonly cycleEndsAt: string | null;
+  readonly qualifyingDepositCents: number;
+  readonly qualificationCentsRequired: number;
+  readonly available: boolean;
+  readonly consumed: boolean;
+  readonly pointsAwarded: number | null;
+  readonly qualificationInvalidated: boolean;
+  readonly wheelPoints: number;
+  readonly reasonCode: string | null;
+}
+
+export type LeaderboardWheelQualificationCreditPolicy =
+  | "UNSET"
+  | "CYCLE_DEPOSITS_ALL"
+  | "CYCLE_DEPOSITS_AFTER_ENABLE";
+
+export interface LeaderboardWheelSettingsDto {
+  readonly enabled: boolean;
+  readonly qualificationCreditPolicy: LeaderboardWheelQualificationCreditPolicy;
+  readonly enabledAt: string | null;
+  readonly activeVersionId: string | null;
+  readonly needsConfiguration: boolean;
+  readonly versions: readonly LeaderboardWheelConfigVersionDto[];
+}
+
+export interface LeaderboardWheelConfigVersionDto {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly createdByUserId: string;
+  readonly activatedAt: string | null;
+  readonly distribution: readonly { readonly points: number; readonly weight: number }[];
+  readonly isActive: boolean;
+}
+
+export interface LeaderboardWheelSpinResultDto {
+  readonly pointsAwarded: number;
+  readonly totalPoints: number;
+  readonly wheelPoints: number;
+  readonly previousRank: number | null;
+  readonly resultingRank: number | null;
+  readonly cycleSequence: number;
+  readonly replay: boolean;
+  readonly spinId: string;
+}
+
 export interface LeaderboardPlayerStatusDto {
   readonly bound: boolean;
   readonly crmContactId: string;
@@ -28,11 +80,13 @@ export interface LeaderboardPlayerStatusDto {
   readonly depositPoints: number | null;
   readonly referralPoints: number | null;
   readonly promotionPoints: number | null;
+  readonly wheelPoints: number | null;
   readonly qualifyingDepositCents: number | null;
   readonly successfulReferralCount: number | null;
   readonly lastEventAt: string | null;
   readonly lastEventReason: string | null;
   readonly unboundReason?: "PARTICIPANT_NOT_BOUND" | null;
+  readonly wheel?: LeaderboardWheelStatusDto | null;
 }
 
 export interface LeaderboardStandingRowDto {
@@ -45,6 +99,7 @@ export interface LeaderboardStandingRowDto {
   readonly depositPoints: number;
   readonly referralPoints: number;
   readonly promotionPoints: number;
+  readonly wheelPoints: number;
   readonly qualifyingDepositCents: number;
   readonly successfulReferralCount: number;
   readonly lastEventAt: string | null;
@@ -206,6 +261,11 @@ export interface LeaderboardTelegramIntegrationDto {
   readonly lastError: string | null;
   readonly hasPersistentMessage: boolean;
   readonly disconnectWarning: string | null;
+  /** Deep link to this coadmin's bot when username is known. */
+  readonly botDeepLink: string | null;
+  readonly webhookRegisteredAt: string | null;
+  readonly lastInboundAt: string | null;
+  readonly webhookConfigured: boolean;
 }
 
 export interface LeaderboardCompetitionReviewDto {

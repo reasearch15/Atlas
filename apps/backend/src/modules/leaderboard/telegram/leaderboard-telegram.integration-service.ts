@@ -1,4 +1,5 @@
-import type { Prisma, PrismaClient } from "@prisma/client";
+import { randomBytes } from "node:crypto";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import type { LeaderboardTelegramIntegrationDto } from "@atlas/shared";
 import {
   decryptSecret,
@@ -20,6 +21,8 @@ export interface LeaderboardTelegramIntegrationDeps {
   readonly client?: LeaderboardTelegramClient;
   readonly outbox?: LeaderboardTelegramOutboxService;
   readonly audit?: AuditService;
+  /** Public HTTPS origin for webhook registration (optional). */
+  readonly webhookBaseUrl?: string | null;
 }
 
 /**
@@ -31,6 +34,7 @@ export class LeaderboardTelegramIntegrationService {
   private readonly client: LeaderboardTelegramClient;
   private readonly outbox: LeaderboardTelegramOutboxService | undefined;
   private readonly audit: AuditService;
+  private readonly webhookBaseUrl: string | null;
 
   public constructor(deps: LeaderboardTelegramIntegrationDeps) {
     this.prisma = deps.prisma;
@@ -38,6 +42,7 @@ export class LeaderboardTelegramIntegrationService {
     this.client = deps.client ?? new HttpLeaderboardTelegramClient();
     this.outbox = deps.outbox;
     this.audit = deps.audit ?? new AuditService(deps.prisma);
+    this.webhookBaseUrl = deps.webhookBaseUrl?.replace(/\/$/, "") ?? null;
   }
 
   public async getIntegration(
@@ -120,7 +125,8 @@ export class LeaderboardTelegramIntegrationService {
       }
     });
 
-    return toDto(row, null);
+    const withWebhook = await this.maybeRegisterWebhook(row.id, trimmed);
+    return toDto(withWebhook ?? row, null);
   }
 
   public async testConnection(
@@ -131,7 +137,7 @@ export class LeaderboardTelegramIntegrationService {
     const token = this.decryptToken(row.encryptedBotToken);
     try {
       const me = await this.client.getMe(token);
-      const updated = await this.prisma.leaderboardBotIntegration.update({
+      let updated = await this.prisma.leaderboardBotIntegration.update({
         where: { id: row.id },
         data: {
           lastVerifiedAt: new Date(),
@@ -141,6 +147,8 @@ export class LeaderboardTelegramIntegrationService {
           lastError: null
         }
       });
+      const withWebhook = await this.maybeRegisterWebhook(updated.id, token);
+      if (withWebhook) updated = withWebhook;
       return toDto(updated, await this.disconnectWarning(workspaceId, ownerCoadminUserId));
     } catch (error) {
       const message = error instanceof LeaderboardTelegramApiError ? error.description : "getMe failed";
@@ -150,6 +158,30 @@ export class LeaderboardTelegramIntegrationService {
       });
       throw mapConnectError(error);
     }
+  }
+
+  public async registerWebhook(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    actorUserId: string
+  ): Promise<LeaderboardTelegramIntegrationDto> {
+    const row = await this.requireConnected(workspaceId, ownerCoadminUserId);
+    if (!this.webhookBaseUrl) {
+      throw new AppError(
+        400,
+        "WEBHOOK_BASE_URL_MISSING",
+        "LEADERBOARD_BOT_WEBHOOK_BASE_URL is not configured on this server."
+      );
+    }
+    const token = this.decryptToken(row.encryptedBotToken);
+    const updated = await this.registerWebhookForIntegration(row.id, token);
+    await this.audit.record({
+      workspaceId,
+      actorId: actorUserId,
+      action: "leaderboard.telegram.webhook_registered",
+      metadata: { ownerCoadminUserId, integrationId: row.id }
+    });
+    return toDto(updated, await this.disconnectWarning(workspaceId, ownerCoadminUserId));
   }
 
   public async rotateToken(
@@ -371,6 +403,15 @@ export class LeaderboardTelegramIntegrationService {
 
     // Overwrite ciphertext so plaintext token is never recoverable from this row.
     const scrubbed = encryptSecret(`disconnected:${row.id}`, this.encryptionKey) as unknown as Prisma.InputJsonValue;
+    try {
+      const token = this.decryptToken(row.encryptedBotToken);
+      if (this.client.deleteWebhook) {
+        await this.client.deleteWebhook(token, false);
+      }
+    } catch {
+      // Best-effort webhook cleanup.
+    }
+
     await this.prisma.leaderboardBotIntegration.update({
       where: { id: row.id },
       data: {
@@ -386,6 +427,9 @@ export class LeaderboardTelegramIntegrationService {
         lastChannelVerifiedAt: null,
         persistentMessageId: null,
         persistentMessageCompetitionId: null,
+        encryptedWebhookSecret: Prisma.DbNull,
+        webhookRegisteredAt: null,
+        lastInboundAt: null,
         lastError: warning
       }
     });
@@ -423,6 +467,40 @@ export class LeaderboardTelegramIntegrationService {
     }
   }
 
+  private async maybeRegisterWebhook(integrationId: string, token: string) {
+    if (!this.webhookBaseUrl || !this.client.setWebhook) return null;
+    try {
+      return await this.registerWebhookForIntegration(integrationId, token);
+    } catch {
+      return null;
+    }
+  }
+
+  private async registerWebhookForIntegration(integrationId: string, token: string) {
+    if (!this.webhookBaseUrl) {
+      throw new AppError(
+        400,
+        "WEBHOOK_BASE_URL_MISSING",
+        "LEADERBOARD_BOT_WEBHOOK_BASE_URL is not configured on this server."
+      );
+    }
+    if (!this.client.setWebhook) {
+      throw new AppError(500, "WEBHOOK_UNSUPPORTED", "Telegram client does not support setWebhook.");
+    }
+    const secret = randomBytes(32).toString("hex");
+    const url = `${this.webhookBaseUrl}/api/leaderboard/telegram/webhook/${integrationId}`;
+    await this.client.setWebhook(token, url, secret);
+    const encrypted = encryptSecret(secret, this.encryptionKey) as unknown as Prisma.InputJsonValue;
+    return this.prisma.leaderboardBotIntegration.update({
+      where: { id: integrationId },
+      data: {
+        encryptedWebhookSecret: encrypted,
+        webhookRegisteredAt: new Date(),
+        lastError: null
+      }
+    });
+  }
+
   private async disconnectWarning(
     workspaceId: string,
     ownerCoadminUserId: string
@@ -458,12 +536,16 @@ function toDto(
     lastMembershipCheckAt: Date | null;
     lastError: string | null;
     persistentMessageId: string | null;
+    webhookRegisteredAt?: Date | null;
+    lastInboundAt?: Date | null;
+    encryptedWebhookSecret?: unknown;
   },
   disconnectWarning: string | null
 ): LeaderboardTelegramIntegrationDto {
+  const botUsername = row.botUsername;
   return {
     connected: row.disconnectedAt == null,
-    botUsername: row.botUsername,
+    botUsername,
     botDisplayName: row.botDisplayName,
     botTelegramUserId: row.botTelegramUserId,
     channelId: row.channelId,
@@ -478,7 +560,11 @@ function toDto(
     lastMembershipCheckAt: row.lastMembershipCheckAt?.toISOString() ?? null,
     lastError: row.lastError,
     hasPersistentMessage: row.persistentMessageId != null,
-    disconnectWarning
+    disconnectWarning,
+    botDeepLink: botUsername ? `https://t.me/${botUsername.replace(/^@/, "")}?start=rank` : null,
+    webhookRegisteredAt: row.webhookRegisteredAt?.toISOString() ?? null,
+    lastInboundAt: row.lastInboundAt?.toISOString() ?? null,
+    webhookConfigured: row.encryptedWebhookSecret != null && row.webhookRegisteredAt != null
   };
 }
 
@@ -500,7 +586,11 @@ function emptyIntegrationDto(disconnectWarning: string | null): LeaderboardTeleg
     lastMembershipCheckAt: null,
     lastError: null,
     hasPersistentMessage: false,
-    disconnectWarning
+    disconnectWarning,
+    botDeepLink: null,
+    webhookRegisteredAt: null,
+    lastInboundAt: null,
+    webhookConfigured: false
   };
 }
 

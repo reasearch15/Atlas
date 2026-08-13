@@ -51,7 +51,20 @@ const envSchema = z
     FIREBASE_WEB_APP_ID: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
     FIREBASE_VAPID_KEY: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(1).optional()),
     /** How long pending customer notifications remain retryable (default 7 days). */
-    NOTIFICATION_TTL_HOURS: z.coerce.number().int().positive().default(168)
+    NOTIFICATION_TTL_HOURS: z.coerce.number().int().positive().default(168),
+    /**
+     * Public HTTPS origin of atlas-backend for Telegram bot webhooks
+     * (e.g. https://api.example.com). When set, leaderboard bots register webhooks.
+     */
+    LEADERBOARD_BOT_WEBHOOK_BASE_URL: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().url().optional()
+    ),
+    /** Local/dev only: poll getUpdates when webhook base URL is unset. */
+    LEADERBOARD_BOT_POLLING: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true")
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV !== "production") {

@@ -101,6 +101,7 @@ describe("applyStandingFilterRows", () => {
       depositPoints: 0,
       referralPoints: 0,
       promotionPoints: 0,
+      wheelPoints: 0,
       qualifyingDepositCents: 0,
       successfulReferralCount: i === 2 ? 3 : 0,
       lastEventAt: i === 5 ? new Date("2026-08-01T00:00:00Z") : null,

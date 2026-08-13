@@ -6,10 +6,12 @@ import {
   leaderboardDepositBodySchema,
   leaderboardEligibilityBodySchema,
   leaderboardEnabledBodySchema,
+  leaderboardEnsureAutoBindBodySchema,
   leaderboardEventParamsSchema,
   leaderboardEventsQuerySchema,
   leaderboardFinalizeBodySchema,
   leaderboardGiveInfoBodySchema,
+  leaderboardParticipantsBackfillBodySchema,
   leaderboardPayoutMarkBodySchema,
   leaderboardPayoutParamsSchema,
   leaderboardPlayerSearchQuerySchema,
@@ -24,7 +26,11 @@ import {
   leaderboardTelegramConnectBodySchema,
   leaderboardTelegramDisconnectBodySchema,
   leaderboardTelegramPostingBodySchema,
-  leaderboardTelegramRotateTokenBodySchema
+  leaderboardTelegramRotateTokenBodySchema,
+  leaderboardWheelConfigVersionBodySchema,
+  leaderboardWheelSettingsPatchSchema,
+  leaderboardWheelSpinBodySchema,
+  leaderboardWheelVersionParamsSchema
 } from "@atlas/shared";
 import { AppError } from "../../utils/errors";
 import { LeaderboardError } from "./leaderboard.errors";
@@ -45,11 +51,18 @@ import {
   leaderboardReverseGuard,
   leaderboardSettingsGuard,
   leaderboardTelegramManageGuard,
-  leaderboardTelegramVerifyGuard
+  leaderboardTelegramVerifyGuard,
+  leaderboardWheelManageGuard,
+  leaderboardWheelSpinGuard
 } from "./leaderboard.permissions";
+import type { InboundTelegramUpdate } from "./telegram/bot-update-handler";
 
 const bindBodySchema = z.object({
   crmContactId: z.string().uuid()
+});
+
+const webhookParamsSchema = z.object({
+  integrationId: z.string().uuid()
 });
 
 const eligibilityParamsSchema = z.object({
@@ -77,6 +90,40 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
       throw error;
     }
   };
+
+  // Telegram webhook — NO cookie/session auth (Telegram calls this).
+  app.post("/telegram/webhook/:integrationId", async (request, reply) => {
+    const params = webhookParamsSchema.parse(request.params);
+    const handler = (
+      app as FastifyInstance & {
+        leaderboardBotUpdateHandler?: {
+          handleWebhook: (input: {
+            integrationId: string;
+            secretHeader: string | undefined;
+            update: InboundTelegramUpdate;
+          }) => Promise<
+            | { ok: true; duplicate?: boolean }
+            | { ok: false; status: number; code: string }
+          >;
+        };
+      }
+    ).leaderboardBotUpdateHandler;
+
+    if (!handler) {
+      return reply.code(503).send({ ok: false, code: "BOT_HANDLER_UNAVAILABLE" });
+    }
+
+    const secretHeader = request.headers["x-telegram-bot-api-secret-token"];
+    const result = await handler.handleWebhook({
+      integrationId: params.integrationId,
+      secretHeader: typeof secretHeader === "string" ? secretHeader : undefined,
+      update: request.body as InboundTelegramUpdate
+    });
+    if (!result.ok) {
+      return reply.code(result.status).send({ ok: false, code: result.code });
+    }
+    return reply.code(200).send({ ok: true });
+  });
 
   app.get("/current", { preHandler: [leaderboardReadGuard(app)] }, async (request) =>
     handle(() => service.getCurrentBoard(request.user!))
@@ -118,6 +165,26 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
       const body = bindBodySchema.parse(request.body);
       return service.bindParticipant(request.user!, body.crmContactId);
     })
+  );
+
+  app.post(
+    "/participants/ensure-auto-bind",
+    { preHandler: [leaderboardBindGuard(app)] },
+    async (request) =>
+      handle(async () => {
+        const body = leaderboardEnsureAutoBindBodySchema.parse(request.body);
+        return service.ensureAutoBindForContact(request.user!, body.crmContactId);
+      })
+  );
+
+  app.post(
+    "/participants/backfill",
+    { preHandler: [leaderboardBindGuard(app)] },
+    async (request) =>
+      handle(async () => {
+        const body = leaderboardParticipantsBackfillBodySchema.parse(request.body ?? {});
+        return service.backfillParticipants(request.user!, body.dryRun);
+      })
   );
 
   app.post("/deposits", { preHandler: [leaderboardDepositGuard(app)] }, async (request) =>
@@ -330,6 +397,12 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.post(
+    "/telegram-integration/register-webhook",
+    { preHandler: [leaderboardTelegramManageGuard(app)] },
+    async (request) => handle(() => service.registerTelegramWebhook(request.user!))
+  );
+
+  app.post(
     "/telegram-integration/rotate-token",
     { preHandler: [leaderboardTelegramManageGuard(app)] },
     async (request) =>
@@ -382,6 +455,64 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
       handle(async () => {
         const params = leaderboardCompetitionParamsSchema.parse(request.params);
         return service.enqueueVerifyMembership(request.user!, params.competitionId);
+      })
+  );
+
+  // --- Phase 6 Wheel (Atlas UI spin; bot Spin callback DEFERRED) ---
+
+  app.get(
+    "/wheel/status/:crmContactId",
+    { preHandler: [leaderboardReadGuard(app)] },
+    async (request) =>
+      handle(async () => {
+        const params = leaderboardContactParamsSchema.parse(request.params);
+        return service.getWheelStatus(request.user!, params.crmContactId);
+      })
+  );
+
+  app.post("/wheel/spin", { preHandler: [leaderboardWheelSpinGuard(app)] }, async (request) =>
+    handle(async () => {
+      const body = leaderboardWheelSpinBodySchema.parse(request.body);
+      return service.spinWheel(request.user!, body);
+    })
+  );
+
+  app.get("/wheel/settings", { preHandler: [leaderboardWheelManageGuard(app)] }, async (request) =>
+    handle(() => service.getWheelSettings(request.user!))
+  );
+
+  app.post(
+    "/wheel/config/ensure-approved",
+    { preHandler: [leaderboardWheelManageGuard(app)] },
+    async (request) => handle(() => service.ensureApprovedWheelDistribution(request.user!))
+  );
+
+  app.patch("/wheel/settings", { preHandler: [leaderboardWheelManageGuard(app)] }, async (request) =>
+    handle(async () => {
+      const body = leaderboardWheelSettingsPatchSchema.parse(request.body);
+      return service.patchWheelSettings(request.user!, {
+        ...(body.enabled !== undefined ? { enabled: body.enabled } : {})
+      });
+    })
+  );
+
+  app.post(
+    "/wheel/config/versions",
+    { preHandler: [leaderboardWheelManageGuard(app)] },
+    async (request) =>
+      handle(async () => {
+        const body = leaderboardWheelConfigVersionBodySchema.parse(request.body);
+        return service.createWheelConfigVersion(request.user!, body.distribution);
+      })
+  );
+
+  app.post(
+    "/wheel/config/versions/:id/activate",
+    { preHandler: [leaderboardWheelManageGuard(app)] },
+    async (request) =>
+      handle(async () => {
+        const params = leaderboardWheelVersionParamsSchema.parse(request.params);
+        return service.activateWheelConfigVersion(request.user!, params.id);
       })
   );
 }

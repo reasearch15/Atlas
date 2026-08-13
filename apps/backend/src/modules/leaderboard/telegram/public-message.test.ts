@@ -54,6 +54,31 @@ describe("formatPublicLeaderboardMessage", () => {
     expect(text).not.toMatch(/\b200\b|\b300\b|\b400\b|\b500\b/);
   });
 
+  it("appends personal rank CTA when botUsername is provided", () => {
+    const text = formatPublicLeaderboardMessage({
+      title: "BIWEEKLY LEADERBOARD",
+      top10: [{ rank: 1, displayName: "John", points: 100 }],
+      prizePoolCents: 1000,
+      endsAt,
+      timezone: "America/Chicago",
+      botUsername: "AtlasBoardBot"
+    });
+    expect(text).toContain(
+      "➡️ Check your personal rank: https://t.me/AtlasBoardBot?start=rank"
+    );
+  });
+
+  it("omits personal rank CTA when botUsername is missing", () => {
+    const text = formatPublicLeaderboardMessage({
+      title: "BIWEEKLY LEADERBOARD",
+      top10: [{ rank: 1, displayName: "John", points: 100 }],
+      prizePoolCents: 1000,
+      endsAt,
+      timezone: "America/Chicago"
+    });
+    expect(text).not.toContain("t.me/");
+  });
+
   it("sanitizes unsafe display names in public posts", () => {
     const text = formatPublicLeaderboardMessage({
       title: "BIWEEKLY LEADERBOARD",

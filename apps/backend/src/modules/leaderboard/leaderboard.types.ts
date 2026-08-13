@@ -6,7 +6,8 @@ export type EventType =
   | "REFERRAL_MILESTONE_REVERSAL"
   | "PROMOTION"
   | "PROMOTION_REVERSAL"
-  | "MANUAL_ADJUSTMENT";
+  | "MANUAL_ADJUSTMENT"
+  | "WHEEL_SPIN";
 export type MilestoneCode = "FIRST_10" | "CUM_50" | "CUM_100" | "CUM_250";
 export type MilestoneStatus = "ACTIVE" | "REVERSED";
 export type PayoutStatus = "UNPAID" | "PAID" | "VOID";
@@ -81,6 +82,7 @@ export interface StandingRow {
   depositPoints: number;
   referralPoints: number;
   promotionPoints: number;
+  wheelPoints: number;
   qualifyingDepositCents: number;
   successfulReferralCount: number;
   pointsReachedAt: Date;
