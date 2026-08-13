@@ -1,6 +1,10 @@
 /**
  * Conservative public channel announcement policy.
  * Announce threshold crossings and Top 3 reorders — never every point tick.
+ *
+ * Initialization / zero-standing materialization is NOT an achievement:
+ * - empty previous snapshot (first board post / new competition baseline)
+ * - players still at 0 total points (seeded standings, bind-while-active)
  */
 
 export type AnnouncementKind =
@@ -38,17 +42,29 @@ const KIND_PRIORITY: Record<AnnouncementKind, number> = {
 
 /**
  * Diff previous vs next Top 10 snapshots and return meaningful announcement events only.
+ *
+ * `prevTop10` empty means baseline materialization (enable seed, first refresh, new
+ * competition) — never emit unranked→#N / Top 10 / Top 3 / #1 achievements.
  */
 export function detectRankAnnouncements(
   prevTop10: readonly AnnouncementStandingRow[],
   nextTop10: readonly AnnouncementStandingRow[]
 ): AnnouncementEvent[] {
+  // First public snapshot / competition baseline: display ranks exist, achievements do not.
+  if (prevTop10.length === 0) {
+    return [];
+  }
+
   const prevById = indexByContact(prevTop10);
   const nextOrdered = [...nextTop10].sort((a, b) => a.rank - b.rank);
   const events: AnnouncementEvent[] = [];
 
   for (const row of nextOrdered) {
     if (row.rank < 1 || row.rank > 10) continue;
+
+    // Zero-point display ranks (everyone tied at 0, or newly seeded standing) are not achievements.
+    if ((row.totalPoints ?? 0) <= 0) continue;
+
     const prev = prevById.get(row.crmContactId);
     const fromRank = prev?.rank ?? null;
     const toRank = row.rank;
@@ -164,4 +180,40 @@ function gapToRankAbove(
   const above = ordered.find((r) => r.rank === rank - 1);
   if (above?.totalPoints == null) return null;
   return Math.max(0, above.totalPoints - totalPoints);
+}
+
+/**
+ * Only diff against the prior snapshot for the SAME competition.
+ * A new competition (or missing prior competition id) is baseline materialization.
+ */
+export function previousTop10ForAnnouncements(
+  persistentMessageCompetitionId: string | null | undefined,
+  competitionId: string,
+  lastPublicTop10Json: unknown
+): AnnouncementStandingRow[] {
+  if (
+    persistentMessageCompetitionId != null &&
+    persistentMessageCompetitionId !== competitionId
+  ) {
+    return [];
+  }
+  return parsePostedTop10Snapshot(lastPublicTop10Json);
+}
+
+export function parsePostedTop10Snapshot(value: unknown): AnnouncementStandingRow[] {
+  if (!Array.isArray(value)) return [];
+  const rows: AnnouncementStandingRow[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.crmContactId !== "string" || typeof row.rank !== "number") continue;
+    const parsed: AnnouncementStandingRow = {
+      crmContactId: row.crmContactId,
+      rank: row.rank,
+      displayName: typeof row.displayName === "string" ? row.displayName : "Player",
+      ...(typeof row.totalPoints === "number" ? { totalPoints: row.totalPoints } : {})
+    };
+    rows.push(parsed);
+  }
+  return rows;
 }

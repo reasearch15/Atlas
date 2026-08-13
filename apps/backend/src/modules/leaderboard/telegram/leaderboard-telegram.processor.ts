@@ -7,7 +7,7 @@ import { AuditService } from "../../audit/audit.service";
 import { LEADERBOARD_TIMEZONE } from "../leaderboard.constants";
 import { PrismaLeaderboardService } from "../leaderboard.prisma-service";
 import { withRanks } from "../ranking";
-import { detectRankAnnouncements } from "./announcement-policy";
+import { detectRankAnnouncements, previousTop10ForAnnouncements } from "./announcement-policy";
 import {
   HttpLeaderboardTelegramClient,
   LeaderboardTelegramApiError,
@@ -252,7 +252,11 @@ export class LeaderboardTelegramProcessor {
       messageId = String(sent.messageId);
     }
 
-    const prevTop10 = parsePostedTop10(integration.lastPublicTop10Json);
+    const prevTop10 = previousTop10ForAnnouncements(
+      integration.persistentMessageCompetitionId,
+      competition.id,
+      integration.lastPublicTop10Json
+    );
     const announcements =
       competition.status === "ACTIVE" ? detectRankAnnouncements(prevTop10, nextTop10) : [];
 
@@ -810,31 +814,4 @@ function permanentError(code: string, message: string): Error & { permanent: boo
 
 function truncate(value: string, max: number): string {
   return value.length <= max ? value : value.slice(0, max);
-}
-
-function parsePostedTop10(
-  value: unknown
-): Array<{ crmContactId: string; rank: number; displayName: string; totalPoints?: number }> {
-  if (!Array.isArray(value)) return [];
-  const rows: Array<{ crmContactId: string; rank: number; displayName: string; totalPoints?: number }> = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-    const row = item as Record<string, unknown>;
-    if (typeof row.crmContactId !== "string" || typeof row.rank !== "number") continue;
-    const parsed: {
-      crmContactId: string;
-      rank: number;
-      displayName: string;
-      totalPoints?: number;
-    } = {
-      crmContactId: row.crmContactId,
-      rank: row.rank,
-      displayName: typeof row.displayName === "string" ? row.displayName : "Player"
-    };
-    if (typeof row.totalPoints === "number") {
-      parsed.totalPoints = row.totalPoints;
-    }
-    rows.push(parsed);
-  }
-  return rows;
 }
