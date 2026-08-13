@@ -20,6 +20,36 @@ export function buildLeaderboardTelegramWakeJobId(outboxId: string, nowMs = Date
   return `lb-tg:${outboxId}:${nowMs}:${nonce}`.slice(0, 120);
 }
 
+/** Payload marker: mutations arrived while a refresh was already DISPATCHING. */
+export function isRefreshPayloadDirty(payload: unknown): boolean {
+  return (
+    payload != null &&
+    typeof payload === "object" &&
+    (payload as { dirty?: unknown }).dirty === true
+  );
+}
+
+export function mergeRefreshPayload(
+  previous: unknown,
+  next: Record<string, unknown>
+): Record<string, unknown> {
+  const prev = (previous ?? {}) as Record<string, unknown>;
+  const prevSkip = prev.skipRankAnnouncements === true;
+  const nextSkip = next.skipRankAnnouncements === true;
+  return {
+    ...next,
+    skipRankAnnouncements: prevSkip && nextSkip,
+    // Preserve dirty if already set; callers may force dirty=true for in-flight coalescing.
+    dirty: prev.dirty === true || next.dirty === true
+  };
+}
+
+export function clearRefreshDirty(payload: unknown): Record<string, unknown> {
+  const prev = (payload ?? {}) as Record<string, unknown>;
+  const { dirty: _dirty, ...rest } = prev;
+  return { ...rest, dirty: false };
+}
+
 export interface RankAnnouncementEnqueueInput {
   readonly workspaceId: string;
   readonly ownerCoadminUserId: string;
@@ -250,20 +280,18 @@ export class LeaderboardTelegramOutboxService {
       // Coalesce refresh payloads: announcements remain enabled if either enqueued wants them.
       let payloadJson = input.payloadJson;
       if (input.jobType === "REFRESH_PUBLIC_LEADERBOARD") {
-        const prev = (existing.payloadJson ?? {}) as Record<string, unknown>;
-        const prevSkip = prev.skipRankAnnouncements === true;
-        const nextSkip = input.payloadJson.skipRankAnnouncements === true;
-        payloadJson = {
+        payloadJson = mergeRefreshPayload(existing.payloadJson, {
           ...input.payloadJson,
-          skipRankAnnouncements: prevSkip && nextSkip
-        };
+          // In-flight DISPATCHING must not be stolen; mark dirty so completion re-queues.
+          ...(existing.status === "DISPATCHING" ? { dirty: true } : {})
+        });
       }
       await this.prisma.leaderboardTelegramOutbox.update({
         where: { id: existing.id },
         data: {
           payloadJson: payloadJson as Prisma.InputJsonValue,
-          // Re-open stuck DISPATCHING so atomic claim (QUEUED|RETRY_SCHEDULED only) can proceed.
-          ...(existing.status === "DISPATCHING"
+          // Only reopen stuck DISPATCHING when not using dirty-coalesce path for refresh.
+          ...(existing.status === "DISPATCHING" && input.jobType !== "REFRESH_PUBLIC_LEADERBOARD"
             ? { status: "QUEUED" as const, nextAttemptAt: null }
             : {})
         }
@@ -340,19 +368,16 @@ export class LeaderboardTelegramOutboxService {
       if ((PENDING_STATUSES as readonly string[]).includes(raced.status)) {
         let payloadJson = input.payloadJson;
         if (input.jobType === "REFRESH_PUBLIC_LEADERBOARD") {
-          const prev = (raced.payloadJson ?? {}) as Record<string, unknown>;
-          const prevSkip = prev.skipRankAnnouncements === true;
-          const nextSkip = input.payloadJson.skipRankAnnouncements === true;
-          payloadJson = {
+          payloadJson = mergeRefreshPayload(raced.payloadJson, {
             ...input.payloadJson,
-            skipRankAnnouncements: prevSkip && nextSkip
-          };
+            ...(raced.status === "DISPATCHING" ? { dirty: true } : {})
+          });
         }
         await this.prisma.leaderboardTelegramOutbox.update({
           where: { id: raced.id },
           data: {
             payloadJson: payloadJson as Prisma.InputJsonValue,
-            ...(raced.status === "DISPATCHING"
+            ...(raced.status === "DISPATCHING" && input.jobType !== "REFRESH_PUBLIC_LEADERBOARD"
               ? { status: "QUEUED" as const, nextAttemptAt: null }
               : {})
           }

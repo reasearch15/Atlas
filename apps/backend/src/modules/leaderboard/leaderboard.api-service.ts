@@ -60,6 +60,7 @@ import { resolveDeterministicLeaderboardOwner } from "./ownership-resolution";
 import { decidePlayerNotification } from "./telegram/player-notification-policy";
 import type { LeaderboardTelegramIntegrationService } from "./telegram/leaderboard-telegram.integration-service";
 import type { LeaderboardTelegramOutboxService } from "./telegram/leaderboard-telegram.outbox";
+import type { LeaderboardTelegramProcessor } from "./telegram/leaderboard-telegram.processor";
 import { PrismaWheelService } from "./wheel.prisma-service";
 import { createCryptoWheelRng, type WheelRng } from "./wheel-rng";
 import { formatPersonalAnnouncementDm } from "./telegram/personal-rank-message";
@@ -135,14 +136,17 @@ export class LeaderboardApiService {
   private readonly audit: AuditService;
   private readonly outbox: LeaderboardTelegramOutboxService | undefined;
   private readonly telegramIntegration: LeaderboardTelegramIntegrationService | undefined;
+  private readonly telegramProcessor: LeaderboardTelegramProcessor | undefined;
 
   public constructor(private readonly app: FastifyInstance) {
     const decorated = app as FastifyInstance & {
       leaderboardTelegramOutbox?: LeaderboardTelegramOutboxService;
       leaderboardTelegramIntegration?: LeaderboardTelegramIntegrationService;
+      leaderboardTelegramProcessor?: LeaderboardTelegramProcessor;
     };
     this.outbox = decorated.leaderboardTelegramOutbox;
     this.telegramIntegration = decorated.leaderboardTelegramIntegration;
+    this.telegramProcessor = decorated.leaderboardTelegramProcessor;
     this.domain = new PrismaLeaderboardService(app.prisma, {
       projectionHooks: {
         onFrozen: async (info) => {
@@ -166,7 +170,35 @@ export class LeaderboardApiService {
   ): Promise<void> {
     if (!this.outbox || !competitionId) return;
     try {
-      await this.outbox.enqueueRefresh(workspaceId, ownerCoadminUserId, competitionId);
+      const outboxId = await this.outbox.enqueueRefresh(workspaceId, ownerCoadminUserId, competitionId);
+      this.app.log.info(
+        { workspaceId, ownerCoadminUserId, competitionId, outboxId },
+        "leaderboard.refresh.enqueued"
+      );
+      this.app.log.info(
+        { workspaceId, ownerCoadminUserId, competitionId, outboxId },
+        "leaderboard.refresh.woken"
+      );
+
+      // Post-commit immediate delivery — do not wait for BullMQ/maintenance.
+      // BullMQ wake remains for crash recovery; atomic claim prevents double Telegram posts.
+      if (this.telegramProcessor) {
+        try {
+          await this.telegramProcessor.processJob(outboxId);
+        } catch (error) {
+          this.app.log.warn(
+            {
+              err: error,
+              workspaceId,
+              ownerCoadminUserId,
+              competitionId,
+              outboxId
+            },
+            "leaderboard.refresh.immediate_process_failed"
+          );
+        }
+      }
+
       const frozenPending = await this.app.prisma.leaderboardCompetition.findFirst({
         where: {
           workspaceId,
@@ -179,8 +211,11 @@ export class LeaderboardApiService {
       if (frozenPending) {
         await this.outbox.enqueueVerifyMembership(workspaceId, ownerCoadminUserId, frozenPending.id);
       }
-    } catch {
-      // Projection must not fail the domain mutation response.
+    } catch (error) {
+      this.app.log.warn(
+        { err: error, workspaceId, ownerCoadminUserId, competitionId },
+        "leaderboard.refresh.projection_failed"
+      );
     }
   }
 

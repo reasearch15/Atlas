@@ -13,7 +13,11 @@ import {
 import { mapTelegramChatMemberStatus } from "./membership-status";
 import { planMembershipVerification } from "./membership-verify-plan";
 import type { LeaderboardTelegramOutboxService } from "./leaderboard-telegram.outbox";
-import { CLAIMABLE_OUTBOX_STATUSES } from "./leaderboard-telegram.outbox";
+import {
+  CLAIMABLE_OUTBOX_STATUSES,
+  clearRefreshDirty,
+  isRefreshPayloadDirty
+} from "./leaderboard-telegram.outbox";
 import {
   formatPublicResultsMessage,
   formatRankAnnouncement
@@ -65,7 +69,7 @@ export class LeaderboardTelegramProcessor {
     this.logger = deps.logger;
   }
 
-  public async processJob(jobId: string): Promise<void> {
+  public async processJob(jobId: string, requeueDepth = 0): Promise<void> {
     // Atomic claim — duplicate BullMQ wakes for the same outbox row must not double-deliver.
     const claimed = await this.prisma.leaderboardTelegramOutbox.updateMany({
       where: {
@@ -78,12 +82,29 @@ export class LeaderboardTelegramProcessor {
         nextAttemptAt: null
       }
     });
-    if (claimed.count !== 1) return;
+    if (claimed.count !== 1) {
+      this.logger?.info(
+        { outboxId: jobId, jobType: "claim_skipped" },
+        "leaderboard.refresh.claim_skipped"
+      );
+      return;
+    }
 
     const row = await this.prisma.leaderboardTelegramOutbox.findUnique({ where: { id: jobId } });
     if (!row) return;
 
     const attempt = row.attemptCount;
+    this.logger?.info(
+      {
+        outboxId: row.id,
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        competitionId: row.competitionId,
+        jobType: row.jobType,
+        attempt
+      },
+      "leaderboard.refresh.claimed"
+    );
 
     const integration = await this.prisma.leaderboardBotIntegration.findUnique({
       where: { ownerCoadminUserId: row.ownerCoadminUserId }
@@ -105,7 +126,25 @@ export class LeaderboardTelegramProcessor {
     try {
       switch (row.jobType) {
         case "REFRESH_PUBLIC_LEADERBOARD":
+          this.logger?.info(
+            {
+              outboxId: row.id,
+              workspaceId: row.workspaceId,
+              ownerCoadminUserId: row.ownerCoadminUserId,
+              competitionId: row.competitionId
+            },
+            "leaderboard.refresh.telegram_edit_started"
+          );
           await this.processRefresh(row, integration, token);
+          this.logger?.info(
+            {
+              outboxId: row.id,
+              workspaceId: row.workspaceId,
+              ownerCoadminUserId: row.ownerCoadminUserId,
+              competitionId: row.competitionId
+            },
+            "leaderboard.refresh.telegram_edit_succeeded"
+          );
           break;
         case "VERIFY_MEMBERSHIP":
           await this.processVerifyMembership(row, integration, token);
@@ -130,19 +169,62 @@ export class LeaderboardTelegramProcessor {
           return;
       }
 
-      await this.prisma.leaderboardTelegramOutbox.update({
-        where: { id: row.id },
-        data: {
-          status: "SUCCEEDED",
-          succeededAt: new Date(),
-          lastErrorCode: null,
-          lastErrorMessage: null,
-          nextAttemptAt: null
-        }
-      });
+      await this.completeOrRequeue(row.id, row.jobType, requeueDepth);
     } catch (error) {
       await this.handleFailure(row.id, integration.id, attempt, error);
     }
+  }
+
+  /**
+   * Mark SUCCEEDED only while still DISPATCHING.
+   * If a scoring mutation dirtied the payload mid-flight, re-arm QUEUED and wake again
+   * so the canonical board converges to the latest committed DB state.
+   */
+  private async completeOrRequeue(outboxId: string, jobType: string, requeueDepth = 0): Promise<void> {
+    const latest = await this.prisma.leaderboardTelegramOutbox.findUnique({ where: { id: outboxId } });
+    if (!latest || latest.status !== "DISPATCHING") return;
+
+    if (jobType === "REFRESH_PUBLIC_LEADERBOARD" && isRefreshPayloadDirty(latest.payloadJson)) {
+      await this.prisma.leaderboardTelegramOutbox.updateMany({
+        where: { id: outboxId, status: "DISPATCHING" },
+        data: {
+          status: "QUEUED",
+          payloadJson: clearRefreshDirty(latest.payloadJson) as Prisma.InputJsonValue,
+          nextAttemptAt: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          succeededAt: null
+        }
+      });
+      this.logger?.info(
+        {
+          outboxId,
+          workspaceId: latest.workspaceId,
+          ownerCoadminUserId: latest.ownerCoadminUserId,
+          competitionId: latest.competitionId
+        },
+        "leaderboard.refresh.requeued_dirty"
+      );
+      await this.outbox.wake(outboxId, 0);
+      // Immediate second pass so rapid deposits converge without waiting on BullMQ.
+      // Cap recursion; further dirties still wake BullMQ / maintenance for recovery.
+      if (requeueDepth < 8) {
+        await this.processJob(outboxId, requeueDepth + 1);
+      }
+      return;
+    }
+
+    await this.prisma.leaderboardTelegramOutbox.updateMany({
+      where: { id: outboxId, status: "DISPATCHING" },
+      data: {
+        status: "SUCCEEDED",
+        succeededAt: new Date(),
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        nextAttemptAt: null,
+        payloadJson: clearRefreshDirty(latest.payloadJson) as Prisma.InputJsonValue
+      }
+    });
   }
 
   private async processRefresh(
@@ -697,6 +779,10 @@ export class LeaderboardTelegramProcessor {
       where: { id: integrationId },
       data: { lastError: truncate(message, 500) }
     });
+    this.logger?.warn(
+      { outboxId, integrationId, code, attempt, nextAttemptAt },
+      "leaderboard.refresh.retry_scheduled"
+    );
     await this.outbox.wake(outboxId, backoffMs);
   }
 

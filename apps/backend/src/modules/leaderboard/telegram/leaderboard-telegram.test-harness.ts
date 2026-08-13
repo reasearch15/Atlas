@@ -105,6 +105,7 @@ export function createMemoryPrisma() {
         for (const row of outbox) {
           if (where.id && row.id !== where.id) continue;
           if (where.ownerCoadminUserId && row.ownerCoadminUserId !== where.ownerCoadminUserId) continue;
+          if (typeof where.status === "string" && row.status !== where.status) continue;
           if (where.status?.in && !where.status.in.includes(row.status)) continue;
           for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
             if (value && typeof value === "object" && value !== null && "increment" in value) {
