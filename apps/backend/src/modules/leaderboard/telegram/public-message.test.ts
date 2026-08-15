@@ -191,10 +191,10 @@ describe("public leaderboard caption + keyboard", () => {
   it("builds PLAY and My Rank URL buttons on one row", () => {
     const kb = buildPublicLeaderboardKeyboard("AtlasBoardBot", "@officialsayugaming");
     expect(kb).toEqual({
-      inline_keyboard: [[
-        { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
-        { text: "🏆 My Rank / 🎡 Lucky Wheel", url: "https://t.me/AtlasBoardBot?start=rank" }
-      ]]
+      inline_keyboard: [
+        [{ text: "🔴 PLAY", url: "https://t.me/officialsayugaming" }],
+        [{ text: "🏆 My Rank / 🎡 Lucky Wheel", url: "https://t.me/AtlasBoardBot?start=rank" }]
+      ]
     });
   });
 

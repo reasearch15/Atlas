@@ -198,13 +198,13 @@ export function buildPublicLeaderboardKeyboard(
 ): TelegramInlineKeyboardMarkup | null {
   const user = normalizeBotUsername(botUsername);
   const playButton = buildPlayTelegramButton(playTelegramUsername);
-  const row = [
-    ...(playButton ? [playButton] : []),
-    ...(user ? [{ text: "🏆 My Rank / 🎡 Lucky Wheel", url: `https://t.me/${user}?start=rank` }] : [])
+  const rows = [
+    ...(playButton ? [[playButton]] : []),
+    ...(user ? [[{ text: "🏆 My Rank / 🎡 Lucky Wheel", url: `https://t.me/${user}?start=rank` }]] : [])
   ];
-  if (row.length === 0) return null;
+  if (rows.length === 0) return null;
   return {
-    inline_keyboard: [row]
+    inline_keyboard: rows
   };
 }
 
