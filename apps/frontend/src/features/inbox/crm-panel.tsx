@@ -5,7 +5,8 @@ import type {
   CrmAssigneeDto,
   CrmConversationPanelDto,
   CrmConversationStatus,
-  CrmTagDto
+  CrmTagDto,
+  FreeplayPanelDto
 } from "@atlas/shared";
 import { PanelRightClose } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
@@ -204,6 +205,15 @@ export function CrmPanel({ state, identity, avatarColor, onClose, embedded = fal
               role={user?.role}
             />
 
+            <FreeplaySection
+              freeplay={panel.freeplay}
+              busy={busy}
+              onClaim={async (claimId) => {
+                await api.freeplayClaim(claimId);
+                await state.refresh();
+              }}
+            />
+
             <Section title="Contact details">
               <div className="space-y-1 text-sm">
                 {identity.firstName || identity.lastName ? (
@@ -378,6 +388,85 @@ function Section({ title, hint, children }: { readonly title: string; readonly h
       {children}
     </section>
   );
+}
+
+function FreeplaySection({
+  freeplay,
+  busy,
+  onClaim
+}: {
+  readonly freeplay: FreeplayPanelDto | null;
+  readonly busy: boolean;
+  readonly onClaim: (claimId: string) => Promise<void>;
+}) {
+  const [claimingId, setClaimingId] = useState<string | null>(null);
+  if (!freeplay) return null;
+  const activeClaim = freeplay.claims.find((claim) => claim.status === "UNCLAIMED") ?? null;
+  const recentClaimed = freeplay.claims.filter((claim) => claim.status === "CLAIMED").slice(0, 3);
+  const capped = freeplay.playerStatus === "ROLLING_LIMIT";
+
+  async function claim(claimId: string): Promise<void> {
+    setClaimingId(claimId);
+    try {
+      await onClaim(claimId);
+    } finally {
+      setClaimingId(null);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-2.5">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-emerald-900">Freeplay Wheel</p>
+        <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-800">
+          {capped ? "Temporarily capped" : freeplay.eligible ? "Eligible" : "Not eligible"}
+        </span>
+      </div>
+      <div className="space-y-1 text-xs text-emerald-950">
+        <p>Rule: $50 qualifying deposits = 1 spin</p>
+        <p>Deposit progress: {formatMoney(freeplay.qualifyingRemainderCents)} / $50</p>
+        <p>
+          Spin credits: {freeplay.availableEconomicCredits} available · {freeplay.earnedSpinCredits} earned ·{" "}
+          {freeplay.consumedSpinCredits} used
+        </p>
+        <p>
+          24h usage: {freeplay.spinsInRollingWindow} / {freeplay.maxSpinsPerWindow}
+          {freeplay.nextAvailableAt ? ` · Next spin: ${formatDateTime(freeplay.nextAvailableAt)}` : ""}
+        </p>
+      </div>
+
+      {activeClaim ? (
+        <div className="mt-2 rounded-md border border-emerald-200 bg-white p-2">
+          <p className="text-sm font-semibold text-emerald-950">
+            🎁 Freeplay won: {formatMoney(activeClaim.rewardAmountCents)} — Unclaimed
+          </p>
+          <Button
+            variant="secondary"
+            className="mt-2 h-8 px-3 text-xs"
+            disabled={busy || claimingId === activeClaim.id}
+            onClick={() => void claim(activeClaim.id)}
+          >
+            {claimingId === activeClaim.id ? "Loading..." : "Load Freeplay"}
+          </Button>
+        </div>
+      ) : null}
+
+      {recentClaimed.length > 0 ? (
+        <ul className="mt-2 space-y-1 text-xs text-emerald-900">
+          {recentClaimed.map((claim) => (
+            <li key={claim.id}>
+              ✓ {formatMoney(claim.rewardAmountCents)} Freeplay — Claimed by {claim.claimedByName ?? "Staff"}
+              {claim.claimedAt ? ` · ${formatDateTime(claim.claimedAt)}` : ""}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
+function formatMoney(cents: number): string {
+  return `$${(cents / 100).toFixed(cents % 100 === 0 ? 0 : 2)}`;
 }
 
 function describeActivity(activity: CrmActivityDto): string {

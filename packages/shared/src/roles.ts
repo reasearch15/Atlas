@@ -47,7 +47,11 @@ export const permissions = [
   "leaderboard:telegram:verify",
   "leaderboard:eligibility:verify",
   "leaderboard:wheel:spin",
-  "leaderboard:wheel:manage"
+  "leaderboard:wheel:manage",
+  "freeplay:read",
+  "freeplay:spin",
+  "freeplay:claim",
+  "freeplay:settings"
 ] as const;
 
 export type Permission = (typeof permissions)[number];
@@ -103,7 +107,11 @@ export const rolePermissions = {
     "leaderboard:telegram:verify",
     "leaderboard:eligibility:verify",
     "leaderboard:wheel:spin",
-    "leaderboard:wheel:manage"
+    "leaderboard:wheel:manage",
+    "freeplay:read",
+    "freeplay:spin",
+    "freeplay:claim",
+    "freeplay:settings"
   ],
   STAFF: [
     "workspace:read",
@@ -124,7 +132,10 @@ export const rolePermissions = {
     "leaderboard:referral:set",
     "leaderboard:promotion",
     "leaderboard:give-info",
-    "leaderboard:wheel:spin"
+    "leaderboard:wheel:spin",
+    "freeplay:read",
+    "freeplay:spin",
+    "freeplay:claim"
     // Staff intentionally has no customer:* or Phase 3 leaderboard admin permissions.
   ]
 } satisfies Record<Role, readonly Permission[]>;

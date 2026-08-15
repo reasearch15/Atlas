@@ -174,6 +174,7 @@ function medalForRank(rank: number): string {
 }
 
 export const PUBLIC_LEADERBOARD_SUBSCRIPTION_REMINDER = SUBSCRIPTION_REMINDER;
+export const PLAY_BUTTON_TEXT = "🔴 PLAY";
 
 /** Concise caption for the premium image board (no prize/top10/links duplication). */
 export function formatPublicLeaderboardCaption(input?: {
@@ -188,17 +189,62 @@ export function formatPublicLeaderboardCaption(input?: {
 }
 
 /**
- * Public channel inline keyboard. Phase 1: My Rank deep-link only.
+ * Public channel inline keyboard for the PLAY destination and My Rank deep-link.
  * Earn Points / Prize Rules omitted until safe existing callbacks exist.
  */
 export function buildPublicLeaderboardKeyboard(
-  botUsername: string | null | undefined
+  botUsername: string | null | undefined,
+  playTelegramUsername?: string | null | undefined
 ): TelegramInlineKeyboardMarkup | null {
   const user = normalizeBotUsername(botUsername);
-  if (!user) return null;
+  const playButton = buildPlayTelegramButton(playTelegramUsername);
+  const row = [
+    ...(playButton ? [playButton] : []),
+    ...(user ? [{ text: "🏆 My Rank", url: `https://t.me/${user}?start=rank` }] : [])
+  ];
+  if (row.length === 0) return null;
   return {
-    inline_keyboard: [[{ text: "🏆 My Rank", url: `https://t.me/${user}?start=rank` }]]
+    inline_keyboard: [row]
   };
+}
+
+export function buildPlayTelegramButton(playTelegramUsername: string | null | undefined) {
+  const url = resolvePlayTelegramUrl(playTelegramUsername);
+  return url ? { text: PLAY_BUTTON_TEXT, url } : null;
+}
+
+export function buildPlayTelegramKeyboard(playTelegramUsername: string | null | undefined): TelegramInlineKeyboardMarkup | undefined {
+  const button = buildPlayTelegramButton(playTelegramUsername);
+  if (!button) return undefined;
+  return { inline_keyboard: [[button]] };
+}
+
+export function appendPlayTelegramButton(
+  keyboard: TelegramInlineKeyboardMarkup | undefined,
+  playTelegramUsername: string | null | undefined
+): TelegramInlineKeyboardMarkup | undefined {
+  const button = buildPlayTelegramButton(playTelegramUsername);
+  if (!button) return keyboard;
+  if (!keyboard?.inline_keyboard.length) return { inline_keyboard: [[button]] };
+  return {
+    inline_keyboard: [...keyboard.inline_keyboard, [button]]
+  };
+}
+
+export function resolvePlayTelegramUrl(playTelegramUsername: string | null | undefined): string | null {
+  const username = normalizePlayTelegramUsername(playTelegramUsername);
+  return username ? `https://t.me/${username}` : null;
+}
+
+export function normalizePlayTelegramUsername(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const withoutProtocol = trimmed.match(/^https:\/\/t\.me\/([^/?#]+)\/?$/i)?.[1] ?? trimmed;
+  const username = withoutProtocol.replace(/^@/, "");
+  if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) return null;
+  return username;
 }
 
 function normalizeBotUsername(username: string | null | undefined): string | null {

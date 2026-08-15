@@ -1,9 +1,13 @@
 import { formatPrizePoolDisplay } from "../leaderboard.standing-helpers";
 import type { TelegramInlineKeyboardMarkup } from "./leaderboard-telegram.client";
 import { formatCompetitionEndDisplay } from "./competition-end-display";
+import type { FreeplayPlayerStatusDto } from "@atlas/shared";
+import { appendPlayTelegramButton } from "./public-message";
 
 /** Inline keyboard callback_data for player wheel spin. Never includes IDs. */
 export const LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA = "leaderboard:wheel:spin";
+export const FREEPLAY_WHEEL_OPEN_CALLBACK_DATA = "freeplay:wheel:open";
+export const FREEPLAY_WHEEL_SPIN_CALLBACK_DATA = "freeplay:wheel:spin";
 
 const TOP_PRIZE_ZONE_RANK = 3;
 
@@ -48,6 +52,53 @@ export function buildWheelSpinInlineKeyboard(): TelegramInlineKeyboardMarkup {
       [{ text: "🎡 Spin Now", callback_data: LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA }]
     ]
   };
+}
+
+export function buildPersonalRankInlineKeyboard(input: {
+  readonly leaderboardWheelAvailable: boolean;
+  readonly playTelegramUsername?: string | null;
+}): TelegramInlineKeyboardMarkup {
+  const keyboard = {
+    inline_keyboard: [
+      ...(input.leaderboardWheelAvailable
+        ? [[{ text: "🎡 Spin Now", callback_data: LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA }]]
+        : []),
+      [{ text: "🎁 Freeplay Wheel", callback_data: FREEPLAY_WHEEL_OPEN_CALLBACK_DATA }]
+    ]
+  };
+  return appendPlayTelegramButton(keyboard, input.playTelegramUsername) ?? keyboard;
+}
+
+export function buildFreeplayStatusInlineKeyboard(
+  status: FreeplayPlayerStatusDto,
+  playTelegramUsername?: string | null
+): TelegramInlineKeyboardMarkup | undefined {
+  const keyboard = status.canSpin
+    ? {
+        inline_keyboard: [
+          [{ text: "🎡 Spin", callback_data: FREEPLAY_WHEEL_SPIN_CALLBACK_DATA }]
+        ]
+      }
+    : undefined;
+  return appendPlayTelegramButton(keyboard, playTelegramUsername);
+}
+
+export function formatFreeplayStatusMessage(status: FreeplayPlayerStatusDto): string {
+  return status.playerMessage;
+}
+
+export function formatFreeplaySpinResultMessage(input: {
+  readonly rewardAmountCents: number;
+  readonly nextStatus: FreeplayPlayerStatusDto;
+}): string {
+  const result =
+    input.rewardAmountCents > 0
+      ? `🎉 You won $${Math.trunc(input.rewardAmountCents / 100)} Freeplay!\nYour reward is waiting for staff to load.`
+      : "🍀 No Freeplay this time.\nKeep earning leaderboard points and check back for your next chance.";
+  if (input.nextStatus.status === "ROLLING_LIMIT") {
+    return `${result}\n\n${input.nextStatus.playerMessage}`;
+  }
+  return result;
 }
 
 export interface PersonalFinalResultMessageInput {

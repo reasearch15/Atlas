@@ -15,6 +15,7 @@ import {
 } from "./leaderboard-telegram.client";
 import type { LeaderboardTelegramOutboxService } from "./leaderboard-telegram.outbox";
 import { publishPublicLeaderboardSnapshot } from "./public-leaderboard-publisher";
+import { normalizePlayTelegramUsername, resolvePlayTelegramUrl } from "./public-message";
 
 export interface LeaderboardTelegramIntegrationDeps {
   readonly prisma: PrismaClient;
@@ -449,6 +450,7 @@ export class LeaderboardTelegramIntegrationService {
         integrationId: row.id,
         channelId: row.channelId,
         botUsername: row.botUsername,
+        playTelegramUsername: (row as { playTelegramUsername?: string | null }).playTelegramUsername ?? null,
         brandName: row.channelTitle ?? null,
         // Replace previous canonical board after successful send.
         persistentMessageId: row.persistentMessageId,
@@ -570,6 +572,35 @@ export class LeaderboardTelegramIntegrationService {
     return { ...emptyIntegrationDto(warning), cancelledJobs };
   }
 
+  public async setPlayTelegramUsername(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    rawUsername: string | null | undefined,
+    actorUserId: string
+  ): Promise<LeaderboardTelegramIntegrationDto> {
+    const row = await this.requireConnected(workspaceId, ownerCoadminUserId);
+    const normalized = normalizePlayTelegramUsername(rawUsername);
+    if (rawUsername != null && rawUsername.trim() && !normalized) {
+      throw new AppError(
+        400,
+        "TELEGRAM_PLAY_USERNAME_INVALID",
+        "Enter a valid Telegram username, @username, or https://t.me/username link."
+      );
+    }
+
+    const updated = await (this.prisma.leaderboardBotIntegration as any).update({
+      where: { id: row.id },
+      data: { playTelegramUsername: normalized }
+    });
+    await this.audit.record({
+      workspaceId,
+      actorId: actorUserId,
+      action: "leaderboard.telegram.play_destination_set",
+      metadata: { ownerCoadminUserId, playTelegramUsername: normalized }
+    });
+    return toDto(updated, await this.disconnectWarning(workspaceId, ownerCoadminUserId));
+  }
+
   /** Decrypt for processor use only — never expose via HTTP. */
   public decryptTokenForOwner(encryptedBotToken: unknown): string {
     return this.decryptToken(encryptedBotToken);
@@ -654,6 +685,7 @@ function toDto(
     channelId: string | null;
     channelTitle: string | null;
     channelUsername: string | null;
+    playTelegramUsername?: string | null;
     postingEnabled: boolean;
     connectedAt: Date;
     lastVerifiedAt: Date | null;
@@ -677,6 +709,8 @@ function toDto(
     channelId: row.channelId,
     channelTitle: row.channelTitle,
     channelUsername: row.channelUsername,
+    playTelegramUsername: row.playTelegramUsername ?? null,
+    playTelegramUrl: resolvePlayTelegramUrl(row.playTelegramUsername ?? null),
     postingEnabled: row.postingEnabled,
     channelVerified: row.lastChannelVerifiedAt != null && row.channelId != null,
     connectedAt: row.connectedAt.toISOString(),
@@ -703,6 +737,8 @@ function emptyIntegrationDto(disconnectWarning: string | null): LeaderboardTeleg
     channelId: null,
     channelTitle: null,
     channelUsername: null,
+    playTelegramUsername: null,
+    playTelegramUrl: null,
     postingEnabled: false,
     channelVerified: false,
     connectedAt: null,

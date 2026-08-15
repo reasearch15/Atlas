@@ -340,6 +340,37 @@ export interface CrmActivityDto {
   readonly createdAt: string;
 }
 
+export type FreeplayPanelStatus = "ELIGIBLE" | "NOT_ELIGIBLE" | "ROLLING_LIMIT";
+
+export interface FreeplayPanelClaimDto {
+  readonly id: string;
+  readonly spinId: string;
+  readonly crmContactId: string;
+  readonly chatId: string | null;
+  readonly rewardAmountCents: number;
+  readonly status: "UNCLAIMED" | "CLAIMED";
+  readonly createdAt: string;
+  readonly claimedAt: string | null;
+  readonly claimedByUserId: string | null;
+  readonly claimedByName: string | null;
+  readonly fulfillmentNote: string | null;
+}
+
+export interface FreeplayPanelDto {
+  readonly eligible: boolean;
+  readonly playerStatus: FreeplayPanelStatus;
+  readonly thresholdCents: number;
+  readonly qualifyingRemainderCents: number;
+  readonly earnedSpinCredits: number;
+  readonly consumedSpinCredits: number;
+  readonly availableEconomicCredits: number;
+  readonly spinsInRollingWindow: number;
+  readonly maxSpinsPerWindow: number;
+  readonly nextAvailableAt: string | null;
+  readonly eligibilityReason: "ELIGIBLE" | "NO_EARNED_CREDIT" | "ROLLING_LIMIT";
+  readonly claims: readonly FreeplayPanelClaimDto[];
+}
+
 export interface CrmConversationPanelDto {
   readonly chatId: string;
   readonly contact: CrmContactDto | null;
@@ -354,6 +385,7 @@ export interface CrmConversationPanelDto {
   readonly needsCrmAttention: boolean;
   readonly lastMessageAt: string | null;
   readonly firstSeenAt: string | null;
+  readonly freeplay: FreeplayPanelDto | null;
   readonly privacyNotice?: string | null;
 }
 

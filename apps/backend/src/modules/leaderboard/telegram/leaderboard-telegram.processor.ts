@@ -244,6 +244,7 @@ export class LeaderboardTelegramProcessor {
       persistentMessageCompetitionId: string | null;
       lastPublicTop10Json: unknown;
       botUsername: string | null;
+      playTelegramUsername?: string | null;
     },
     token: string
   ): Promise<void> {
@@ -275,6 +276,7 @@ export class LeaderboardTelegramProcessor {
         integrationId: integration.id,
         channelId: integration.channelId,
         botUsername: integration.botUsername,
+        playTelegramUsername: integration.playTelegramUsername ?? null,
         brandName: integration.channelTitle ?? null,
         persistentMessageId: integration.persistentMessageId,
         persistentMessageCompetitionId: integration.persistentMessageCompetitionId,

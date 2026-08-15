@@ -71,6 +71,7 @@ export function LeaderboardCoadminControls() {
   const [telegram, setTelegram] = useState<LeaderboardTelegramIntegrationDto | null>(null);
   const [botToken, setBotToken] = useState("");
   const [channelRef, setChannelRef] = useState("");
+  const [playTelegramUsername, setPlayTelegramUsername] = useState("");
   const [backfillSummary, setBackfillSummary] = useState<string | null>(null);
 
   const reverseKeyRef = useRef(newIdempotencyKey());
@@ -97,6 +98,7 @@ export function LeaderboardCoadminControls() {
       setEventsTotal(nextEvents.total);
       setReferrals(nextReferrals);
       setTelegram(nextTelegram);
+      setPlayTelegramUsername(nextTelegram?.playTelegramUsername ?? "");
       setError(null);
 
       const status = nextCompetition?.status;
@@ -532,6 +534,38 @@ export function LeaderboardCoadminControls() {
                     </a>
                   </p>
                 ) : null}
+                <div className="flex flex-wrap items-end gap-2">
+                  <div className="min-w-[220px] flex-1 space-y-1">
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      PLAY Telegram username
+                    </label>
+                    <Input
+                      value={playTelegramUsername}
+                      onChange={(event) => setPlayTelegramUsername(event.target.value)}
+                      placeholder="officialsayugaming"
+                      className="h-9"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="h-9 px-3 text-xs"
+                    disabled={pending}
+                    onClick={() =>
+                      void runAction(async () => {
+                        const value = playTelegramUsername.trim();
+                        const next = await api.leaderboardTelegramSetPlayDestination({
+                          playTelegramUsername: value || null
+                        });
+                        setTelegram(next);
+                        setPlayTelegramUsername(next.playTelegramUsername ?? "");
+                        toast.success(next.playTelegramUrl ? "PLAY destination saved." : "PLAY destination cleared.");
+                      })
+                    }
+                  >
+                    Save PLAY
+                  </Button>
+                </div>
                 {telegram.webhookConfigured ? (
                   <p className="text-xs text-muted-foreground">
                     Webhook registered

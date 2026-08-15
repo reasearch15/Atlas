@@ -17,6 +17,7 @@ import type {
 import { isAllowedManualStatusTransition, statusAfterClaim } from "@atlas/shared";
 import type { Role } from "@atlas/shared";
 import type { RequestUser } from "../auth/auth.types";
+import { FreeplayService } from "../freeplay/freeplay.service";
 import { forbidden } from "../../utils/errors";
 import { crmConflict, crmInvalidTransition, crmNotFound, crmTagArchived } from "./crm.errors";
 import {
@@ -384,10 +385,14 @@ export class CrmService {
     const accountLabel = caps.canViewTelegramUsername || caps.canViewCustomerPhone
       ? chat.telegramAccount.displayName
       : "Workspace account";
+    const freeplay = chat.crmContact
+      ? await this.loadFreeplayPanel(user, workspaceId, chat.crmContact.id)
+      : null;
 
     return {
       chatId: chat.id,
       contact,
+      freeplay,
       telegramAccountLabel: accountLabel,
       chatType: chat.chatType,
       crmStatus: chat.crmStatus,
@@ -472,6 +477,24 @@ export class CrmService {
     });
     if (!assignee) {
       throw crmNotFound("Assignee was not found in this workspace.");
+    }
+  }
+
+  private async loadFreeplayPanel(user: RequestUser, workspaceId: string, crmContactId: string) {
+    const participant = await this.app.prisma.leaderboardParticipant.findUnique({
+      where: { workspaceId_crmContactId: { workspaceId, crmContactId } },
+      select: { ownerCoadminUserId: true }
+    });
+    if (!participant) return null;
+    try {
+      return await new FreeplayService(this.app).getStaffStatusForPanel(
+        user,
+        workspaceId,
+        participant.ownerCoadminUserId,
+        crmContactId
+      );
+    } catch {
+      return null;
     }
   }
 

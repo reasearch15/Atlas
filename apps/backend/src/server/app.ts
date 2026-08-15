@@ -19,6 +19,7 @@ import { authPlugin } from "../modules/auth/auth.plugin";
 import { authRoutes } from "../modules/auth/auth.routes";
 import { coadminAuthRoutes } from "../modules/coadmin-auth/coadmin-auth.routes";
 import { crmRoutes } from "../modules/crm/crm.routes";
+import { freeplayRoutes } from "../modules/freeplay/freeplay.routes";
 import { leaderboardRoutes } from "../modules/leaderboard/leaderboard.routes";
 import { dashboardRoutes } from "../modules/dashboard/dashboard.routes";
 import { developerAppRoutes } from "../modules/developer-apps/developer-app.routes";
@@ -103,6 +104,7 @@ export async function buildApp(env: Env) {
     await app.register(developerAppRoutes, { prefix: "/api/developer-apps" });
     await app.register(telegramRoutes, { prefix: "/api/telegram" });
     await app.register(crmRoutes, { prefix: "/api/crm" });
+    await app.register(freeplayRoutes, { prefix: "/api/freeplay" });
     await app.register(leaderboardRoutes, { prefix: "/api/leaderboard" });
     await app.register(notificationRoutes, { prefix: "/api/notifications" });
 

@@ -188,11 +188,26 @@ describe("public leaderboard caption + keyboard", () => {
     expect(formatPublicLeaderboardCaption({ competitionStatus: "FROZEN" })).toContain("frozen");
   });
 
-  it("builds My Rank URL button only", () => {
-    const kb = buildPublicLeaderboardKeyboard("AtlasBoardBot");
+  it("builds PLAY and My Rank URL buttons on one row", () => {
+    const kb = buildPublicLeaderboardKeyboard("AtlasBoardBot", "@officialsayugaming");
     expect(kb).toEqual({
+      inline_keyboard: [[
+        { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
+        { text: "🏆 My Rank", url: "https://t.me/AtlasBoardBot?start=rank" }
+      ]]
+    });
+  });
+
+  it("renders PLAY and My Rank independently when either destination is missing", () => {
+    expect(buildPublicLeaderboardKeyboard(null, "https://t.me/officialsayugaming")).toEqual({
+      inline_keyboard: [[{ text: "🔴 PLAY", url: "https://t.me/officialsayugaming" }]]
+    });
+    expect(buildPublicLeaderboardKeyboard("AtlasBoardBot", null)).toEqual({
       inline_keyboard: [[{ text: "🏆 My Rank", url: "https://t.me/AtlasBoardBot?start=rank" }]]
     });
-    expect(buildPublicLeaderboardKeyboard(null)).toBeNull();
+    expect(buildPublicLeaderboardKeyboard(null, null)).toBeNull();
+    expect(buildPublicLeaderboardKeyboard("AtlasBoardBot", "https://example.com/nope")).toEqual({
+      inline_keyboard: [[{ text: "🏆 My Rank", url: "https://t.me/AtlasBoardBot?start=rank" }]]
+    });
   });
 });

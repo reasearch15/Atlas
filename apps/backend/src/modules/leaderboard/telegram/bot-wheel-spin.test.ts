@@ -12,7 +12,7 @@ import {
   type FakeLeaderboardTelegramState
 } from "./leaderboard-telegram.client";
 import {
-  buildWheelSpinInlineKeyboard,
+  FREEPLAY_WHEEL_OPEN_CALLBACK_DATA,
   LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA
 } from "./personal-rank-message";
 
@@ -349,7 +349,10 @@ describe("Telegram wheel spin — /rank button", () => {
     const msgs = state.chats.get(Number(telegramUserA))?.messages ?? [];
     expect(msgs.at(-1)?.text).toContain("Wheel Spin Available");
     expect(msgs.at(-1)?.text).not.toContain("Open Atlas to spin");
-    expect(msgs.at(-1)?.replyMarkup).toEqual(buildWheelSpinInlineKeyboard());
+    expect(msgs.at(-1)?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual([
+      LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA,
+      FREEPLAY_WHEEL_OPEN_CALLBACK_DATA
+    ]);
   });
 
   it("B: below $40 has no Spin button", async () => {
@@ -391,7 +394,9 @@ describe("Telegram wheel spin — /rank button", () => {
 
     const msg = state.chats.get(Number(telegramUserA))?.messages.at(-1);
     expect(msg?.text).toContain("$26 / $40");
-    expect(msg?.replyMarkup).toBeUndefined();
+    expect(msg?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual([
+      FREEPLAY_WHEEL_OPEN_CALLBACK_DATA
+    ]);
   });
 
   it("C: already consumed has no Spin button", async () => {
@@ -433,7 +438,9 @@ describe("Telegram wheel spin — /rank button", () => {
 
     const msg = state.chats.get(Number(telegramUserA))?.messages.at(-1);
     expect(msg?.text).toContain("Used for this cycle");
-    expect(msg?.replyMarkup).toBeUndefined();
+    expect(msg?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual([
+      FREEPLAY_WHEEL_OPEN_CALLBACK_DATA
+    ]);
   });
 });
 

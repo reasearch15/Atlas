@@ -8,10 +8,12 @@
  * Prefer webhook in production; optional LEADERBOARD_BOT_POLLING is for local/dev only.
  */
 import type { PrismaClient } from "@prisma/client";
+import type { FreeplayPlayerStatusDto, FreeplaySpinResultDto } from "@atlas/shared";
 import {
   decryptSecret,
   type EncryptedSecret
 } from "@atlas/shared/session-encryption";
+import { FreeplayService } from "../../freeplay/freeplay.service";
 import { tryAutoBindParticipant } from "../auto-bind";
 import { LEADERBOARD_TIMEZONE } from "../leaderboard.constants";
 import { LeaderboardError } from "../leaderboard.errors";
@@ -24,11 +26,17 @@ import type { WheelSpinResult } from "../wheel.service";
 import { verifyBotStartToken } from "./bot-start-token";
 import type { LeaderboardTelegramClient } from "./leaderboard-telegram.client";
 import {
-  buildWheelSpinInlineKeyboard,
+  buildFreeplayStatusInlineKeyboard,
+  buildPersonalRankInlineKeyboard,
+  FREEPLAY_WHEEL_OPEN_CALLBACK_DATA,
+  FREEPLAY_WHEEL_SPIN_CALLBACK_DATA,
+  formatFreeplaySpinResultMessage,
+  formatFreeplayStatusMessage,
   formatPersonalRankMessage,
   formatWheelSpinResultMessage,
   LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA
 } from "./personal-rank-message";
+import { buildPlayTelegramKeyboard } from "./public-message";
 
 export interface BotWheelServicePort {
   getStatus(
@@ -63,6 +71,23 @@ export interface BotTelegramOutboxPort {
   ): Promise<string>;
 }
 
+export interface BotFreeplayServicePort {
+  getTrustedPlayerStatus(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly crmContactId: string;
+    readonly now?: Date;
+  }): Promise<FreeplayPlayerStatusDto>;
+  spinTrusted(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly crmContactId: string;
+    readonly actorUserId: string;
+    readonly idempotencyKey: string;
+    readonly now?: Date;
+  }): Promise<FreeplaySpinResultDto>;
+}
+
 export interface BotUpdateHandlerDeps {
   readonly prisma: PrismaClient;
   readonly client: LeaderboardTelegramClient;
@@ -70,6 +95,7 @@ export interface BotUpdateHandlerDeps {
   readonly startTokenSecret: string;
   readonly domain?: PrismaLeaderboardService;
   readonly wheel?: BotWheelServicePort;
+  readonly freeplay?: BotFreeplayServicePort;
   readonly outbox?: BotTelegramOutboxPort;
   /** Test-only RNG injection for Telegram spins. */
   readonly createWheelRng?: () => WheelRng;
@@ -120,6 +146,7 @@ export class LeaderboardBotUpdateHandler {
   private readonly startTokenSecret: string;
   private readonly domain: PrismaLeaderboardService;
   private readonly wheel: BotWheelServicePort;
+  private readonly freeplay: BotFreeplayServicePort;
   private readonly outbox: BotTelegramOutboxPort | null;
   private readonly createWheelRng: () => WheelRng;
 
@@ -130,6 +157,7 @@ export class LeaderboardBotUpdateHandler {
     this.startTokenSecret = deps.startTokenSecret;
     this.domain = deps.domain ?? new PrismaLeaderboardService(deps.prisma);
     this.wheel = deps.wheel ?? new PrismaWheelService(deps.prisma);
+    this.freeplay = deps.freeplay ?? new FreeplayService({ prisma: deps.prisma });
     this.outbox = deps.outbox ?? null;
     this.createWheelRng = deps.createWheelRng ?? createCryptoWheelRng;
   }
@@ -182,6 +210,7 @@ export class LeaderboardBotUpdateHandler {
       ownerCoadminUserId: string;
       encryptedBotToken: unknown;
       disconnectedAt: Date | null;
+      playTelegramUsername?: string | null;
     },
     update: InboundTelegramUpdate
   ): Promise<void> {
@@ -230,6 +259,7 @@ export class LeaderboardBotUpdateHandler {
       id: string;
       workspaceId: string;
       ownerCoadminUserId: string;
+      playTelegramUsername?: string | null;
     };
     token: string;
     update: InboundTelegramUpdate;
@@ -247,6 +277,27 @@ export class LeaderboardBotUpdateHandler {
     };
 
     const data = cq.data?.trim() ?? "";
+    if (data === FREEPLAY_WHEEL_OPEN_CALLBACK_DATA) {
+      await answer("Checking Freeplay Wheel…");
+      await this.handleFreeplayStatusCallback({
+        integration: input.integration,
+        token: input.token,
+        telegramUserId: String(cq.from.id)
+      });
+      return;
+    }
+
+    if (data === FREEPLAY_WHEEL_SPIN_CALLBACK_DATA) {
+      await answer("Spinning Freeplay Wheel…");
+      await this.handleFreeplaySpinCallback({
+        integration: input.integration,
+        token: input.token,
+        updateId: input.update.update_id,
+        telegramUserId: String(cq.from.id)
+      });
+      return;
+    }
+
     if (data !== LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA) {
       await answer("Unsupported action.");
       return;
@@ -262,11 +313,138 @@ export class LeaderboardBotUpdateHandler {
     });
   }
 
+  private async resolveTrustedPlayerLink(input: {
+    integration: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+      playTelegramUsername?: string | null;
+    };
+    telegramUserId: string;
+  }) {
+    const link = await this.prisma.leaderboardBotPlayerLink.findUnique({
+      where: {
+        botIntegrationId_telegramUserId: {
+          botIntegrationId: input.integration.id,
+          telegramUserId: input.telegramUserId
+        }
+      }
+    });
+    if (!link || link.ownerCoadminUserId !== input.integration.ownerCoadminUserId) return null;
+
+    const participant = await this.prisma.leaderboardParticipant.findUnique({
+      where: {
+        workspaceId_crmContactId: {
+          workspaceId: input.integration.workspaceId,
+          crmContactId: link.crmContactId
+        }
+      }
+    });
+    if (!participant || participant.ownerCoadminUserId !== input.integration.ownerCoadminUserId) return null;
+    return link;
+  }
+
+  private async handleFreeplayStatusCallback(input: {
+    integration: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+      playTelegramUsername?: string | null;
+    };
+    token: string;
+    telegramUserId: string;
+  }): Promise<void> {
+    const link = await this.resolveTrustedPlayerLink(input);
+    if (!link) {
+      await this.sendSafeMessage(input.token, input.telegramUserId, "Send /start first to connect to this leaderboard.");
+      return;
+    }
+
+    try {
+      const status = await this.freeplay.getTrustedPlayerStatus({
+        workspaceId: input.integration.workspaceId,
+        ownerCoadminUserId: input.integration.ownerCoadminUserId,
+        crmContactId: link.crmContactId
+      });
+      const replyMarkup = buildFreeplayStatusInlineKeyboard(status, input.integration.playTelegramUsername);
+      await this.client.sendMessage(
+        input.token,
+        Number(input.telegramUserId),
+        formatFreeplayStatusMessage(status),
+        replyMarkup ? { replyMarkup } : undefined
+      );
+    } catch {
+      await this.sendSafeMessage(input.token, input.telegramUserId, "Freeplay Wheel is unavailable right now. Try again later.");
+    }
+  }
+
+  private async handleFreeplaySpinCallback(input: {
+    integration: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+      playTelegramUsername?: string | null;
+    };
+    token: string;
+    updateId: number;
+    telegramUserId: string;
+  }): Promise<void> {
+    const link = await this.resolveTrustedPlayerLink(input);
+    if (!link) {
+      await this.sendSafeMessage(input.token, input.telegramUserId, "Send /start first to connect to this leaderboard.");
+      return;
+    }
+
+    try {
+      const result = await this.freeplay.spinTrusted({
+        workspaceId: input.integration.workspaceId,
+        ownerCoadminUserId: input.integration.ownerCoadminUserId,
+        crmContactId: link.crmContactId,
+        actorUserId: input.integration.ownerCoadminUserId,
+        idempotencyKey: `tg:freeplay:${input.integration.id}:${input.updateId}`
+      });
+      const replyMarkup = buildFreeplayStatusInlineKeyboard(
+        result.playerStatus,
+        input.integration.playTelegramUsername
+      );
+      await this.client.sendMessage(
+        input.token,
+        Number(input.telegramUserId),
+        formatFreeplaySpinResultMessage({
+          rewardAmountCents: result.rewardAmountCents,
+          nextStatus: result.playerStatus
+        }),
+        replyMarkup ? { replyMarkup } : undefined
+      );
+    } catch {
+      let status: FreeplayPlayerStatusDto | null = null;
+      try {
+        status = await this.freeplay.getTrustedPlayerStatus({
+          workspaceId: input.integration.workspaceId,
+          ownerCoadminUserId: input.integration.ownerCoadminUserId,
+          crmContactId: link.crmContactId
+        });
+      } catch {
+        status = null;
+      }
+      const replyMarkup = status
+        ? buildFreeplayStatusInlineKeyboard(status, input.integration.playTelegramUsername)
+        : buildPlayTelegramKeyboard(input.integration.playTelegramUsername);
+      await this.client.sendMessage(
+        input.token,
+        Number(input.telegramUserId),
+        status ? formatFreeplayStatusMessage(status) : "Could not spin right now. Try again later.",
+        replyMarkup ? { replyMarkup } : undefined
+      );
+    }
+  }
+
   private async handleWheelSpinCallback(input: {
     integration: {
       id: string;
       workspaceId: string;
       ownerCoadminUserId: string;
+      playTelegramUsername?: string | null;
     };
     token: string;
     updateId: number;
@@ -359,7 +537,13 @@ export class LeaderboardBotUpdateHandler {
     });
 
     try {
-      await this.client.sendMessage(input.token, Number(input.telegramUserId), resultText);
+      const playKeyboard = buildPlayTelegramKeyboard(input.integration.playTelegramUsername);
+      await this.client.sendMessage(
+        input.token,
+        Number(input.telegramUserId),
+        resultText,
+        playKeyboard ? { replyMarkup: playKeyboard } : undefined
+      );
     } catch {
       // Telegram failure must never roll back committed wheel points.
     }
@@ -382,6 +566,7 @@ export class LeaderboardBotUpdateHandler {
       id: string;
       workspaceId: string;
       ownerCoadminUserId: string;
+      playTelegramUsername?: string | null;
     };
     token: string;
     telegramUserId: string;
@@ -486,6 +671,7 @@ export class LeaderboardBotUpdateHandler {
       id: string;
       workspaceId: string;
       ownerCoadminUserId: string;
+      playTelegramUsername?: string | null;
     };
     token: string;
     telegramUserId: string;
@@ -605,16 +791,16 @@ export class LeaderboardBotUpdateHandler {
       wheelStatus
     });
 
-    const sendOptions =
-      wheelStatus?.available === true
-        ? { replyMarkup: buildWheelSpinInlineKeyboard() }
-        : undefined;
-
     await this.client.sendMessage(
       input.token,
       Number(input.telegramUserId),
       text,
-      sendOptions
+      {
+        replyMarkup: buildPersonalRankInlineKeyboard({
+          leaderboardWheelAvailable: wheelStatus?.available === true,
+          playTelegramUsername: input.integration.playTelegramUsername ?? null
+        })
+      }
     );
     await this.prisma.leaderboardBotPlayerLink.update({
       where: { id: link.id },
@@ -638,6 +824,14 @@ export class LeaderboardBotUpdateHandler {
       }))
     );
     return computeStandingGaps(ranked, crmContactId);
+  }
+
+  private async sendSafeMessage(token: string, telegramUserId: string, text: string): Promise<void> {
+    try {
+      await this.client.sendMessage(token, Number(telegramUserId), text);
+    } catch {
+      // Best-effort player notification only.
+    }
   }
 
   private async upsertPrivateContact(input: {

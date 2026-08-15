@@ -280,6 +280,8 @@ export interface LeaderboardTelegramIntegrationDto {
   readonly channelId: string | null;
   readonly channelTitle: string | null;
   readonly channelUsername: string | null;
+  readonly playTelegramUsername: string | null;
+  readonly playTelegramUrl: string | null;
   readonly postingEnabled: boolean;
   readonly channelVerified: boolean;
   readonly connectedAt: string | null;

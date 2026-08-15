@@ -117,6 +117,10 @@ export const leaderboardTelegramPostingBodySchema = z.object({
   postingEnabled: z.boolean()
 });
 
+export const leaderboardTelegramPlayDestinationBodySchema = z.object({
+  playTelegramUsername: z.string().trim().max(120).nullable().optional()
+});
+
 export const leaderboardTelegramDisconnectBodySchema = z.object({
   confirm: z.literal(true)
 });

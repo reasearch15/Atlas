@@ -32,6 +32,7 @@ import type {
 import { customerPrivacyCapabilities } from "@atlas/shared";
 import type { RequestUser } from "../auth/auth.types";
 import { AuditService } from "../audit/audit.service";
+import { FreeplayService } from "../freeplay/freeplay.service";
 import { TelegramService } from "../telegram/telegram.service";
 import { AppError, forbidden } from "../../utils/errors";
 import { resolveAuthenticatedCrmDisplayNameFromContact } from "./authenticated-crm-display-name";
@@ -706,6 +707,14 @@ export class LeaderboardApiService {
 
     await this.projectAfterMutation(workspaceId, owner, competition.id);
     await this.enqueueRecentReferralMilestoneDms(workspaceId, owner, competition.id);
+    await new FreeplayService(this.app).applyLeaderboardDepositEvent({
+      eventId: event.id,
+      workspaceId,
+      ownerCoadminUserId: owner,
+      crmContactId: body.crmContactId,
+      amountCents: event.depositAmountCents ?? body.amountCents,
+      occurredAt: event.occurredAt
+    });
     await this.safeRecomputeWheelQualification({
       workspaceId,
       ownerCoadminUserId: owner,
@@ -1263,6 +1272,14 @@ export class LeaderboardApiService {
         reason
       });
       await this.projectAfterMutation(workspaceId, user.id, event.competitionId);
+      await new FreeplayService(this.app).applyLeaderboardDepositEvent({
+        eventId: reversed.id,
+        workspaceId,
+        ownerCoadminUserId: reversed.ownerCoadminUserId,
+        crmContactId: reversed.crmContactId,
+        amountCents: reversed.depositAmountCents ?? 0,
+        occurredAt: reversed.occurredAt
+      });
       await this.safeRecomputeWheelQualification({
         workspaceId,
         ownerCoadminUserId: user.id,
@@ -1592,6 +1609,20 @@ export class LeaderboardApiService {
       workspaceId,
       user.id,
       postingEnabled,
+      user.id
+    );
+  }
+
+  public async setTelegramPlayDestination(
+    user: RequestUser,
+    playTelegramUsername: string | null | undefined
+  ): Promise<LeaderboardTelegramIntegrationDto> {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    return this.requireTelegramIntegration().setPlayTelegramUsername(
+      workspaceId,
+      user.id,
+      playTelegramUsername,
       user.id
     );
   }

@@ -112,6 +112,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
       integrationId,
       channelId: channelA,
       botUsername: "tokA_bot",
+      playTelegramUsername: "officialsayugaming",
       persistentMessageId: null,
       persistentMessageCompetitionId: null,
       lastPublicTop10Json: [],
@@ -124,9 +125,10 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     expect(prisma._state.integrations[0].persistentMessageId).toBe("7");
     expect(tgState.chats.get(Number(channelA))!.messages[0]!.photo).toBe(true);
     expect(tgState.chats.get(Number(channelA))!.messages[0]!.caption).toContain("Competition is live");
-    expect(tgState.chats.get(Number(channelA))!.messages[0]!.replyMarkup?.inline_keyboard[0]?.[0]).toMatchObject({
-      url: "https://t.me/tokA_bot?start=rank"
-    });
+    expect(tgState.chats.get(Number(channelA))!.messages[0]!.replyMarkup?.inline_keyboard[0]).toEqual([
+      { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
+      { text: "🏆 My Rank", url: "https://t.me/tokA_bot?start=rank" }
+    ]);
   });
 
   it("existing board is replaced via sendPhoto then delete (never edit)", async () => {
@@ -179,6 +181,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
       integrationId,
       channelId: channelA,
       botUsername: "tokA_bot",
+      playTelegramUsername: "officialsayugaming",
       persistentMessageId: "42",
       persistentMessageCompetitionId: competitionA,
       lastPublicTop10Json: [],
@@ -196,6 +199,10 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     expect(tgState.chats.get(Number(channelA))!.messages.find((m) => m.messageId === 42)?.deleted).toBe(
       true
     );
+    expect(tgState.chats.get(Number(channelA))!.messages.find((m) => m.messageId === 43)?.replyMarkup?.inline_keyboard[0]).toEqual([
+      { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
+      { text: "🏆 My Rank", url: "https://t.me/tokA_bot?start=rank" }
+    ]);
   });
 
   it("sendPhoto failure keeps previous canonical message", async () => {
@@ -471,6 +478,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
       integrationId: a.integrationId,
       channelId: channelA,
       botUsername: "tokA_bot",
+      playTelegramUsername: "officialsayugaming",
       persistentMessageId: null,
       persistentMessageCompetitionId: null,
       lastPublicTop10Json: [],
@@ -487,6 +495,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
       integrationId: b.integrationId,
       channelId: channelB,
       botUsername: "tokB_bot",
+      playTelegramUsername: "coadminbplay",
       persistentMessageId: null,
       persistentMessageCompetitionId: null,
       lastPublicTop10Json: [],
@@ -502,6 +511,14 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     expect(b.prisma._state.integrations[0].channelId).toBe(channelB);
     expect(tgState.chats.get(Number(channelA))!.messages).toHaveLength(1);
     expect(tgState.chats.get(Number(channelB))!.messages).toHaveLength(1);
+    expect(tgState.chats.get(Number(channelA))!.messages[0]!.replyMarkup?.inline_keyboard[0]?.[0]).toEqual({
+      text: "🔴 PLAY",
+      url: "https://t.me/officialsayugaming"
+    });
+    expect(tgState.chats.get(Number(channelB))!.messages[0]!.replyMarkup?.inline_keyboard[0]?.[0]).toEqual({
+      text: "🔴 PLAY",
+      url: "https://t.me/coadminbplay"
+    });
     expect((a.prisma._state.integrations[0].lastPublicTop10Json as any)[0].displayName).toBe("OwnerAStar");
     expect((b.prisma._state.integrations[0].lastPublicTop10Json as any)[0].displayName).toBe("OwnerBStar");
   });
@@ -556,6 +573,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
       integrationId,
       channelId: channelA,
       botUsername: "tokA_bot",
+      playTelegramUsername: "officialsayugaming",
       persistentMessageId: null,
       persistentMessageCompetitionId: null,
       lastPublicTop10Json: [],
@@ -565,5 +583,9 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     expect(published.deliveryFormat).toBe("text");
     expect(published.text).toContain("BIWEEKLY LEADERBOARD");
     expect(tgState.chats.get(Number(channelA))!.messages[0]!.text).toContain("Picasso");
+    expect(tgState.chats.get(Number(channelA))!.messages[0]!.replyMarkup?.inline_keyboard[0]).toEqual([
+      { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
+      { text: "🏆 My Rank", url: "https://t.me/tokA_bot?start=rank" }
+    ]);
   });
 });

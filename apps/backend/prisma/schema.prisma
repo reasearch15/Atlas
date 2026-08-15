@@ -320,6 +320,11 @@ enum LeaderboardTelegramJobStatus {
   CANCELLED
 }
 
+enum FreeplayClaimStatus {
+  UNCLAIMED
+  CLAIMED
+}
+
 model Workspace {
   id               String                    @id @default(uuid()) @db.Uuid
   name             String                    @db.VarChar(120)
@@ -1482,6 +1487,7 @@ model LeaderboardBotIntegration {
   channelId                     String?                        @map("channel_id") @db.VarChar(64)
   channelTitle                  String?                        @map("channel_title") @db.VarChar(255)
   channelUsername               String?                        @map("channel_username") @db.VarChar(120)
+  playTelegramUsername          String?                        @map("play_telegram_username") @db.VarChar(120)
   postingEnabled                Boolean                        @default(false) @map("posting_enabled")
   connectedAt                   DateTime                       @default(now()) @map("connected_at")
   lastVerifiedAt                DateTime?                      @map("last_verified_at")
@@ -1699,4 +1705,72 @@ model LeaderboardWheelSpin {
   @@unique([cycleId, crmContactId])
   @@index([ownerCoadminUserId, competitionId])
   @@map("leaderboard_wheel_spins")
+}
+
+model FreeplayDepositCredit {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  crmContactId       String   @map("crm_contact_id") @db.Uuid
+  leaderboardEventId String   @unique @map("leaderboard_event_id") @db.Uuid
+  amountCents        Int      @map("amount_cents")
+  occurredAt         DateTime @map("occurred_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@index([ownerCoadminUserId, crmContactId, occurredAt])
+  @@map("freeplay_deposit_credits")
+}
+
+model FreeplayPlayerBalance {
+  id                       String   @id @default(uuid()) @db.Uuid
+  workspaceId              String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId       String   @map("owner_coadmin_user_id") @db.Uuid
+  crmContactId             String   @map("crm_contact_id") @db.Uuid
+  qualifyingRemainderCents Int      @default(0) @map("qualifying_remainder_cents")
+  earnedSpinCredits        Int      @default(0) @map("earned_spin_credits")
+  consumedSpinCredits      Int      @default(0) @map("consumed_spin_credits")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  @@unique([ownerCoadminUserId, crmContactId])
+  @@index([workspaceId, ownerCoadminUserId])
+  @@map("freeplay_player_balances")
+}
+
+model FreeplayWheelSpin {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  crmContactId       String   @map("crm_contact_id") @db.Uuid
+  chatId             String?  @map("chat_id") @db.Uuid
+  rewardAmountCents  Int      @map("reward_amount_cents")
+  idempotencyKey     String   @unique @map("idempotency_key") @db.VarChar(160)
+  spunAt             DateTime @map("spun_at")
+  claimId            String?  @unique @map("claim_id") @db.Uuid
+  rngMetaJson        Json?    @map("rng_meta_json")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@index([ownerCoadminUserId, crmContactId, spunAt])
+  @@index([workspaceId, ownerCoadminUserId])
+  @@map("freeplay_wheel_spins")
+}
+
+model FreeplayClaim {
+  id                 String              @id @default(uuid()) @db.Uuid
+  workspaceId        String              @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String              @map("owner_coadmin_user_id") @db.Uuid
+  crmContactId       String              @map("crm_contact_id") @db.Uuid
+  chatId             String?             @map("chat_id") @db.Uuid
+  spinId             String              @unique @map("spin_id") @db.Uuid
+  rewardAmountCents  Int                 @map("reward_amount_cents")
+  status             FreeplayClaimStatus @default(UNCLAIMED)
+  claimedAt          DateTime?           @map("claimed_at")
+  claimedByUserId    String?             @map("claimed_by_user_id") @db.Uuid
+  fulfillmentNote    String?             @map("fulfillment_note") @db.VarChar(500)
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+
+  @@index([ownerCoadminUserId, crmContactId, status, createdAt])
+  @@index([workspaceId, ownerCoadminUserId])
+  @@map("freeplay_claims")
 }

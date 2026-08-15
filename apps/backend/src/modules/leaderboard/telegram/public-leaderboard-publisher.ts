@@ -62,6 +62,7 @@ export interface PublishPublicLeaderboardInput {
   readonly integrationId: string;
   readonly channelId: string;
   readonly botUsername: string | null;
+  readonly playTelegramUsername?: string | null;
   /** Optional brand line on the card (channel title). */
   readonly brandName?: string | null;
   /** Canonical full-board message to replace/edit (same channel only). */
@@ -180,7 +181,7 @@ export async function publishPublicLeaderboardSnapshot(
     "SAYU GAMING HUB";
 
   const caption = formatPublicLeaderboardCaption({ competitionStatus: competition.status });
-  const keyboard = buildPublicLeaderboardKeyboard(input.botUsername);
+  const keyboard = buildPublicLeaderboardKeyboard(input.botUsername, input.playTelegramUsername);
 
   const textFallback = formatPublicLeaderboardMessage({
     title: "BIWEEKLY LEADERBOARD",
@@ -244,6 +245,7 @@ export async function publishPublicLeaderboardSnapshot(
     const delivered = await deliverTextBoard({
       ...input,
       text: textFallback,
+      keyboard,
       competitionId: competition.id,
       nextTop10
     });
@@ -289,6 +291,7 @@ export async function publishPublicLeaderboardSnapshot(
     const delivered = await deliverTextBoard({
       ...input,
       text: textFallback,
+      keyboard,
       competitionId: competition.id,
       nextTop10
     });
@@ -407,6 +410,7 @@ async function deliverTextBoard(input: {
   readonly competitionId: string;
   readonly persistentMessageId: string | null;
   readonly text: string;
+  readonly keyboard: ReturnType<typeof buildPublicLeaderboardKeyboard>;
   readonly nextTop10: readonly PublicLeaderboardTop10Row[];
   readonly logger?: PublishPublicLeaderboardInput["logger"];
 }): Promise<{
@@ -418,7 +422,12 @@ async function deliverTextBoard(input: {
   const previousMessageId = input.persistentMessageId;
   const publishChannelId = input.channelId;
 
-  const sent = await input.client.sendMessage(input.token, publishChannelId, input.text);
+  const sent = await input.client.sendMessage(
+    input.token,
+    publishChannelId,
+    input.text,
+    input.keyboard ? { replyMarkup: input.keyboard } : undefined
+  );
   const newMessageId = String(sent.messageId);
 
   const claimed = await persistBoardMeta({

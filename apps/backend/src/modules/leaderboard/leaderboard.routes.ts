@@ -26,6 +26,7 @@ import {
   leaderboardTelegramChannelBodySchema,
   leaderboardTelegramConnectBodySchema,
   leaderboardTelegramDisconnectBodySchema,
+  leaderboardTelegramPlayDestinationBodySchema,
   leaderboardTelegramPostingBodySchema,
   leaderboardTelegramRotateTokenBodySchema,
   leaderboardWheelConfigVersionBodySchema,
@@ -449,6 +450,16 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
       handle(async () => {
         const body = leaderboardTelegramPostingBodySchema.parse(request.body);
         return service.setTelegramPosting(request.user!, body.postingEnabled);
+      })
+  );
+
+  app.patch(
+    "/telegram-integration/play-destination",
+    { preHandler: [leaderboardTelegramManageGuard(app)] },
+    async (request) =>
+      handle(async () => {
+        const body = leaderboardTelegramPlayDestinationBodySchema.parse(request.body);
+        return service.setTelegramPlayDestination(request.user!, body.playTelegramUsername);
       })
   );
 

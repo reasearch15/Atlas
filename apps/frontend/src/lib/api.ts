@@ -22,6 +22,10 @@ import type {
   CrmNoteDto,
   CrmTagDto,
   DeveloperAppDto,
+  FreeplayPlayerStatusDto,
+  FreeplaySpinResultDto,
+  FreeplayStaffClaimDto,
+  FreeplayStaffStatusDto,
   LeaderboardAdminCompetitionDto,
   LeaderboardCompetitionReviewDto,
   LeaderboardCompetitionSummaryDto,
@@ -517,6 +521,20 @@ export const api = {
     apiRequest<CrmConversationPanelDto>(`/api/crm/chats/${chatId}/tags/${tagId}`, { method: "DELETE" }),
   crmInboxCounts: () => apiRequest<CrmInboxCountsDto>("/api/crm/inbox/counts"),
   crmAssignees: () => apiRequest<CrmAssigneeDto[]>("/api/crm/assignees"),
+  freeplayPlayerStatus: (crmContactId: string) =>
+    apiRequest<FreeplayPlayerStatusDto>(`/api/freeplay/player/${crmContactId}/status`),
+  freeplayStaffStatus: (crmContactId: string) =>
+    apiRequest<FreeplayStaffStatusDto>(`/api/freeplay/staff/${crmContactId}/status`),
+  freeplaySpin: (payload: { readonly crmContactId: string; readonly chatId?: string | null; readonly idempotencyKey: string }) =>
+    apiRequest<FreeplaySpinResultDto>("/api/freeplay/spin", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  freeplayClaim: (claimId: string, payload?: { readonly fulfillmentNote?: string }) =>
+    apiRequest<FreeplayStaffClaimDto>(`/api/freeplay/claims/${claimId}/claim`, {
+      method: "POST",
+      body: JSON.stringify(payload ?? {})
+    }),
 
   leaderboardCurrent: () => apiRequest<LeaderboardCurrentBoardDto>("/api/leaderboard/current"),
 
@@ -759,6 +777,12 @@ export const api = {
 
   leaderboardTelegramSetPosting: (payload: { readonly postingEnabled: boolean }) =>
     apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration/posting", {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+
+  leaderboardTelegramSetPlayDestination: (payload: { readonly playTelegramUsername: string | null }) =>
+    apiRequest<LeaderboardTelegramIntegrationDto>("/api/leaderboard/telegram-integration/play-destination", {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
