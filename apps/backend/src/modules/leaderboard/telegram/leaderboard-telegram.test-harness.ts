@@ -86,11 +86,19 @@ export function createMemoryPrisma() {
         return null;
       },
       findMany: async ({ where }: any) => {
-        return outbox.filter((r) => {
+        let rows = outbox.filter((r) => {
+          if (where?.workspaceId && r.workspaceId !== where.workspaceId) return false;
           if (where?.ownerCoadminUserId && r.ownerCoadminUserId !== where.ownerCoadminUserId) return false;
+          if (where?.competitionId && r.competitionId !== where.competitionId) return false;
+          if (where?.jobType && r.jobType !== where.jobType) return false;
           if (where?.status?.in && !where.status.in.includes(r.status)) return false;
+          if (where?.idempotencyKey?.startsWith && !r.idempotencyKey.startsWith(where.idempotencyKey.startsWith)) {
+            return false;
+          }
           return true;
         });
+        rows = [...rows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        return rows;
       },
       create: async ({ data }: any) => {
         if (outbox.some((r) => r.idempotencyKey === data.idempotencyKey)) {
@@ -169,6 +177,7 @@ export function createMemoryPrisma() {
           .filter(
             (s) =>
               s.competitionId === where.competitionId &&
+              (!where.workspaceId || s.workspaceId === where.workspaceId) &&
               (!where.ownerCoadminUserId || s.ownerCoadminUserId === where.ownerCoadminUserId)
           )
           .map((s) => ({

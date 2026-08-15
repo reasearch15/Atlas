@@ -18,12 +18,16 @@ import {
   clearRefreshDirty,
   isRefreshPayloadDirty
 } from "./leaderboard-telegram.outbox";
+import { withRanks } from "../ranking";
 import {
   formatPublicResultsMessage,
   formatRankAnnouncement
 } from "./public-message";
 import { publishPublicLeaderboardSnapshot } from "./public-leaderboard-publisher";
-import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
+import {
+  resolvePublicLeaderboardDisplayName,
+  toPublicLeaderboardDisplayName
+} from "./public-display-name";
 import {
   formatPersonalAnnouncementDm,
   formatPersonalFinalResultMessage
@@ -587,6 +591,7 @@ export class LeaderboardTelegramProcessor {
   ): Promise<void> {
     if (!integration.postingEnabled || !integration.channelId) return;
     const payload = (row.payloadJson ?? {}) as {
+      crmContactId?: string;
       displayName?: string;
       fromRank?: number | null;
       toRank?: number;
@@ -596,29 +601,143 @@ export class LeaderboardTelegramProcessor {
       pointsGained?: number | null;
       pointsBehindNext?: number | null;
     };
-    if (payload.toRank == null || !payload.displayName) {
-      throw permanentError("ANNOUNCEMENT_PAYLOAD_INVALID", "Rank announcement payload incomplete");
+    if (!payload.crmContactId || !row.competitionId || !payload.displayName) {
+      this.logger?.info(
+        { outboxId: row.id, competitionId: row.competitionId, ownerCoadminUserId: row.ownerCoadminUserId },
+        "leaderboard.rank_announcement.skipped_invalid_payload"
+      );
+      return;
     }
-    const text = formatRankAnnouncement({
+
+    const current = await this.resolveCurrentRankAnnouncement({
+      workspaceId: row.workspaceId,
+      ownerCoadminUserId: row.ownerCoadminUserId,
+      competitionId: row.competitionId,
+      crmContactId: payload.crmContactId,
       displayName: payload.displayName,
       fromRank: payload.fromRank ?? null,
-      toRank: payload.toRank,
+      ...(payload.kind !== undefined ? { kind: payload.kind } : {})
+    });
+    if (!current) {
+      this.logger?.info(
+        {
+          outboxId: row.id,
+          workspaceId: row.workspaceId,
+          ownerCoadminUserId: row.ownerCoadminUserId,
+          competitionId: row.competitionId,
+          crmContactId: payload.crmContactId
+        },
+        "leaderboard.rank_announcement.skipped_obsolete"
+      );
+      return;
+    }
+
+    const text = current.text ?? formatRankAnnouncement({
+      displayName: payload.displayName,
+      fromRank: payload.fromRank ?? null,
+      toRank: current.toRank,
       reason: payload.reason ?? "a ranking update",
-      ...(payload.kind === "REACHED_NUMBER_1" ||
-      payload.kind === "ENTER_TOP_3" ||
-      payload.kind === "ENTER_TOP_10" ||
-      payload.kind === "TOP_3_ORDER_CHANGED"
-        ? { kind: payload.kind }
+      ...(current.kind === "REACHED_NUMBER_1" ||
+      current.kind === "ENTER_TOP_3" ||
+      current.kind === "ENTER_TOP_10" ||
+      current.kind === "TOP_3_ORDER_CHANGED"
+        ? { kind: current.kind }
         : {}),
-      ...(payload.totalPoints != null ? { totalPoints: payload.totalPoints } : {}),
+      totalPoints: current.totalPoints,
       ...(payload.pointsGained != null ? { pointsGained: payload.pointsGained } : {}),
-      ...(payload.pointsBehindNext != null ? { pointsBehindNext: payload.pointsBehindNext } : {})
+      ...(current.pointsBehindNext != null ? { pointsBehindNext: current.pointsBehindNext } : {})
     });
     await this.client.sendMessage(token, integration.channelId, text);
     await this.prisma.leaderboardBotIntegration.update({
       where: { id: integration.id },
       data: { lastSuccessfulPostAt: new Date(), lastError: null }
     });
+  }
+
+  private async resolveCurrentRankAnnouncement(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly competitionId: string;
+    readonly crmContactId: string;
+    readonly displayName: string;
+    readonly fromRank: number | null;
+    readonly kind?: string | undefined;
+  }): Promise<{
+    readonly text?: string;
+    readonly kind?: string | undefined;
+    readonly toRank: number;
+    readonly totalPoints: number;
+    readonly pointsBehindNext: number | null;
+  } | null> {
+    const competition = await this.prisma.leaderboardCompetition.findFirst({
+      where: {
+        id: input.competitionId,
+        workspaceId: input.workspaceId,
+        ownerCoadminUserId: input.ownerCoadminUserId,
+        status: "ACTIVE"
+      }
+    });
+    if (!competition) return null;
+
+    const standings = await this.prisma.leaderboardStanding.findMany({
+      where: {
+        competitionId: input.competitionId,
+        workspaceId: input.workspaceId,
+        ownerCoadminUserId: input.ownerCoadminUserId
+      }
+    });
+    const ranked = withRanks(
+      standings.map((s) => ({
+        crmContactId: s.crmContactId,
+        totalPoints: s.totalPoints,
+        pointsReachedAt: s.pointsReachedAt
+      }))
+    );
+    const current = ranked.find((r) => r.crmContactId === input.crmContactId);
+    if (!current || current.rank < 1 || current.rank > 10 || current.totalPoints <= 0) return null;
+
+    const above = current.rank > 1 ? ranked.find((r) => r.rank === current.rank - 1) : null;
+    const pointsBehindNext =
+      above && Number.isFinite(above.totalPoints)
+        ? Math.max(0, above.totalPoints - current.totalPoints)
+        : null;
+    const kind = current.rank === 1 ? "REACHED_NUMBER_1" : input.kind;
+    const gap =
+      pointsBehindNext != null && current.rank > 1
+        ? `\nNow only ${Math.trunc(pointsBehindNext)} points behind #${current.rank - 1}.`
+        : "";
+    const name = toPublicLeaderboardDisplayName(input.displayName);
+
+    if (current.rank === 1) {
+      return {
+        kind,
+        toRank: current.rank,
+        totalPoints: current.totalPoints,
+        pointsBehindNext: null
+      };
+    }
+
+    if (input.fromRank == null) {
+      return {
+        text: `🔥 ${name} entered the leaderboard and climbed to #${current.rank}!${gap}`,
+        kind,
+        toRank: current.rank,
+        totalPoints: current.totalPoints,
+        pointsBehindNext
+      };
+    }
+
+    if (input.fromRank > current.rank) {
+      return {
+        text: `🔥 ${name} climbed from #${input.fromRank} → #${current.rank}!${gap}`,
+        kind,
+        toRank: current.rank,
+        totalPoints: current.totalPoints,
+        pointsBehindNext
+      };
+    }
+
+    return null;
   }
 
   private async processPlayerDm(

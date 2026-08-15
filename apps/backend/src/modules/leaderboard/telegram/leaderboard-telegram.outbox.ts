@@ -58,6 +58,21 @@ export function clearRefreshDirty(payload: unknown): Record<string, unknown> {
   return { ...rest, dirty: false };
 }
 
+export function mergeRankAnnouncementPayload(
+  previous: unknown,
+  next: Record<string, unknown>
+): Record<string, unknown> {
+  const prev = (previous ?? {}) as Record<string, unknown>;
+  const prevFrom = typeof prev.fromRank === "number" ? prev.fromRank : null;
+  const nextFrom = typeof next.fromRank === "number" ? next.fromRank : null;
+  return {
+    ...prev,
+    ...next,
+    // Preserve the earliest public context. `null` means the player was unranked.
+    fromRank: prevFrom == null || nextFrom == null ? null : Math.max(prevFrom, nextFrom)
+  };
+}
+
 export interface RankAnnouncementEnqueueInput {
   readonly workspaceId: string;
   readonly ownerCoadminUserId: string;
@@ -170,26 +185,41 @@ export class LeaderboardTelegramOutboxService {
   }
 
   public async enqueueRankAnnouncement(input: RankAnnouncementEnqueueInput): Promise<string> {
-    const from = input.fromRank == null ? "none" : String(input.fromRank);
-    const key = `lb:announce:${input.ownerCoadminUserId}:${input.competitionId}:${input.crmContactId}:${from}:${input.toRank}:${input.kind}`;
+    const coalesceKey = `lb:announce:${input.ownerCoadminUserId}:${input.competitionId}:${input.crmContactId}`;
+    const payloadJson = {
+      competitionId: input.competitionId,
+      crmContactId: input.crmContactId,
+      fromRank: input.fromRank,
+      toRank: input.toRank,
+      displayName: input.displayName,
+      reason: input.reason,
+      kind: input.kind,
+      totalPoints: input.totalPoints ?? null,
+      pointsGained: input.pointsGained ?? null,
+      pointsBehindNext: input.pointsBehindNext ?? null
+    };
+    const existing = await this.findPendingRankAnnouncement(coalesceKey, input);
+    if (existing) {
+      await this.prisma.leaderboardTelegramOutbox.update({
+        where: { id: existing.id },
+        data: {
+          payloadJson: mergeRankAnnouncementPayload(existing.payloadJson, payloadJson) as Prisma.InputJsonValue,
+          ...(existing.status === "DISPATCHING" && this.isStaleDispatching(existing)
+            ? { status: "QUEUED" as const, nextAttemptAt: null }
+            : {})
+        }
+      });
+      await this.wakeBestEffort(existing.id, 0);
+      return existing.id;
+    }
+
     return this.upsertJob({
       workspaceId: input.workspaceId,
       ownerCoadminUserId: input.ownerCoadminUserId,
       competitionId: input.competitionId,
       jobType: "POST_RANK_ANNOUNCEMENT",
-      idempotencyKey: key.slice(0, 320),
-      payloadJson: {
-        competitionId: input.competitionId,
-        crmContactId: input.crmContactId,
-        fromRank: input.fromRank,
-        toRank: input.toRank,
-        displayName: input.displayName,
-        reason: input.reason,
-        kind: input.kind,
-        totalPoints: input.totalPoints ?? null,
-        pointsGained: input.pointsGained ?? null,
-        pointsBehindNext: input.pointsBehindNext ?? null
-      }
+      idempotencyKey: `${coalesceKey}:${Date.now()}:${randomUUID()}`.slice(0, 320),
+      payloadJson
     });
   }
 
@@ -432,6 +462,30 @@ export class LeaderboardTelegramOutboxService {
       await this.wakeBestEffort(raced.id, 0);
       return raced.id;
     }
+  }
+
+  private async findPendingRankAnnouncement(
+    coalesceKey: string,
+    input: RankAnnouncementEnqueueInput
+  ): Promise<{
+    id: string;
+    status: string;
+    payloadJson: unknown;
+    updatedAt?: Date | null;
+  } | null> {
+    const rows = await this.prisma.leaderboardTelegramOutbox.findMany({
+      where: {
+        workspaceId: input.workspaceId,
+        ownerCoadminUserId: input.ownerCoadminUserId,
+        competitionId: input.competitionId,
+        jobType: "POST_RANK_ANNOUNCEMENT",
+        status: { in: [...PENDING_STATUSES] },
+        idempotencyKey: { startsWith: coalesceKey }
+      },
+      orderBy: { createdAt: "asc" },
+      take: 1
+    });
+    return rows[0] ?? null;
   }
 }
 
