@@ -127,7 +127,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     expect(tgState.chats.get(Number(channelA))!.messages[0]!.caption).toContain("Competition is live");
     expect(tgState.chats.get(Number(channelA))!.messages[0]!.replyMarkup?.inline_keyboard[0]).toEqual([
       { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
-      { text: "🏆 My Rank", url: "https://t.me/tokA_bot?start=rank" }
+      { text: "🏆 My Rank / 🎡 Lucky Wheel", url: "https://t.me/tokA_bot?start=rank" }
     ]);
   });
 
@@ -201,7 +201,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     );
     expect(tgState.chats.get(Number(channelA))!.messages.find((m) => m.messageId === 43)?.replyMarkup?.inline_keyboard[0]).toEqual([
       { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
-      { text: "🏆 My Rank", url: "https://t.me/tokA_bot?start=rank" }
+      { text: "🏆 My Rank / 🎡 Lucky Wheel", url: "https://t.me/tokA_bot?start=rank" }
     ]);
   });
 
@@ -585,7 +585,7 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     expect(tgState.chats.get(Number(channelA))!.messages[0]!.text).toContain("Picasso");
     expect(tgState.chats.get(Number(channelA))!.messages[0]!.replyMarkup?.inline_keyboard[0]).toEqual([
       { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
-      { text: "🏆 My Rank", url: "https://t.me/tokA_bot?start=rank" }
+      { text: "🏆 My Rank / 🎡 Lucky Wheel", url: "https://t.me/tokA_bot?start=rank" }
     ]);
   });
 });

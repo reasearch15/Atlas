@@ -200,7 +200,7 @@ export function buildPublicLeaderboardKeyboard(
   const playButton = buildPlayTelegramButton(playTelegramUsername);
   const row = [
     ...(playButton ? [playButton] : []),
-    ...(user ? [{ text: "🏆 My Rank", url: `https://t.me/${user}?start=rank` }] : [])
+    ...(user ? [{ text: "🏆 My Rank / 🎡 Lucky Wheel", url: `https://t.me/${user}?start=rank` }] : [])
   ];
   if (row.length === 0) return null;
   return {

@@ -193,7 +193,7 @@ describe("public leaderboard caption + keyboard", () => {
     expect(kb).toEqual({
       inline_keyboard: [[
         { text: "🔴 PLAY", url: "https://t.me/officialsayugaming" },
-        { text: "🏆 My Rank", url: "https://t.me/AtlasBoardBot?start=rank" }
+        { text: "🏆 My Rank / 🎡 Lucky Wheel", url: "https://t.me/AtlasBoardBot?start=rank" }
       ]]
     });
   });
@@ -203,11 +203,11 @@ describe("public leaderboard caption + keyboard", () => {
       inline_keyboard: [[{ text: "🔴 PLAY", url: "https://t.me/officialsayugaming" }]]
     });
     expect(buildPublicLeaderboardKeyboard("AtlasBoardBot", null)).toEqual({
-      inline_keyboard: [[{ text: "🏆 My Rank", url: "https://t.me/AtlasBoardBot?start=rank" }]]
+      inline_keyboard: [[{ text: "🏆 My Rank / 🎡 Lucky Wheel", url: "https://t.me/AtlasBoardBot?start=rank" }]]
     });
     expect(buildPublicLeaderboardKeyboard(null, null)).toBeNull();
     expect(buildPublicLeaderboardKeyboard("AtlasBoardBot", "https://example.com/nope")).toEqual({
-      inline_keyboard: [[{ text: "🏆 My Rank", url: "https://t.me/AtlasBoardBot?start=rank" }]]
+      inline_keyboard: [[{ text: "🏆 My Rank / 🎡 Lucky Wheel", url: "https://t.me/AtlasBoardBot?start=rank" }]]
     });
   });
 });
