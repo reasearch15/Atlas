@@ -20,14 +20,11 @@ import {
 } from "./leaderboard-telegram.outbox";
 import { withRanks } from "../ranking";
 import {
-  formatPublicResultsMessage,
-  formatRankAnnouncement
+  formatCurrentStateRankAnnouncement,
+  formatPublicResultsMessage
 } from "./public-message";
 import { publishPublicLeaderboardSnapshot } from "./public-leaderboard-publisher";
-import {
-  resolvePublicLeaderboardDisplayName,
-  toPublicLeaderboardDisplayName
-} from "./public-display-name";
+import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
 import {
   formatPersonalAnnouncementDm,
   formatPersonalFinalResultMessage
@@ -40,6 +37,14 @@ import {
 const MAX_VERIFY_CANDIDATES = 20;
 const VERIFY_CONCURRENCY = 3;
 const MAX_ATTEMPTS = 12;
+
+const RANK_SENSITIVE_PLAYER_DM_KINDS = new Set([
+  "ENTER_TOP_10",
+  "ENTER_TOP_3",
+  "REACHED_NUMBER_1",
+  "TOP_3_ORDER_CHANGED",
+  "SIGNIFICANT_TOP_MOVE"
+]);
 
 export interface LeaderboardTelegramProcessorDeps {
   readonly prisma: PrismaClient;
@@ -615,8 +620,7 @@ export class LeaderboardTelegramProcessor {
       competitionId: row.competitionId,
       crmContactId: payload.crmContactId,
       displayName: payload.displayName,
-      fromRank: payload.fromRank ?? null,
-      ...(payload.kind !== undefined ? { kind: payload.kind } : {})
+      fromRank: payload.fromRank ?? null
     });
     if (!current) {
       this.logger?.info(
@@ -632,22 +636,7 @@ export class LeaderboardTelegramProcessor {
       return;
     }
 
-    const text = current.text ?? formatRankAnnouncement({
-      displayName: payload.displayName,
-      fromRank: payload.fromRank ?? null,
-      toRank: current.toRank,
-      reason: payload.reason ?? "a ranking update",
-      ...(current.kind === "REACHED_NUMBER_1" ||
-      current.kind === "ENTER_TOP_3" ||
-      current.kind === "ENTER_TOP_10" ||
-      current.kind === "TOP_3_ORDER_CHANGED"
-        ? { kind: current.kind }
-        : {}),
-      totalPoints: current.totalPoints,
-      ...(payload.pointsGained != null ? { pointsGained: payload.pointsGained } : {}),
-      ...(current.pointsBehindNext != null ? { pointsBehindNext: current.pointsBehindNext } : {})
-    });
-    await this.client.sendMessage(token, integration.channelId, text);
+    await this.client.sendMessage(token, integration.channelId, current.text);
     await this.prisma.leaderboardBotIntegration.update({
       where: { id: integration.id },
       data: { lastSuccessfulPostAt: new Date(), lastError: null }
@@ -661,11 +650,45 @@ export class LeaderboardTelegramProcessor {
     readonly crmContactId: string;
     readonly displayName: string;
     readonly fromRank: number | null;
-    readonly kind?: string | undefined;
   }): Promise<{
-    readonly text?: string;
-    readonly kind?: string | undefined;
-    readonly toRank: number;
+    readonly text: string;
+    readonly rank: number;
+    readonly totalPoints: number;
+    readonly pointsBehindNext: number | null;
+  } | null> {
+    const current = await this.loadScopedRankedStanding({
+      workspaceId: input.workspaceId,
+      ownerCoadminUserId: input.ownerCoadminUserId,
+      competitionId: input.competitionId,
+      crmContactId: input.crmContactId,
+      requireActive: true
+    });
+    if (!current || current.rank < 1 || current.rank > 10 || current.totalPoints <= 0) return null;
+
+    const provenFromRank =
+      input.fromRank != null && input.fromRank > current.rank ? input.fromRank : null;
+    return {
+      text: formatCurrentStateRankAnnouncement({
+        displayName: input.displayName,
+        rank: current.rank,
+        totalPoints: current.totalPoints,
+        pointsBehindNext: current.rank === 1 ? null : current.pointsBehindNext,
+        fromRank: provenFromRank
+      }),
+      rank: current.rank,
+      totalPoints: current.totalPoints,
+      pointsBehindNext: current.rank === 1 ? null : current.pointsBehindNext
+    };
+  }
+
+  private async loadScopedRankedStanding(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly competitionId: string;
+    readonly crmContactId: string;
+    readonly requireActive: boolean;
+  }): Promise<{
+    readonly rank: number;
     readonly totalPoints: number;
     readonly pointsBehindNext: number | null;
   } | null> {
@@ -674,7 +697,7 @@ export class LeaderboardTelegramProcessor {
         id: input.competitionId,
         workspaceId: input.workspaceId,
         ownerCoadminUserId: input.ownerCoadminUserId,
-        status: "ACTIVE"
+        ...(input.requireActive ? { status: "ACTIVE" } : {})
       }
     });
     if (!competition) return null;
@@ -694,50 +717,18 @@ export class LeaderboardTelegramProcessor {
       }))
     );
     const current = ranked.find((r) => r.crmContactId === input.crmContactId);
-    if (!current || current.rank < 1 || current.rank > 10 || current.totalPoints <= 0) return null;
+    if (!current) return null;
 
     const above = current.rank > 1 ? ranked.find((r) => r.rank === current.rank - 1) : null;
     const pointsBehindNext =
       above && Number.isFinite(above.totalPoints)
         ? Math.max(0, above.totalPoints - current.totalPoints)
         : null;
-    const kind = current.rank === 1 ? "REACHED_NUMBER_1" : input.kind;
-    const gap =
-      pointsBehindNext != null && current.rank > 1
-        ? `\nNow only ${Math.trunc(pointsBehindNext)} points behind #${current.rank - 1}.`
-        : "";
-    const name = toPublicLeaderboardDisplayName(input.displayName);
-
-    if (current.rank === 1) {
-      return {
-        kind,
-        toRank: current.rank,
-        totalPoints: current.totalPoints,
-        pointsBehindNext: null
-      };
-    }
-
-    if (input.fromRank == null) {
-      return {
-        text: `🔥 ${name} entered the leaderboard and climbed to #${current.rank}!${gap}`,
-        kind,
-        toRank: current.rank,
-        totalPoints: current.totalPoints,
-        pointsBehindNext
-      };
-    }
-
-    if (input.fromRank > current.rank) {
-      return {
-        text: `🔥 ${name} climbed from #${input.fromRank} → #${current.rank}!${gap}`,
-        kind,
-        toRank: current.rank,
-        totalPoints: current.totalPoints,
-        pointsBehindNext
-      };
-    }
-
-    return null;
+    return {
+      rank: current.rank,
+      totalPoints: current.totalPoints,
+      pointsBehindNext
+    };
   }
 
   private async processPlayerDm(
@@ -773,14 +764,40 @@ export class LeaderboardTelegramProcessor {
     if (!link) return;
     if (integration.ownerCoadminUserId !== row.ownerCoadminUserId) return;
 
-    const text =
-      payload.text?.trim() ||
-      formatPersonalAnnouncementDm({
+    const rankSensitive = RANK_SENSITIVE_PLAYER_DM_KINDS.has(payload.kind);
+    let text = rankSensitive ? "" : payload.text?.trim() || "";
+    if (!text && rankSensitive && row.competitionId) {
+      const current = await this.loadScopedRankedStanding({
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        competitionId: row.competitionId,
+        crmContactId: payload.crmContactId,
+        requireActive: false
+      });
+      if (current && current.totalPoints > 0 && current.rank > 0) {
+        const provenFromRank =
+          payload.fromRank != null && payload.fromRank > current.rank ? payload.fromRank : current.rank;
+        text = formatPersonalAnnouncementDm({
+          kind: current.rank === 1 ? "REACHED_NUMBER_1" : payload.kind,
+          fromRank: provenFromRank,
+          toRank: current.rank,
+          totalPoints: current.totalPoints
+        });
+      } else {
+        text = formatPersonalAnnouncementDm({
+          kind: payload.kind,
+          fromRank: 0,
+          toRank: 0
+        });
+      }
+    } else if (!text) {
+      text = formatPersonalAnnouncementDm({
         kind: payload.kind,
         fromRank: payload.fromRank ?? null,
         toRank: payload.toRank ?? 0,
         ...(payload.totalPoints != null ? { totalPoints: payload.totalPoints } : {})
       });
+    }
 
     await this.client.sendMessage(token, link.telegramUserId, text);
   }

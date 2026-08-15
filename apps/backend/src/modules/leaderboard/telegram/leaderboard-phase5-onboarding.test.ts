@@ -563,6 +563,18 @@ describe("Phase 5 bot /start + /rank + isolation", () => {
       totalPoints: 302,
       pointsReachedAt: new Date()
     });
+    prisma._state.outbox.push({
+      id: "stale-announce",
+      jobType: "POST_RANK_ANNOUNCEMENT",
+      status: "QUEUED",
+      payloadJson: {
+        crmContactId: boundContactId,
+        fromRank: null,
+        toRank: 10,
+        totalPoints: 1,
+        pointsBehindNext: 4
+      }
+    });
 
     await handler.handleWebhook({
       integrationId: integrationA,
@@ -578,8 +590,12 @@ describe("Phase 5 bot /start + /rank + isolation", () => {
       }
     });
     const rankMsg = dmChat?.messages.find((m) => m.text.includes("YOUR LEADERBOARD"));
-    expect(rankMsg?.text).toContain("Rank:");
+    expect(rankMsg?.text).toContain("Rank: #2");
+    expect(rankMsg?.text).toContain("Points: 284");
+    expect(rankMsg?.text).toContain("18 points behind #1");
     expect(rankMsg?.text).toContain("Prize Pool");
+    expect(rankMsg?.text).not.toContain("4 points behind");
+    expect(rankMsg?.text).not.toContain("moved unranked");
 
     // Transfer reject: bind contact to ownerB then /start from same telegram user on ownerA bot
     // Use a different telegram user already bound elsewhere

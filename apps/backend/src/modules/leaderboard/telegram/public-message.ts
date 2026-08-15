@@ -119,6 +119,44 @@ export function formatPublicResultsMessage(input: PublicResultsMessageInput): st
   ].join("\n");
 }
 
+export interface CurrentStateRankAnnouncementInput {
+  readonly displayName: string;
+  readonly rank: number;
+  readonly totalPoints: number;
+  readonly pointsBehindNext: number | null;
+  /** Proven historical rank only. Omit when the original movement snapshot is unreliable. */
+  readonly fromRank?: number | null;
+}
+
+/**
+ * Public channel copy from send-time standings. Never uses frozen outbox rank/gap.
+ * Historical movement is included only when `fromRank` is a proven worse rank.
+ */
+export function formatCurrentStateRankAnnouncement(input: CurrentStateRankAnnouncementInput): string {
+  const name = toPublicLeaderboardDisplayName(input.displayName);
+  const rank = input.rank;
+  const points = Number.isFinite(input.totalPoints) ? Math.trunc(input.totalPoints) : 0;
+
+  if (rank === 1) {
+    return `🔥 ${name} is now #1!\nLeading the leaderboard with ${points} PTS.`;
+  }
+
+  const provenMove = input.fromRank != null && input.fromRank > rank;
+  const headline = provenMove
+    ? `🔥 ${name} moved #${input.fromRank} → #${rank}!`
+    : `🔥 ${name} is now #${rank}!`;
+  const behind =
+    input.pointsBehindNext != null &&
+    Number.isFinite(input.pointsBehindNext) &&
+    input.pointsBehindNext >= 0
+      ? Math.trunc(input.pointsBehindNext)
+      : null;
+  if (behind != null) {
+    return `${headline}\n${behind} points behind #${rank - 1}.`;
+  }
+  return headline;
+}
+
 /**
  * Short channel announcement for a meaningful rank change.
  */

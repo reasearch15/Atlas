@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPublicLeaderboardKeyboard,
+  formatCurrentStateRankAnnouncement,
   formatPublicLeaderboardCaption,
   formatPublicLeaderboardMessage,
   formatPublicResultsMessage,
@@ -179,6 +180,55 @@ describe("formatRankAnnouncement", () => {
         pointsBehindNext: 18
       })
     ).toBe("🔥 Homer moved #6 → #3!\n+35 points\nNow only 18 points behind #2.");
+  });
+});
+
+describe("formatCurrentStateRankAnnouncement", () => {
+  it("uses current-state copy without historical movement", () => {
+    expect(
+      formatCurrentStateRankAnnouncement({
+        displayName: "John Mccloud",
+        rank: 10,
+        totalPoints: 110,
+        pointsBehindNext: 15
+      })
+    ).toBe("🔥 John Mccloud is now #10!\n15 points behind #9.");
+  });
+
+  it("includes proven movement only when fromRank is worse than current rank", () => {
+    expect(
+      formatCurrentStateRankAnnouncement({
+        displayName: "John Mccloud",
+        rank: 8,
+        totalPoints: 140,
+        pointsBehindNext: 12,
+        fromRank: 10
+      })
+    ).toBe("🔥 John Mccloud moved #10 → #8!\n12 points behind #7.");
+  });
+
+  it("does not treat a stale equal/worse fromRank as movement", () => {
+    expect(
+      formatCurrentStateRankAnnouncement({
+        displayName: "John Mccloud",
+        rank: 7,
+        totalPoints: 160,
+        pointsBehindNext: 20,
+        fromRank: 7
+      })
+    ).toBe("🔥 John Mccloud is now #7!\n20 points behind #6.");
+  });
+
+  it("formats current #1 without a points-behind line", () => {
+    expect(
+      formatCurrentStateRankAnnouncement({
+        displayName: "John Mccloud",
+        rank: 1,
+        totalPoints: 300,
+        pointsBehindNext: 10,
+        fromRank: 5
+      })
+    ).toBe("🔥 John Mccloud is now #1!\nLeading the leaderboard with 300 PTS.");
   });
 });
 

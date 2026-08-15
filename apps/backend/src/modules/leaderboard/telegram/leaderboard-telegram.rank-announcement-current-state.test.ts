@@ -136,9 +136,7 @@ describe("current-state rank announcements", () => {
     const id = await enqueueAnnouncement(outbox, { fromRank: null, toRank: 10 });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)).toEqual([
-      "🔥 John Mccloud entered the leaderboard and climbed to #6!\nNow only 50 points behind #5."
-    ]);
+    expect(sentTexts(tgState)).toEqual(["🔥 John Mccloud is now #6!\n50 points behind #5."]);
     expect(sentTexts(tgState)[0]).not.toContain("#10");
   });
 
@@ -154,7 +152,7 @@ describe("current-state rank announcements", () => {
     });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toContain("Now only 7 points behind #1.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!\n7 points behind #1.");
     expect(sentTexts(tgState)[0]).not.toContain("999");
     expect(sentTexts(tgState)[0]).not.toContain("behind #9");
   });
@@ -175,7 +173,7 @@ describe("current-state rank announcements", () => {
 
     await processor.processJob(first);
     expect(sentTexts(tgState)).toHaveLength(1);
-    expect(sentTexts(tgState)[0]).toContain("entered the leaderboard and climbed to #6");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #6!\n50 points behind #5.");
   });
 
   it("preserves earliest ranked context across coalesced #7-to-#5-to-#3 alerts", async () => {
@@ -189,9 +187,7 @@ describe("current-state rank announcements", () => {
 
     expect(prisma._state.outbox[0].payloadJson.fromRank).toBe(7);
     await processor.processJob(first);
-    expect(sentTexts(tgState)[0]).toBe(
-      "🔥 John Mccloud climbed from #7 → #3!\nNow only 20 points behind #2."
-    );
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud moved #7 → #3!\n20 points behind #2.");
   });
 
   it("skips cleanly when the player falls outside Top 10 before send", async () => {
@@ -219,7 +215,9 @@ describe("current-state rank announcements", () => {
     });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toBe("👑 NEW #1\nJohn Mccloud just took the top spot with 300 points.");
+    expect(sentTexts(tgState)[0]).toBe(
+      "🔥 John Mccloud is now #1!\nLeading the leaderboard with 300 PTS."
+    );
     expect(sentTexts(tgState)[0]).not.toContain("behind");
   });
 
@@ -251,7 +249,7 @@ describe("current-state rank announcements", () => {
     tgState.failures.clear();
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toContain("climbed from #7 → #2");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud moved #7 → #2!\n10 points behind #1.");
   });
 
   it("processes old persisted payloads by correcting frozen rank fields", async () => {
@@ -266,11 +264,32 @@ describe("current-state rank announcements", () => {
     });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toContain("climbed to #2");
+    expect(sentTexts(tgState)[0]).toContain("is now #2");
     expect(sentTexts(tgState)[0]).toContain("50 points behind #1");
+    expect(sentTexts(tgState)[0]).not.toContain("900");
   });
 
   it("does not read another coadmin's standings during revalidation", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    addStanding(prisma, "above", 125);
+    addStanding(prisma, player, 110, { name: "John Mccloud" });
+    addStanding(prisma, player, 999, {
+      name: "Other Owner John",
+      ownerCoadminUserId: ownerB,
+      workspaceId: workspaceB
+    });
+
+    const id = await enqueueAnnouncement(outbox, {
+      fromRank: null,
+      toRank: 10,
+      pointsBehindNext: 4
+    });
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!\n15 points behind #1.");
+  });
+
+  it("skips when the only matching standing belongs to another coadmin", async () => {
     const { prisma, tgState, outbox, processor } = seedProcessor();
     addStanding(prisma, player, 300, {
       name: "Other Owner John",
@@ -305,5 +324,159 @@ describe("current-state rank announcements", () => {
     await processor.processJob(id);
 
     expect(sentTexts(tgState)).toEqual([]);
+  });
+
+  it("does not let another competition's points change rank or gap", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    prisma._state.competitions.push({
+      id: competitionB,
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      status: "ACTIVE",
+      prizePoolCents: 1000,
+      startsAt: new Date("2026-08-01T00:00:00.000Z"),
+      endsAt: new Date("2026-08-20T00:00:00.000Z"),
+      sequence: 2
+    });
+    addStanding(prisma, player, 300, {
+      name: "John Mccloud",
+      competitionId: competitionB
+    });
+    addStanding(prisma, "local-above", 120);
+    addStanding(prisma, player, 110, { name: "John Mccloud" });
+
+    const id = await enqueueAnnouncement(outbox, { fromRank: null, toRank: 10 });
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!\n10 points behind #1.");
+  });
+
+  it("refreshes a stale 4-point gap after #9 gains points", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    ids(8).forEach((id, i) => addStanding(prisma, id, 200 - i * 5));
+    addStanding(prisma, "above", 114);
+    addStanding(prisma, player, 110, { name: "John Mccloud" });
+
+    const id = await enqueueAnnouncement(outbox, {
+      fromRank: null,
+      toRank: 10,
+      pointsBehindNext: 4
+    });
+    prisma._state.standings.find((s: any) => s.crmContactId === "above").totalPoints = 125;
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #10!\n15 points behind #9.");
+    expect(sentTexts(tgState)[0]).not.toContain("4 points behind");
+  });
+
+  it("uses current #8 when the player climbs before send", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    ids(7).forEach((id, i) => addStanding(prisma, id, 200 - i * 10));
+    addStanding(prisma, "eighth", 135);
+    addStanding(prisma, "above", 125);
+    addStanding(prisma, player, 110, { name: "John Mccloud" });
+
+    const id = await enqueueAnnouncement(outbox, {
+      fromRank: null,
+      toRank: 10,
+      pointsBehindNext: 15
+    });
+    prisma._state.standings.find((s: any) => s.crmContactId === player).totalPoints = 138;
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #8!\n2 points behind #7.");
+    expect(sentTexts(tgState)[0]).not.toContain("#10");
+    expect(sentTexts(tgState)[0]).not.toContain("15 points behind");
+  });
+
+  it("sends current-state copy when the original climb snapshot is no longer valid", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    ids(6).forEach((id, i) => addStanding(prisma, id, 200 - i * 5));
+    addStanding(prisma, player, 150, { name: "John Mccloud" });
+
+    const id = await enqueueAnnouncement(outbox, { fromRank: 5, toRank: 3, pointsBehindNext: 8 });
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)).toHaveLength(1);
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #7!\n25 points behind #6.");
+    expect(sentTexts(tgState)[0]).not.toContain("moved");
+    expect(sentTexts(tgState)[0]).not.toContain("#3");
+    expect(sentTexts(tgState)[0]).not.toContain("8 points behind");
+  });
+
+  it("skips frozen competitions", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    prisma._state.competitions[0].status = "FROZEN";
+    addStanding(prisma, player, 300, { name: "John Mccloud" });
+
+    const id = await enqueueAnnouncement(outbox, { fromRank: null, toRank: 1 });
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)).toEqual([]);
+    expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
+  });
+
+  it("skips finalized competitions", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    prisma._state.competitions[0].status = "FINALIZED";
+    addStanding(prisma, player, 300, { name: "John Mccloud" });
+
+    const id = await enqueueAnnouncement(outbox, { fromRank: 2, toRank: 1 });
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)).toEqual([]);
+    expect(prisma._state.outbox[0].status).toBe("SUCCEEDED");
+  });
+
+  it("never renders frozen outbox rank or gap after standings change", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    ids(8).forEach((id, i) => addStanding(prisma, id, 180 - i * 4));
+    addStanding(prisma, "above", 114);
+    addStanding(prisma, player, 110, { name: "John Mccloud" });
+
+    const id = await enqueueAnnouncement(outbox, {
+      fromRank: null,
+      toRank: 10,
+      pointsBehindNext: 4
+    });
+    prisma._state.standings.find((s: any) => s.crmContactId === "above").totalPoints = 125;
+    prisma._state.standings.find((s: any) => s.crmContactId === player).totalPoints = 118;
+    await processor.processJob(id);
+
+    const text = sentTexts(tgState)[0] ?? "";
+    expect(text).toBe("🔥 John Mccloud is now #10!\n7 points behind #9.");
+    expect(text).not.toContain("moved unranked");
+    expect(text).not.toContain("4 points behind");
+  });
+
+  it("revalidates rank-sensitive personal DMs from current standings", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    prisma._state.playerLinks.push({
+      id: "link-1",
+      botIntegrationId: "99999999-9999-4999-8999-999999999999",
+      ownerCoadminUserId: ownerA,
+      crmContactId: player,
+      telegramUserId: "555"
+    });
+    addStanding(prisma, "above", 125);
+    addStanding(prisma, player, 110, { name: "John Mccloud" });
+
+    const id = await outbox.enqueuePlayerDm({
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      crmContactId: player,
+      kind: "ENTER_TOP_10",
+      fromRank: null,
+      toRank: 10,
+      totalPoints: 10
+    });
+    await processor.processJob(id);
+
+    const dm = tgState.chats.get(555)?.messages.at(-1)?.text ?? "";
+    expect(dm).toContain("You're now #2");
+    expect(dm).toContain("Points: 110");
+    expect(dm).not.toContain("Moved from unranked → #10");
+    expect(dm).not.toContain("Points: 10");
   });
 });

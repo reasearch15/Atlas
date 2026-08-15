@@ -244,6 +244,7 @@ export function createMemoryPrisma() {
       settings,
       payouts,
       audits,
+      playerLinks,
       wheelConfigs
     }
   };

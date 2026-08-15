@@ -213,4 +213,28 @@ describe("formatPersonalAnnouncementDm", () => {
     expect(text).toContain("referral reached a milestone");
     expect(text).toContain("+50 leaderboard points");
   });
+
+  it("omits unproven historical movement and points the player to /rank", () => {
+    const text = formatPersonalAnnouncementDm({
+      kind: "ENTER_TOP_10",
+      fromRank: 10,
+      toRank: 10,
+      totalPoints: 110
+    });
+    expect(text).toContain("You're now #10");
+    expect(text).toContain("Points: 110");
+    expect(text).toContain("Open /rank");
+    expect(text).not.toContain("Moved from");
+  });
+
+  it("keeps proven climb wording", () => {
+    const text = formatPersonalAnnouncementDm({
+      kind: "ENTER_TOP_10",
+      fromRank: 12,
+      toRank: 8,
+      totalPoints: 140
+    });
+    expect(text).toContain("You entered Top 10");
+    expect(text).toContain("Moved from #12 → #8");
+  });
 });

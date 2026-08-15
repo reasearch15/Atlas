@@ -212,23 +212,41 @@ export function formatPersonalAnnouncementDm(input: {
   readonly toRank: number;
   readonly totalPoints?: number;
 }): string {
-  const from = input.fromRank == null ? "unranked" : `#${input.fromRank}`;
   const points =
     input.totalPoints != null ? `\nPoints: ${Math.trunc(input.totalPoints)}` : "";
+  const provenMove =
+    input.fromRank != null && input.toRank > 0 && input.fromRank > input.toRank;
+  const nowRank = input.toRank > 0 ? `#${input.toRank}` : null;
+  const openRank = "Open /rank for your latest standing.";
+
   switch (input.kind) {
     case "REACHED_NUMBER_1":
-      return `🥇 You reached #1!\nMoved from ${from} → #1.${points}`;
+      return provenMove
+        ? `🥇 You reached #1!\nMoved from #${input.fromRank} → #1.${points}`
+        : `🥇 You reached #1!${points}\n${openRank}`;
     case "ENTER_TOP_3":
-      return `🏅 You entered Top 3!\nMoved from ${from} → #${input.toRank}.${points}`;
+      return provenMove
+        ? `🏅 You entered Top 3!\nMoved from #${input.fromRank} → #${input.toRank}.${points}`
+        : nowRank
+          ? `🏅 You're now ${nowRank} on the leaderboard.${points}\n${openRank}`
+          : `🏅 Leaderboard update.${points}\n${openRank}`;
     case "ENTER_TOP_10":
-      return `🔥 You entered Top 10!\nMoved from ${from} → #${input.toRank}.${points}`;
+      return provenMove
+        ? `🔥 You entered Top 10!\nMoved from #${input.fromRank} → #${input.toRank}.${points}`
+        : nowRank
+          ? `🔥 You're now ${nowRank} on the leaderboard.${points}\n${openRank}`
+          : `🔥 Leaderboard update.${points}\n${openRank}`;
     case "TOP_3_ORDER_CHANGED":
-      return `↕️ Top 3 reorder: you moved from ${from} → #${input.toRank}.${points}`;
+      return provenMove
+        ? `↕️ Top 3 reorder: you moved from #${input.fromRank} → #${input.toRank}.${points}`
+        : nowRank
+          ? `↕️ You're now ${nowRank} on the leaderboard.${points}\n${openRank}`
+          : `↕️ Leaderboard update.${points}\n${openRank}`;
     case "REFERRAL_MILESTONE":
       return [
         "🤝 Your referral reached a milestone.",
         input.totalPoints != null ? `+${Math.trunc(input.totalPoints)} leaderboard points!` : null,
-        "Open /rank for your latest standing."
+        openRank
       ]
         .filter((line): line is string => Boolean(line))
         .join("\n");
@@ -236,12 +254,16 @@ export function formatPersonalAnnouncementDm(input: {
       return [
         "🎡 Wheel spin complete!",
         input.totalPoints != null ? `You won +${Math.trunc(input.totalPoints)} wheel points.` : null,
-        "Open /rank for your latest standing."
+        openRank
       ]
         .filter((line): line is string => Boolean(line))
         .join("\n");
     default:
-      return `📈 Rank update: ${from} → #${input.toRank}.${points}\nOpen /rank for details.`;
+      return provenMove
+        ? `📈 Rank update: #${input.fromRank} → #${input.toRank}.${points}\nOpen /rank for details.`
+        : nowRank
+          ? `📈 You're now ${nowRank}.${points}\nOpen /rank for details.`
+          : `📈 Rank update.${points}\nOpen /rank for details.`;
   }
 }
 
