@@ -5,7 +5,6 @@ import {
   buildIncomingCallDedupeKey,
   contactDisplayTitleQuality,
   isOfficialTelegramServicePeer,
-  isTemporaryTelegramUserTitle,
   normalizeMarkedTelegramChatId,
   reopenStatusOnInbound,
   shouldIgnoreTelegramDialog,
@@ -38,6 +37,7 @@ import {
 } from "./entity-resolution";
 import { applySoftDeletedMessage } from "./message-deletion";
 import { buildCallerDisplayName } from "./phone-call";
+import { healLinkedCrmContactIdentityFromChat } from "./crm-contact-identity-repair";
 const activeAccounts = new Map<string, TelegramRuntime>();
 /** In-process guard against reconnect/replay of the same PhoneCallRequested. */
 const publishedIncomingCalls = new Set<string>();
@@ -667,6 +667,8 @@ async function upsertChat(
     }
   });
 
+  await healLinkedCrmContactIdentityFromChat(prisma, chat);
+
   // Invariant: if live hash was available, the row must now carry it.
   if ((liveMeta.hadInputPeerHash || peerFields.accessHash) && !chat.accessHash) {
     console.error(
@@ -754,7 +756,6 @@ async function linkCrmContact(
     where: { workspaceId_telegramPeerId: { workspaceId, telegramPeerId: message.telegramChatId } },
     update: {
       lastSeenAt: new Date(),
-      ...(identity?.username ? { username: identity.username } : {}),
       // Heal stuck UNKNOWN person rows once we know the peer kind (or can infer user id).
       ...(resolvedKind !== "UNKNOWN" ? { kind: resolvedKind } : {})
     },
@@ -766,18 +767,6 @@ async function linkCrmContact(
       username: identity?.username ?? null
     }
   });
-
-  // Upgrade placeholder / temporary CRM names without overwriting curated contact names.
-  if (
-    (isTemporaryTelegramUserTitle(contact.displayName) || /^unknown(\s|$)/i.test(contact.displayName)) &&
-    !isTemporaryTelegramUserTitle(displayName) &&
-    !/^unknown(\s|$)/i.test(displayName)
-  ) {
-    await prisma.crmContact.update({
-      where: { id: contact.id },
-      data: { displayName }
-    });
-  }
 
   return contact.id;
 }
@@ -800,7 +789,9 @@ async function improveChatIdentityLater(input: {
     const chat = await prisma.telegramChat.findFirst({
       where: { id: chatId, telegramAccountId, isArchived: false }
     });
-    if (!chat || isUsableDisplayTitle(chat.title, chat.telegramChatId)) return;
+    if (!chat) return;
+    await healLinkedCrmContactIdentityFromChat(prisma, chat);
+    if (isUsableDisplayTitle(chat.title, chat.telegramChatId)) return;
 
     const identity = await adapter.resolveChatIdentity(runtime, chat.telegramChatId, {
       chatType: chat.chatType,
@@ -819,24 +810,7 @@ async function improveChatIdentityLater(input: {
       data
     });
 
-    if (chat.crmContactId) {
-      const nextName = typeof data.title === "string" ? data.title : updated.title;
-      if (isUsableDisplayTitle(nextName, chat.telegramChatId)) {
-        await prisma.crmContact
-          .updateMany({
-            where: {
-              id: chat.crmContactId,
-              OR: [
-                { displayName: { startsWith: "Unknown", mode: "insensitive" } },
-                { displayName: { startsWith: "Telegram user ", mode: "insensitive" } },
-                { displayName: chat.telegramChatId }
-              ]
-            },
-            data: { displayName: nextName }
-          })
-          .catch(() => undefined);
-      }
-    }
+    await healLinkedCrmContactIdentityFromChat(prisma, updated);
 
     await redis.publish(
       "atlas.workspace-events",

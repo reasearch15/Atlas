@@ -267,3 +267,138 @@ function cleanDisplayPart(value: string | null | undefined): string | null {
 function isRawTelegramId(value: string): boolean {
   return /^-?\d{5,}$/.test(value.trim());
 }
+
+export interface LinkedCrmContactIdentity {
+  readonly workspaceId: string;
+  readonly displayName: string | null;
+  readonly username: string | null;
+}
+
+export interface LinkedTelegramChatIdentity {
+  readonly workspaceId: string;
+  readonly telegramChatId: string;
+  readonly chatType?: TelegramCrmChatType | null;
+  readonly firstName?: string | null;
+  readonly lastName?: string | null;
+  readonly username?: string | null;
+  readonly title?: string | null;
+  readonly isBot?: boolean | null;
+  readonly isSelf?: boolean | null;
+  readonly isSupport?: boolean | null;
+  readonly isArchived?: boolean | null;
+}
+
+export interface CrmContactIdentityRepairPlan {
+  readonly displayName?: string;
+  readonly username?: string;
+}
+
+/**
+ * True for empty / whitespace values and internal placeholders
+ * (Unknown, Unknown User, Telegram user <id>, naked peer ids).
+ */
+export function isPlaceholderCrmDisplayName(
+  value: string | null | undefined,
+  telegramChatId?: string | null
+): boolean {
+  const trimmed = cleanDisplayPart(value);
+  if (!trimmed) return true;
+  if (/^unknown(\s|$)/i.test(trimmed)) return true;
+  if (isTemporaryTelegramUserTitle(trimmed)) return true;
+  if (telegramChatId && trimmed === telegramChatId.trim()) return true;
+  return false;
+}
+
+export function isBlankCrmUsername(value: string | null | undefined): boolean {
+  return cleanDisplayPart(value) == null;
+}
+
+/** Cheap gate: CRM name is a placeholder and/or username is blank. */
+export function isCrmContactIdentityWeak(
+  displayName: string | null | undefined,
+  username: string | null | undefined,
+  telegramChatId?: string | null
+): boolean {
+  return isPlaceholderCrmDisplayName(displayName, telegramChatId) || isBlankCrmUsername(username);
+}
+
+function isPrivatePlayerChat(chat: LinkedTelegramChatIdentity): boolean {
+  const chatType = String(chat.chatType ?? "UNKNOWN").toUpperCase();
+  if (chatType === "PRIVATE") return true;
+  if (chatType === "UNKNOWN" && /^\d+$/.test(bareTelegramPeerId(chat.telegramChatId))) return true;
+  return false;
+}
+
+/**
+ * True when persisted Telegram fields can produce a better player identity
+ * than a CRM placeholder. In-memory only — no database access.
+ */
+export function telegramChatHasRepairableIdentity(chat: LinkedTelegramChatIdentity): boolean {
+  if (!isPrivatePlayerChat(chat) || chat.isBot) return false;
+  if (
+    shouldIgnoreTelegramDialog({
+      telegramChatId: chat.telegramChatId,
+      chatType: chat.chatType ?? null,
+      title: chat.title ?? null,
+      username: chat.username ?? null,
+      firstName: chat.firstName ?? null,
+      lastName: chat.lastName ?? null,
+      isSelf: chat.isSelf ?? null,
+      isSupport: chat.isSupport ?? null,
+      isArchived: chat.isArchived ?? null
+    })
+  ) {
+    return false;
+  }
+  const derived = buildCrmContactDisplayTitle({
+    firstName: chat.firstName ?? null,
+    lastName: chat.lastName ?? null,
+    username: chat.username ?? null,
+    telegramChatId: chat.telegramChatId,
+    groupTitle: chat.title ?? null,
+    chatType: "PRIVATE",
+    isBot: chat.isBot ?? false
+  });
+  if (isUsableHumanDisplayTitle(derived, chat.telegramChatId)) return true;
+  const username = cleanDisplayPart(chat.username)?.replace(/^@/, "") ?? null;
+  return Boolean(username && !isRawTelegramId(username));
+}
+
+/**
+ * Plans a safe CRM identity upgrade from a linked PRIVATE Telegram chat.
+ * Never overwrites a legitimate CRM name/username, never downgrades to Unknown,
+ * and never repairs official/service/bot/non-private peers.
+ */
+export function planLinkedCrmContactIdentityRepair(input: {
+  readonly contact: LinkedCrmContactIdentity;
+  readonly chat: LinkedTelegramChatIdentity;
+}): CrmContactIdentityRepairPlan | null {
+  if (input.contact.workspaceId !== input.chat.workspaceId) return null;
+  if (!telegramChatHasRepairableIdentity(input.chat)) return null;
+
+  const derivedName = buildCrmContactDisplayTitle({
+    firstName: input.chat.firstName ?? null,
+    lastName: input.chat.lastName ?? null,
+    username: input.chat.username ?? null,
+    telegramChatId: input.chat.telegramChatId,
+    groupTitle: input.chat.title ?? null,
+    chatType: "PRIVATE",
+    isBot: input.chat.isBot ?? false
+  });
+
+  const patch: { displayName?: string; username?: string } = {};
+
+  if (
+    isPlaceholderCrmDisplayName(input.contact.displayName, input.chat.telegramChatId) &&
+    isUsableHumanDisplayTitle(derivedName, input.chat.telegramChatId)
+  ) {
+    patch.displayName = derivedName;
+  }
+
+  const telegramUsername = cleanDisplayPart(input.chat.username)?.replace(/^@/, "") ?? null;
+  if (isBlankCrmUsername(input.contact.username) && telegramUsername && !isRawTelegramId(telegramUsername)) {
+    patch.username = telegramUsername.slice(0, 120);
+  }
+
+  return patch.displayName || patch.username ? patch : null;
+}

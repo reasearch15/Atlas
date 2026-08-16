@@ -15,6 +15,7 @@ import {
   formatTelegramUserFallbackTitle,
   isTemporaryTelegramUserTitle,
   isUsableHumanDisplayTitle,
+  planLinkedCrmContactIdentityRepair,
   shouldIgnoreTelegramDialog
 } from "@atlas/shared";
 
@@ -28,6 +29,39 @@ function isCandidateTitle(title, telegramChatId) {
   if (isTemporaryTelegramUserTitle(trimmed)) return true;
   if (trimmed === telegramChatId.trim()) return true;
   return false;
+}
+
+async function healLinkedCrmContact(chat, apply) {
+  if (!chat.crmContactId) return false;
+  const contact = await prisma.crmContact.findFirst({
+    where: { id: chat.crmContactId, workspaceId: chat.workspaceId },
+    select: { id: true, workspaceId: true, displayName: true, username: true }
+  });
+  if (!contact) return false;
+  const plan = planLinkedCrmContactIdentityRepair({
+    contact,
+    chat: {
+      workspaceId: chat.workspaceId,
+      telegramChatId: chat.telegramChatId,
+      chatType: chat.chatType,
+      title: chat.title,
+      username: chat.username,
+      firstName: chat.firstName,
+      lastName: chat.lastName,
+      isBot: chat.isBot
+    }
+  });
+  if (!plan) return false;
+  if (apply) {
+    await prisma.crmContact.update({
+      where: { id: contact.id },
+      data: {
+        ...(plan.displayName !== undefined ? { displayName: plan.displayName } : {}),
+        ...(plan.username !== undefined ? { username: plan.username } : {})
+      }
+    });
+  }
+  return true;
 }
 
 async function main() {
@@ -61,6 +95,7 @@ async function main() {
   let skippedGroup = 0;
   let incompleteAccessHash = 0;
   let incompletePeerType = 0;
+  let crmIdentitiesHealed = 0;
 
   for (const chat of chats) {
     scanned += 1;
@@ -91,6 +126,7 @@ async function main() {
     if (isPrivate && !chat.peerType) incompletePeerType += 1;
 
     if (!isCandidateTitle(chat.title, chat.telegramChatId)) {
+      if (await healLinkedCrmContact(chat, apply)) crmIdentitiesHealed += 1;
       continue;
     }
     candidates += 1;
@@ -129,22 +165,8 @@ async function main() {
           where: { id: chat.id },
           data: { title: nextTitle }
         });
-        if (chat.crmContactId) {
-          await prisma.crmContact
-            .updateMany({
-              where: {
-                id: chat.crmContactId,
-                OR: [
-                  { displayName: { startsWith: "Unknown", mode: "insensitive" } },
-                  { displayName: { startsWith: "Telegram user ", mode: "insensitive" } },
-                  { displayName: chat.telegramChatId }
-                ]
-              },
-              data: { displayName: nextTitle }
-            })
-            .catch(() => undefined);
-        }
       }
+      if (await healLinkedCrmContact({ ...chat, title: nextTitle }, apply)) crmIdentitiesHealed += 1;
       continue;
     }
 
@@ -172,6 +194,7 @@ async function main() {
         incompletePrivateMissingPeerType: incompletePeerType,
         skippedService,
         skippedGroupHint: skippedGroup,
+        crmIdentitiesHealed,
         hint: apply
           ? "Applied DB title normalization. Trigger chat-metadata-backfill / INITIAL_SYNC for live Telegram entity resolve. Access hashes only resolve from live inbound or worker entity backfill."
           : "Dry-run only. Set CONFIRM_APPLY=YES to write titles. Entity/access_hash resolve still requires worker live inbound or metadata backfill."

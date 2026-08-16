@@ -34,6 +34,10 @@ import {
   type ResolvedTelegramPeer
 } from "./entity-resolution";
 import { applySoftDeletedMessage } from "./message-deletion";
+import {
+  healLinkedCrmContactIdentityFromChat,
+  healWeakLinkedCrmIdentitiesForAccount
+} from "./crm-contact-identity-repair";
 
 const LEASE_ACQUIRE_TIMEOUT_MS = 3_000;
 
@@ -545,6 +549,17 @@ export async function processInitialSync(
       5,
       redis ? { redis, workspaceId: command.workspaceId } : { workspaceId: command.workspaceId }
     );
+    const crmIdentityHeal = await healWeakLinkedCrmIdentitiesForAccount(prisma, {
+      workspaceId: command.workspaceId,
+      telegramAccountId: command.telegramAccountId
+    });
+    if (crmIdentityHeal.updated > 0) {
+      logPlain({
+        event: "telegram_sync.crm_identities_healed",
+        accountId: command.telegramAccountId,
+        ...crmIdentityHeal
+      });
+    }
     if (!metadataOnly && redis) {
       try {
         const store = createMediaObjectStore(env);
@@ -1599,6 +1614,7 @@ async function syncInitialPage(
         }
       });
       savedDialogs += 1;
+      await healLinkedCrmContactIdentityFromChat(prisma, chat);
       const messages = await adapter.listRecentTextMessages(runtime, dialog.telegramChatId, 10, {
         chatType: dialog.chatType,
         username: dialog.username,
@@ -1773,6 +1789,7 @@ async function backfillMissingChatIdentities(
         where: { id: chat.id },
         data
       });
+      await healLinkedCrmContactIdentityFromChat(prisma, row);
       const improved =
         identityUpdateImproves(chat, data) === "updated" ||
         isUsableDisplayTitle(identity.title, identity.telegramChatId);

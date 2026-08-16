@@ -3,9 +3,12 @@ import {
   buildCrmContactDisplayTitle,
   contactDisplayTitleQuality,
   isOfficialTelegramServicePeer,
+  isPlaceholderCrmDisplayName,
   isTemporaryTelegramUserTitle,
   isUsableHumanDisplayTitle,
-  shouldIgnoreTelegramDialog
+  planLinkedCrmContactIdentityRepair,
+  shouldIgnoreTelegramDialog,
+  telegramChatHasRepairableIdentity
 } from "./telegram-crm-identity";
 
 describe("shouldIgnoreTelegramDialog", () => {
@@ -161,5 +164,219 @@ describe("entity resolution title upgrade", () => {
     expect(isUsableHumanDisplayTitle(after, "555")).toBe(true);
     expect(isUsableHumanDisplayTitle(before, "555")).toBe(false);
     expect(isUsableHumanDisplayTitle("Unknown User", "555")).toBe(false);
+  });
+});
+
+describe("planLinkedCrmContactIdentityRepair", () => {
+  const workspaceA = "workspace-a";
+  const workspaceB = "workspace-b";
+
+  function contact(partial: { displayName?: string | null; username?: string | null; workspaceId?: string }) {
+    return {
+      workspaceId: partial.workspaceId ?? workspaceA,
+      displayName: partial.displayName ?? "Unknown",
+      username: partial.username ?? null
+    };
+  }
+
+  function privateChat(
+    partial: Partial<{
+      telegramChatId: string;
+      firstName: string | null;
+      lastName: string | null;
+      username: string | null;
+      title: string | null;
+      chatType: string;
+      isBot: boolean;
+      workspaceId: string;
+    }> = {}
+  ) {
+    return {
+      workspaceId: partial.workspaceId ?? workspaceA,
+      telegramChatId: partial.telegramChatId ?? "8771801870",
+      chatType: partial.chatType ?? "PRIVATE",
+      firstName: partial.firstName ?? null,
+      lastName: partial.lastName ?? null,
+      username: partial.username ?? null,
+      title: partial.title ?? null,
+      isBot: partial.isBot ?? false
+    };
+  }
+
+  it("upgrades Unknown to first + last name (Joe Mashburn)", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Unknown" }),
+        chat: privateChat({
+          firstName: "Joe",
+          lastName: "Mashburn",
+          username: "waylon_rivers85",
+          title: "Joe Mashburn"
+        })
+      })
+    ).toEqual({ displayName: "Joe Mashburn", username: "waylon_rivers85" });
+  });
+
+  it("fills a blank CRM username from Telegram", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Joe Mashburn", username: "  " }),
+        chat: privateChat({
+          firstName: "Joe",
+          lastName: "Mashburn",
+          username: "waylon_rivers85"
+        })
+      })
+    ).toEqual({ username: "waylon_rivers85" });
+  });
+
+  it("heals after delayed Telegram identity arrival", () => {
+    const chatId = "555001";
+    const first = planLinkedCrmContactIdentityRepair({
+      contact: contact({ displayName: "Unknown" }),
+      chat: privateChat({ telegramChatId: chatId })
+    });
+    expect(first).toBeNull();
+    expect(telegramChatHasRepairableIdentity(privateChat({ telegramChatId: chatId }))).toBe(false);
+
+    const later = planLinkedCrmContactIdentityRepair({
+      contact: contact({ displayName: "Unknown User" }),
+      chat: privateChat({
+        telegramChatId: chatId,
+        firstName: "Joe",
+        lastName: "Mashburn",
+        title: "Joe Mashburn"
+      })
+    });
+    expect(later).toEqual({ displayName: "Joe Mashburn" });
+  });
+
+  it("preserves a legitimate custom CRM display name", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Custom Player Name", username: "kept_user" }),
+        chat: privateChat({
+          firstName: "Joe",
+          lastName: "Mashburn",
+          username: "waylon_rivers85"
+        })
+      })
+    ).toBeNull();
+  });
+
+  it("never downgrades a real CRM name when Telegram fields go blank", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Joe Mashburn", username: "waylon_rivers85" }),
+        chat: privateChat({
+          firstName: null,
+          lastName: null,
+          username: null,
+          title: null
+        })
+      })
+    ).toBeNull();
+  });
+
+  it("excludes official Telegram service peers such as 777000", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Unknown" }),
+        chat: privateChat({
+          telegramChatId: "777000",
+          firstName: "Telegram",
+          title: "Telegram"
+        })
+      })
+    ).toBeNull();
+    expect(
+      telegramChatHasRepairableIdentity(
+        privateChat({ telegramChatId: "777000", firstName: "Telegram", title: "Telegram" })
+      )
+    ).toBe(false);
+  });
+
+  it("does not apply PRIVATE-player naming to groups or bots", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Unknown" }),
+        chat: privateChat({
+          chatType: "GROUP",
+          title: "Staff Room",
+          firstName: "Joe",
+          lastName: "Mashburn"
+        })
+      })
+    ).toBeNull();
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Unknown" }),
+        chat: privateChat({
+          isBot: true,
+          firstName: "Helper",
+          username: "helper_bot"
+        })
+      })
+    ).toBeNull();
+  });
+
+  it("never repairs a contact using a chat from another workspace", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ workspaceId: workspaceA, displayName: "Unknown" }),
+        chat: privateChat({
+          workspaceId: workspaceB,
+          firstName: "Jonah",
+          lastName: "Leal",
+          username: "Jhood69"
+        })
+      })
+    ).toBeNull();
+  });
+
+  it("repairs an existing Unknown row from already-persisted Telegram fields (Jonah Leal)", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Unknown", username: "" }),
+        chat: privateChat({
+          telegramChatId: "1002",
+          firstName: "Jonah",
+          lastName: "Leal",
+          username: "Jhood69",
+          title: "Jonah Leal"
+        })
+      })
+    ).toEqual({ displayName: "Jonah Leal", username: "Jhood69" });
+  });
+
+  it("is idempotent once CRM already matches the Telegram identity", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Joe Mashburn", username: "waylon_rivers85" }),
+        chat: privateChat({
+          firstName: "Joe",
+          lastName: "Mashburn",
+          username: "waylon_rivers85",
+          title: "Joe Mashburn"
+        })
+      })
+    ).toBeNull();
+  });
+
+  it("uses username as display name when names are missing", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "Unknown" }),
+        chat: privateChat({ username: "waylon_rivers85" })
+      })
+    ).toEqual({ displayName: "waylon_rivers85", username: "waylon_rivers85" });
+  });
+
+  it("treats Unknown / Unknown User / empty / Telegram user fallback as placeholders", () => {
+    expect(isPlaceholderCrmDisplayName("Unknown")).toBe(true);
+    expect(isPlaceholderCrmDisplayName("Unknown User")).toBe(true);
+    expect(isPlaceholderCrmDisplayName("  ")).toBe(true);
+    expect(isPlaceholderCrmDisplayName("Telegram user 8771801870", "8771801870")).toBe(true);
+    expect(isPlaceholderCrmDisplayName("Joe Mashburn")).toBe(false);
   });
 });
