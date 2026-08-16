@@ -48,7 +48,8 @@ describe("formatPersonalRankMessage", () => {
       }
     });
     expect(text).toContain("🎡 Wheel: $26 / $40");
-    expect(text).toContain("$14 more qualifying deposits needed this cycle.");
+    expect(text).toContain("$14 more qualifying deposits needed.");
+    expect(text).not.toContain("this cycle");
     expect(text).not.toMatch(/%|probability|weight/i);
   });
 
@@ -88,11 +89,15 @@ describe("formatPersonalRankMessage", () => {
         qualificationCentsRequired: 4000,
         available: false,
         consumed: true,
+        qualified: true,
+        nextSpinAt: "2026-08-17T04:00:00.000Z",
         pointsAwarded: 30,
         cycleSequence: 1
       }
     });
-    expect(used).toContain("Used for this cycle");
+    expect(used).toContain("Qualified ✓");
+    expect(used).toContain("Next spin available");
+    expect(used).not.toContain("this cycle");
   });
 });
 

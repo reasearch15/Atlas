@@ -12,7 +12,15 @@ import {
 import { LeaderboardError } from "./leaderboard.errors";
 import type { CompetitionRow, EventRow, StandingRow } from "./leaderboard.types";
 import { withRanks } from "./ranking";
-import { cycleContaining, listCycles, type WheelCycleWindow } from "./wheel-cycles";
+import { cycleContaining, listCycles } from "./wheel-cycles";
+import {
+  eventCountsTowardQualification,
+  isWheelQualified,
+  nextWheelSpinAt,
+  sumConsumedQualificationCents,
+  sumQualifyingDepositCents,
+  wheelCooldownSatisfied
+} from "./wheel-qualification";
 import {
   parseRewardDistributionJson,
   type WheelDistributionOutcome
@@ -23,7 +31,8 @@ import { selectWeightedPoints, type WheelRng } from "./wheel-rng";
  * Phase 6 / 6.1 — 48-hour Wheel domain (in-memory for tests).
  *
  * Product locks: CYCLE_DEPOSITS_ALL, approved distribution v1 (EV 13.7),
- * $40 / 1 spin / cycle, no clawback, no retroactive completed-cycle spins.
+ * $40 rolling 48h qualification, 1 spin / 48h cooldown, no clawback.
+ * Global 48h cycle rows remain for spin audit only.
  * Bot Spin callback: DEFERRED.
  */
 
@@ -112,6 +121,8 @@ export interface WheelPlayerStatus {
   readonly qualificationCentsRequired: number;
   readonly available: boolean;
   readonly consumed: boolean;
+  readonly qualified: boolean;
+  readonly nextSpinAt: string | null;
   readonly pointsAwarded: number | null;
   readonly qualificationInvalidated: boolean;
   readonly wheelPoints: number;
@@ -157,7 +168,7 @@ export function wheelCompetitionNotActive(): LeaderboardError {
 export function wheelAlreadyConsumed(): LeaderboardError {
   return new LeaderboardError(
     "WHEEL_ALREADY_CONSUMED",
-    "This player already used their wheel spin for the current 48-hour cycle."
+    "This player already used their wheel spin in the last 48 hours."
   );
 }
 
@@ -376,14 +387,17 @@ export class WheelService {
     now = new Date()
   ): WheelQualificationRow {
     const config = this.ensureConfig(competition.workspaceId, ownerCoadminUserId, now);
-    const cents = this.sumCycleDepositCents({
+    const lastSpin = this.findLatestSpin(ownerCoadminUserId, crmContactId);
+    const cents = this.sumRollingDepositCents({
+      workspaceId: competition.workspaceId,
       ownerCoadminUserId,
-      competitionId: competition.id,
       crmContactId,
-      cycle,
+      now,
+      lastSpinAt: lastSpin?.spunAt ?? null,
       policy: config.qualificationCreditPolicy,
       enabledAt: config.enabledAt
     });
+    this.maybeInvalidateLastSpin(ownerCoadminUserId, crmContactId, now);
 
     let qual = this.store.qualifications.find(
       (q) => q.cycleId === cycle.id && q.crmContactId === crmContactId
@@ -407,33 +421,18 @@ export class WheelService {
       this.store.qualifications.push(qual);
     }
 
-    qual.qualifyingDepositCents = cents;
-    qual.updatedAt = now;
-
-    const consumed = qual.consumedAt != null || qual.spinId != null;
+    const cooldownOk = wheelCooldownSatisfied(now, lastSpin?.spunAt ?? null);
     const wheelReady =
       config.enabled && config.activeVersionId != null && competition.status === "ACTIVE";
+    const qualified = isWheelQualified(cents);
 
-    if (consumed) {
-      qual.available = false;
-      if (cents < WHEEL_QUALIFICATION_CENTS) {
-        const spin = this.store.spins.find((s) => s.id === qual!.spinId);
-        if (spin && spin.qualificationInvalidatedAt == null) {
-          spin.qualificationInvalidatedAt = now;
-        }
-      }
-      return qual;
-    }
-
-    const qualifies = cents >= WHEEL_QUALIFICATION_CENTS && wheelReady;
-    if (qualifies) {
-      qual.available = true;
+    qual.qualifyingDepositCents = cents;
+    qual.updatedAt = now;
+    qual.available = qualified && cooldownOk && wheelReady;
+    if (qualified) {
       qual.qualifiedAt = qual.qualifiedAt ?? now;
-    } else {
-      qual.available = false;
-      if (cents < WHEEL_QUALIFICATION_CENTS) {
-        qual.qualifiedAt = null;
-      }
+    } else if (!lastSpin) {
+      qual.qualifiedAt = null;
     }
     return qual;
   }
@@ -452,20 +451,40 @@ export class WheelService {
         )
       : undefined;
 
+    const lastSpin = this.findLatestSpin(ownerCoadminUserId, crmContactId);
+    const nextSpin = nextWheelSpinAt(lastSpin?.spunAt ?? null);
+    const cents = this.sumRollingDepositCents({
+      workspaceId,
+      ownerCoadminUserId,
+      crmContactId,
+      now,
+      lastSpinAt: lastSpin?.spunAt ?? null,
+      policy: config.qualificationCreditPolicy,
+      enabledAt: config.enabledAt
+    });
+    this.maybeInvalidateLastSpin(ownerCoadminUserId, crmContactId, now);
+
+    const qualified = isWheelQualified(cents);
+    const cooldownOk = wheelCooldownSatisfied(now, lastSpin?.spunAt ?? null);
+    const consumed = lastSpin != null && !cooldownOk;
+    const window = competition ? cycleContaining(competition, now) : null;
+
     const base: WheelPlayerStatus = {
       wheelEnabled: config.enabled,
       configured: config.activeVersionId != null,
       competitionId: competition?.id ?? null,
       competitionStatus: competition?.status ?? null,
-      cycleSequence: null,
-      cycleStartsAt: null,
-      cycleEndsAt: null,
-      qualifyingDepositCents: 0,
+      cycleSequence: window?.sequence ?? null,
+      cycleStartsAt: window?.startsAt.toISOString() ?? null,
+      cycleEndsAt: window?.endsAt.toISOString() ?? null,
+      qualifyingDepositCents: cents,
       qualificationCentsRequired: WHEEL_QUALIFICATION_CENTS,
       available: false,
-      consumed: false,
-      pointsAwarded: null,
-      qualificationInvalidated: false,
+      consumed,
+      qualified,
+      nextSpinAt: nextSpin?.toISOString() ?? null,
+      pointsAwarded: consumed ? lastSpin?.pointsAwarded ?? null : null,
+      qualificationInvalidated: lastSpin?.qualificationInvalidatedAt != null,
       wheelPoints: standing?.wheelPoints ?? 0,
       reasonCode: null
     };
@@ -483,32 +502,16 @@ export class WheelService {
       return { ...base, reasonCode: "WHEEL_NOT_CONFIGURED" };
     }
 
-    const cycles = this.ensureCyclesForCompetition(competition);
-    const window = cycleContaining(competition, now);
-    if (!window) {
-      return { ...base, reasonCode: "NO_CYCLE" };
-    }
-    const cycle = cycles.find((c) => c.sequence === window.sequence)!;
-    const qual = this.recomputeQualification(ownerCoadminUserId, competition, cycle, crmContactId, now);
-    const spin = qual.spinId ? this.store.spins.find((s) => s.id === qual.spinId) : undefined;
-
+    const available = qualified && cooldownOk;
     return {
       ...base,
-      cycleSequence: cycle.sequence,
-      cycleStartsAt: cycle.startsAt.toISOString(),
-      cycleEndsAt: cycle.endsAt.toISOString(),
-      qualifyingDepositCents: qual.qualifyingDepositCents,
-      available: qual.available,
-      consumed: qual.consumedAt != null,
-      pointsAwarded: spin?.pointsAwarded ?? null,
-      qualificationInvalidated: spin?.qualificationInvalidatedAt != null,
-      wheelPoints: standing?.wheelPoints ?? 0,
-      reasonCode: qual.available
+      available,
+      reasonCode: available
         ? null
-        : qual.consumedAt
-          ? "ALREADY_SPUN"
-          : qual.qualifyingDepositCents < WHEEL_QUALIFICATION_CENTS
-            ? "BELOW_QUALIFICATION"
+        : !qualified
+          ? "BELOW_QUALIFICATION"
+          : consumed
+            ? "COOLDOWN"
             : "NOT_AVAILABLE"
     };
   }
@@ -556,26 +559,30 @@ export class WheelService {
     if (!version) throw wheelNotConfigured();
     const distribution = parseRewardDistributionJson(version.rewardDistributionJson);
 
+    const lastSpin = this.findLatestSpin(owner, input.crmContactId);
+    if (!wheelCooldownSatisfied(now, lastSpin?.spunAt ?? null)) {
+      throw wheelAlreadyConsumed();
+    }
+    const cents = this.sumRollingDepositCents({
+      workspaceId: input.workspaceId,
+      ownerCoadminUserId: owner,
+      crmContactId: input.crmContactId,
+      now,
+      lastSpinAt: lastSpin?.spunAt ?? null,
+      policy: config.qualificationCreditPolicy,
+      enabledAt: config.enabledAt
+    });
+    if (!isWheelQualified(cents)) {
+      throw wheelNotAvailable(
+        `Need $${(WHEEL_QUALIFICATION_CENTS / 100).toFixed(0)} in qualifying deposits from the last 48 hours to spin.`
+      );
+    }
+
     const cycles = this.ensureCyclesForCompetition(competition);
     const window = cycleContaining(competition, now);
     if (!window) throw wheelNotAvailable("No wheel cycle for the current time.");
     const cycle = cycles.find((c) => c.sequence === window.sequence)!;
-
-    // Simulated FOR UPDATE: recompute then require available.
     const qual = this.recomputeQualification(owner, competition, cycle, input.crmContactId, now);
-    if (qual.consumedAt != null || qual.spinId != null) throw wheelAlreadyConsumed();
-    if (!qual.available) {
-      throw wheelNotAvailable(
-        qual.qualifyingDepositCents < WHEEL_QUALIFICATION_CENTS
-          ? `Need $${(WHEEL_QUALIFICATION_CENTS / 100).toFixed(0)} in cycle deposits to spin.`
-          : "Wheel spin is not available."
-      );
-    }
-
-    const cycleSpin = this.store.spins.find(
-      (s) => s.cycleId === cycle.id && s.crmContactId === input.crmContactId
-    );
-    if (cycleSpin) throw wheelAlreadyConsumed();
 
     const points = selectWeightedPoints(distribution.outcomes, input.rng);
     if (points < WHEEL_MIN_POINTS || points > WHEEL_MAX_POINTS) {
@@ -701,29 +708,57 @@ export class WheelService {
     return { spin, event, standing, replay: false };
   }
 
-  private sumCycleDepositCents(input: {
+  private findLatestSpin(ownerCoadminUserId: string, crmContactId: string): WheelSpinRow | undefined {
+    return this.store.spins
+      .filter((s) => s.ownerCoadminUserId === ownerCoadminUserId && s.crmContactId === crmContactId)
+      .sort((a, b) => b.spunAt.getTime() - a.spunAt.getTime())[0];
+  }
+
+  private maybeInvalidateLastSpin(
+    ownerCoadminUserId: string,
+    crmContactId: string,
+    now: Date
+  ): void {
+    const spins = this.store.spins
+      .filter((s) => s.ownerCoadminUserId === ownerCoadminUserId && s.crmContactId === crmContactId)
+      .sort((a, b) => b.spunAt.getTime() - a.spunAt.getTime());
+    const lastSpin = spins[0];
+    if (!lastSpin || lastSpin.qualificationInvalidatedAt != null) return;
+    const previousSpin = spins[1];
+    const consumedCents = sumConsumedQualificationCents(
+      this.store.events.filter(
+        (event) =>
+          event.ownerCoadminUserId === ownerCoadminUserId && event.crmContactId === crmContactId
+      ),
+      lastSpin.spunAt,
+      previousSpin?.spunAt ?? null
+    );
+    if (consumedCents < WHEEL_QUALIFICATION_CENTS) {
+      lastSpin.qualificationInvalidatedAt = now;
+    }
+  }
+
+  private sumRollingDepositCents(input: {
+    workspaceId: string;
     ownerCoadminUserId: string;
-    competitionId: string;
     crmContactId: string;
-    cycle: WheelCycleRow | WheelCycleWindow & { id?: string };
+    now: Date;
+    lastSpinAt: Date | null;
     policy: WheelQualificationCreditPolicy;
     enabledAt: Date | null;
   }): number {
-    let cents = 0;
-    for (const event of this.store.events) {
-      if (event.ownerCoadminUserId !== input.ownerCoadminUserId) continue;
-      if (event.competitionId !== input.competitionId) continue;
-      if (event.crmContactId !== input.crmContactId) continue;
-      if (event.type !== "DEPOSIT" && event.type !== "DEPOSIT_REVERSAL") continue;
-      const t = event.occurredAt.getTime();
-      if (t < input.cycle.startsAt.getTime() || t >= input.cycle.endsAt.getTime()) continue;
+    if (input.policy === "UNSET") return 0;
+    const events = this.store.events.filter((event) => {
+      if (event.workspaceId !== input.workspaceId) return false;
+      if (event.ownerCoadminUserId !== input.ownerCoadminUserId) return false;
+      if (event.crmContactId !== input.crmContactId) return false;
+      if (event.type !== "DEPOSIT" && event.type !== "DEPOSIT_REVERSAL") return false;
       if (input.policy === "CYCLE_DEPOSITS_AFTER_ENABLE") {
-        if (!input.enabledAt || t < input.enabledAt.getTime()) continue;
+        if (!input.enabledAt || event.occurredAt.getTime() < input.enabledAt.getTime()) return false;
       }
-      if (input.policy === "UNSET") continue;
-      cents += event.depositAmountCents ?? 0;
-    }
-    return Math.max(0, cents);
+      return eventCountsTowardQualification(event.occurredAt, input.now, input.lastSpinAt);
+    });
+    return sumQualifyingDepositCents(events, input.now, input.lastSpinAt);
   }
 
   private findActiveOrCurrentCompetition(

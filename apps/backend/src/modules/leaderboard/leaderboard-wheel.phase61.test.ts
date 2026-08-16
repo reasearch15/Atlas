@@ -246,7 +246,7 @@ describe("Phase 6.1 mid-cycle enablement", () => {
     expect(status.consumed).toBe(false);
   });
 
-  it("does not count prior completed-cycle deposits or award retroactive spins", () => {
+  it("still counts a prior-cycle deposit that is inside the rolling 48h window", () => {
     const store = createEmptyWheelStore();
     const service = new WheelService(store);
     const competition = seedCompetition(store);
@@ -254,11 +254,12 @@ describe("Phase 6.1 mid-cycle enablement", () => {
     const cycles = service.ensureCyclesForCompetition(competition);
     const prior = cycles[0]!;
     const current = cycles[1]!;
-    const priorDepositAt = new Date(prior.startsAt.getTime() + 60_000);
+    const priorDepositAt = new Date(current.startsAt.getTime() - 12 * 60 * 60_000);
     const enableAt = new Date(current.startsAt.getTime() + 60_000);
     const currentDepositAt = new Date(current.startsAt.getTime() + 120_000);
+    expect(priorDepositAt.getTime()).toBeGreaterThan(prior.startsAt.getTime());
 
-    addDeposit(store, competition, 10_000, priorDepositAt);
+    addDeposit(store, competition, 2500, priorDepositAt);
     service.ensureApprovedDistributionVersion({
       workspaceId: WS,
       ownerCoadminUserId: OWNER_A,
@@ -271,12 +272,11 @@ describe("Phase 6.1 mid-cycle enablement", () => {
       enabled: true,
       now: enableAt
     });
-    addDeposit(store, competition, 1000, currentDepositAt);
+    addDeposit(store, competition, 1500, currentDepositAt);
 
     const status = service.getStatus(WS, OWNER_A, CONTACT, currentDepositAt);
-    expect(status.cycleSequence).toBe(current.sequence);
-    expect(status.qualifyingDepositCents).toBe(1000);
-    expect(status.available).toBe(false);
+    expect(status.qualifyingDepositCents).toBe(4000);
+    expect(status.available).toBe(true);
     expect(store.spins).toHaveLength(0);
   });
 });

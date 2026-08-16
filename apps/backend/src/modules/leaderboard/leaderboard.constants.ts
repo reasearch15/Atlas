@@ -42,13 +42,13 @@ export const SECOND_PLACE_PAYOUT_BPS = 3000;
 /**
  * Phase 6 — 48-hour Wheel.
  *
- * Phase 6.1 product locks:
- * - Qualification threshold: $40 (4000 cents)
- * - Fixed 48h cycles × 7 per competition
- * - Max 1 spin per cycle
+ * Qualification is player-relative:
+ * - $40 (4000 cents) of DEPOSIT/DEPOSIT_REVERSAL in the rolling last 48 hours
+ * - after a successful spin, only deposits after that spin count
+ * - max 1 spin per player per 48 hours (cooldown from lastSpinAt)
+ * - global competition/cycle slices are historical audit only
  * - Qualification policy: CYCLE_DEPOSITS_ALL (enforced server-side)
  * - Approved distribution: see approved-wheel-distribution.ts (EV 13.7)
- * - No retroactive spins for completed cycles
  * - No post-spin automatic clawback
  */
 export const WHEEL_QUALIFICATION_CENTS = 4000; // $40

@@ -51,6 +51,8 @@ export interface BotWheelServicePort {
     qualificationCentsRequired: number;
     available: boolean;
     consumed: boolean;
+    qualified?: boolean;
+    nextSpinAt?: string | null;
     pointsAwarded: number | null;
     cycleSequence: number | null;
   }>;
@@ -755,6 +757,8 @@ export class LeaderboardBotUpdateHandler {
       qualificationCentsRequired: number;
       available: boolean;
       consumed: boolean;
+      qualified?: boolean;
+      nextSpinAt?: string | null;
       pointsAwarded: number | null;
       cycleSequence: number | null;
     } | null = null;
@@ -771,6 +775,8 @@ export class LeaderboardBotUpdateHandler {
           qualificationCentsRequired: status.qualificationCentsRequired,
           available: status.available,
           consumed: status.consumed,
+          ...(status.qualified != null ? { qualified: status.qualified } : {}),
+          ...(status.nextSpinAt !== undefined ? { nextSpinAt: status.nextSpinAt } : {}),
           pointsAwarded: status.pointsAwarded,
           cycleSequence: status.cycleSequence
         };
@@ -891,7 +897,7 @@ function mapWheelSpinCallbackError(error: unknown): string {
   if (error instanceof LeaderboardError) {
     switch (error.code) {
       case "WHEEL_ALREADY_CONSUMED":
-        return "You already used your spin for this cycle.";
+        return "You already used your spin. Next spin is available in 48 hours.";
       case "WHEEL_NOT_AVAILABLE":
       case "WHEEL_NOT_ENABLED":
       case "WHEEL_NOT_CONFIGURED":

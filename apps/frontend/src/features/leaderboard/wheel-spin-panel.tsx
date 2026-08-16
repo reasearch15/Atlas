@@ -49,6 +49,8 @@ export function WheelSpinPanel({
   const have = Math.floor(status.qualifyingDepositCents / 100);
   const need = Math.floor(status.qualificationCentsRequired / 100);
   const remaining = Math.max(0, need - have);
+  const qualified =
+    status.qualified ?? status.qualifyingDepositCents >= status.qualificationCentsRequired;
   const progress = Math.min(
     100,
     (status.qualifyingDepositCents / status.qualificationCentsRequired) * 100
@@ -97,53 +99,49 @@ export function WheelSpinPanel({
     return `🎡 +${spun.pointsAwarded} POINTS!${from}${prizeZone}`;
   }
 
-  const tone = status.consumed
-    ? "border-border/70 bg-muted/30"
-    : status.available
-      ? "border-emerald-300 bg-emerald-50/90"
-      : "border-amber-200 bg-amber-50/70";
+  const tone = status.available
+    ? "border-emerald-300 bg-emerald-50/90"
+    : qualified
+      ? "border-amber-200 bg-amber-50/70"
+      : "border-border/70 bg-muted/30";
 
   return (
     <div className={`space-y-2 rounded-lg border p-2.5 ${tone}`} data-testid="crm-wheel-panel">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-semibold tracking-wide text-foreground">
-          {status.consumed
-            ? "🎡 Spin used this cycle"
-            : status.available
-              ? "🎡 SPIN AVAILABLE"
+          {status.available
+            ? "🎡 SPIN AVAILABLE"
+            : qualified
+              ? "🎡 Qualified ✓"
               : "🎡 Next Spin"}
         </p>
-        {status.cycleEndsAt && status.consumed ? (
+        {status.nextSpinAt && !status.available ? (
           <span className="text-[11px] text-muted-foreground">
-            Next cycle: {new Date(status.cycleEndsAt).toLocaleString()}
-          </span>
-        ) : status.cycleSequence != null ? (
-          <span className="text-[11px] text-muted-foreground">
-            Cycle {status.cycleSequence}/7
+            Next spin available {new Date(status.nextSpinAt).toLocaleString()}
           </span>
         ) : null}
       </div>
 
-      {!status.consumed ? (
-        <>
-          <div className="h-2 overflow-hidden rounded-full bg-white/80" aria-hidden="true">
-            <div
-              className="h-full rounded-full bg-emerald-700 transition-[width] duration-500"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-          <p className="text-sm font-semibold tabular-nums text-foreground">
-            ${have} / ${need}
-          </p>
-          {status.available ? null : (
-            <p className="text-xs text-amber-900">${remaining} remaining</p>
-          )}
-        </>
-      ) : (
-        <p className="text-xs text-foreground">
-          {status.pointsAwarded != null ? `Awarded +${status.pointsAwarded} pts this cycle.` : null}
+      <div className="h-2 overflow-hidden rounded-full bg-white/80" aria-hidden="true">
+        <div
+          className="h-full rounded-full bg-emerald-700 transition-[width] duration-500"
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+      <p className="text-sm font-semibold tabular-nums text-foreground">
+        ${have} / ${need}
+      </p>
+      {status.available ? null : qualified ? (
+        <p className="text-xs text-amber-900">
+          Qualification is ready. Spin unlocks when the 48-hour cooldown ends.
         </p>
+      ) : (
+        <p className="text-xs text-amber-900">${remaining} remaining</p>
       )}
+      <p className="text-[11px] text-muted-foreground">Eligible deposits from the last 48 hours</p>
+      {status.pointsAwarded != null && status.consumed ? (
+        <p className="text-xs text-foreground">Awarded +{status.pointsAwarded} pts on the last spin.</p>
+      ) : null}
 
       {status.qualificationInvalidated ? (
         <p className="text-[11px] text-amber-800">
@@ -151,7 +149,7 @@ export function WheelSpinPanel({
         </p>
       ) : null}
 
-      {canSpin && status.available && !status.consumed ? (
+      {canSpin && status.available ? (
         <Button
           type="button"
           className="h-10 w-full text-xs font-semibold bg-emerald-800 text-white hover:bg-emerald-900"

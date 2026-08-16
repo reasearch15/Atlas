@@ -31,6 +31,10 @@ export interface LeaderboardWheelStatusDto {
   readonly qualificationCentsRequired: number;
   readonly available: boolean;
   readonly consumed: boolean;
+  /** True when rolling qualifying deposits meet the $40 threshold. */
+  readonly qualified: boolean;
+  /** ISO timestamp when the 48h spin cooldown ends; null if no prior spin. */
+  readonly nextSpinAt: string | null;
   readonly pointsAwarded: number | null;
   readonly qualificationInvalidated: boolean;
   readonly wheelPoints: number;

@@ -13,6 +13,13 @@ import {
 import { LeaderboardError, participantNotBound } from "./leaderboard.errors";
 import { withRanks } from "./ranking";
 import { cycleContaining, listCycles } from "./wheel-cycles";
+import {
+  isWheelQualified,
+  nextWheelSpinAt,
+  qualificationOccurredAtFilter,
+  sumConsumedQualificationCents,
+  wheelCooldownSatisfied
+} from "./wheel-qualification";
 import { parseRewardDistributionJson } from "./wheel-distribution";
 import {
   createCryptoWheelRng,
@@ -301,15 +308,17 @@ export class PrismaWheelService {
       input.competition.workspaceId,
       input.ownerCoadminUserId
     );
-    const cents = await this.sumCycleDepositCents({
+    const lastSpin = await this.findLatestSpin(input.ownerCoadminUserId, input.crmContactId);
+    const cents = await this.sumRollingDepositCents({
+      workspaceId: input.competition.workspaceId,
       ownerCoadminUserId: input.ownerCoadminUserId,
-      competitionId: input.competition.id,
       crmContactId: input.crmContactId,
-      cycleStart: input.cycle.startsAt,
-      cycleEnd: input.cycle.endsAt,
+      now,
+      lastSpinAt: lastSpin?.spunAt ?? null,
       policy: config.qualificationCreditPolicy,
       enabledAt: config.enabledAt
     });
+    await this.maybeInvalidateLastSpin(input.ownerCoadminUserId, input.crmContactId, now);
 
     const existing = await this.prisma.leaderboardWheelQualification.findUnique({
       where: {
@@ -320,24 +329,16 @@ export class PrismaWheelService {
       }
     });
 
-    const consumed = existing?.consumedAt != null || existing?.spinId != null;
+    const cooldownOk = wheelCooldownSatisfied(now, lastSpin?.spunAt ?? null);
     const wheelReady =
       config.enabled &&
       config.activeVersionId != null &&
       input.competition.status === "ACTIVE";
+    const qualified = isWheelQualified(cents);
+    const available = qualified && cooldownOk && wheelReady;
+    const qualifiedAt = qualified ? (existing?.qualifiedAt ?? now) : existing?.qualifiedAt ?? null;
 
-    let available = false;
-    let qualifiedAt = existing?.qualifiedAt ?? null;
-    if (!consumed) {
-      if (cents >= WHEEL_QUALIFICATION_CENTS && wheelReady) {
-        available = true;
-        qualifiedAt = qualifiedAt ?? now;
-      } else if (cents < WHEEL_QUALIFICATION_CENTS) {
-        qualifiedAt = null;
-      }
-    }
-
-    const qual = await this.prisma.leaderboardWheelQualification.upsert({
+    return this.prisma.leaderboardWheelQualification.upsert({
       where: {
         cycleId_crmContactId: {
           cycleId: input.cycle.id,
@@ -362,15 +363,6 @@ export class PrismaWheelService {
         qualifiedAt
       }
     });
-
-    if (consumed && cents < WHEEL_QUALIFICATION_CENTS && qual.spinId) {
-      await this.prisma.leaderboardWheelSpin.updateMany({
-        where: { id: qual.spinId, qualificationInvalidatedAt: null },
-        data: { qualificationInvalidatedAt: now }
-      });
-    }
-
-    return qual;
   }
 
   public async getStatus(
@@ -401,20 +393,43 @@ export class PrismaWheelService {
         })
       : null;
 
+    const lastSpin = await this.findLatestSpin(ownerCoadminUserId, crmContactId);
+    const nextSpin = nextWheelSpinAt(lastSpin?.spunAt ?? null);
+    const cents = await this.sumRollingDepositCents({
+      workspaceId,
+      ownerCoadminUserId,
+      crmContactId,
+      now,
+      lastSpinAt: lastSpin?.spunAt ?? null,
+      policy: config.qualificationCreditPolicy,
+      enabledAt: config.enabledAt
+    });
+    await this.maybeInvalidateLastSpin(ownerCoadminUserId, crmContactId, now);
+    const lastSpinFresh = lastSpin
+      ? await this.prisma.leaderboardWheelSpin.findUnique({ where: { id: lastSpin.id } })
+      : null;
+
+    const qualified = isWheelQualified(cents);
+    const cooldownOk = wheelCooldownSatisfied(now, lastSpin?.spunAt ?? null);
+    const consumed = lastSpin != null && !cooldownOk;
+    const window = competition ? cycleContaining(competition, now) : null;
+
     const base: WheelPlayerStatus = {
       wheelEnabled: config.enabled,
       configured: config.activeVersionId != null,
       competitionId: competition?.id ?? null,
       competitionStatus: competition?.status ?? null,
-      cycleSequence: null,
-      cycleStartsAt: null,
-      cycleEndsAt: null,
-      qualifyingDepositCents: 0,
+      cycleSequence: window?.sequence ?? null,
+      cycleStartsAt: window?.startsAt.toISOString() ?? null,
+      cycleEndsAt: window?.endsAt.toISOString() ?? null,
+      qualifyingDepositCents: cents,
       qualificationCentsRequired: WHEEL_QUALIFICATION_CENTS,
       available: false,
-      consumed: false,
-      pointsAwarded: null,
-      qualificationInvalidated: false,
+      consumed,
+      qualified,
+      nextSpinAt: nextSpin?.toISOString() ?? null,
+      pointsAwarded: consumed ? lastSpinFresh?.pointsAwarded ?? lastSpin?.pointsAwarded ?? null : null,
+      qualificationInvalidated: lastSpinFresh?.qualificationInvalidatedAt != null,
       wheelPoints: standing?.wheelPoints ?? 0,
       reasonCode: null
     };
@@ -428,38 +443,16 @@ export class PrismaWheelService {
       return { ...base, reasonCode: "WHEEL_NOT_CONFIGURED" };
     }
 
-    const cycles = await this.ensureCyclesForCompetition(competition);
-    const window = cycleContaining(competition, now);
-    if (!window) return { ...base, reasonCode: "NO_CYCLE" };
-    const cycle = cycles.find((c) => c.sequence === window.sequence)!;
-    const qual = await this.recomputeQualification({
-      ownerCoadminUserId,
-      competition,
-      cycle,
-      crmContactId,
-      now
-    });
-    const spin = qual.spinId
-      ? await this.prisma.leaderboardWheelSpin.findUnique({ where: { id: qual.spinId } })
-      : null;
-
+    const available = qualified && cooldownOk;
     return {
       ...base,
-      cycleSequence: cycle.sequence,
-      cycleStartsAt: cycle.startsAt.toISOString(),
-      cycleEndsAt: cycle.endsAt.toISOString(),
-      qualifyingDepositCents: qual.qualifyingDepositCents,
-      available: qual.available,
-      consumed: qual.consumedAt != null,
-      pointsAwarded: spin?.pointsAwarded ?? null,
-      qualificationInvalidated: spin?.qualificationInvalidatedAt != null,
-      wheelPoints: standing?.wheelPoints ?? 0,
-      reasonCode: qual.available
+      available,
+      reasonCode: available
         ? null
-        : qual.consumedAt
-          ? "ALREADY_SPUN"
-          : qual.qualifyingDepositCents < WHEEL_QUALIFICATION_CENTS
-            ? "BELOW_QUALIFICATION"
+        : !qualified
+          ? "BELOW_QUALIFICATION"
+          : consumed
+            ? "COOLDOWN"
             : "NOT_AVAILABLE"
     };
   }
@@ -600,12 +593,20 @@ export class PrismaWheelService {
       });
       await tx.$executeRaw`SELECT id FROM leaderboard_wheel_qualifications WHERE cycle_id = ${cycle.id}::uuid AND crm_contact_id = ${input.crmContactId}::uuid FOR UPDATE`;
 
-      const cents = await this.sumCycleDepositCentsTx(tx, {
+      const lastSpin = await tx.leaderboardWheelSpin.findFirst({
+        where: { ownerCoadminUserId: owner, crmContactId: input.crmContactId },
+        orderBy: { spunAt: "desc" }
+      });
+      if (!wheelCooldownSatisfied(now, lastSpin?.spunAt ?? null)) {
+        throw wheelAlreadyConsumed();
+      }
+
+      const cents = await this.sumRollingDepositCentsTx(tx, {
+        workspaceId: input.workspaceId,
         ownerCoadminUserId: owner,
-        competitionId: competition.id,
         crmContactId: input.crmContactId,
-        cycleStart: cycle.startsAt,
-        cycleEnd: cycle.endsAt,
+        now,
+        lastSpinAt: lastSpin?.spunAt ?? null,
         policy: config.qualificationCreditPolicy,
         enabledAt: config.enabledAt
       });
@@ -616,37 +617,27 @@ export class PrismaWheelService {
         }
       });
 
-      // Policy UNSET already refused above — wheelReady only needs enabled + version + ACTIVE.
       const wheelReady =
         config.enabled && config.activeVersionId != null && competition.status === "ACTIVE";
-      const consumed = qual.consumedAt != null || qual.spinId != null;
-      const available =
-        !consumed && cents >= WHEEL_QUALIFICATION_CENTS && wheelReady;
+      const qualified = isWheelQualified(cents);
+      const available = qualified && wheelReady;
 
       qual = await tx.leaderboardWheelQualification.update({
         where: { id: qual.id },
         data: {
           qualifyingDepositCents: cents,
           available,
-          qualifiedAt: available ? (qual.qualifiedAt ?? now) : cents < WHEEL_QUALIFICATION_CENTS ? null : qual.qualifiedAt
+          qualifiedAt: qualified ? (qual.qualifiedAt ?? now) : qual.qualifiedAt
         }
       });
 
-      if (consumed) throw wheelAlreadyConsumed();
-      if (!qual.available) {
+      if (!available) {
         throw wheelNotAvailable(
-          cents < WHEEL_QUALIFICATION_CENTS
-            ? `Need $${(WHEEL_QUALIFICATION_CENTS / 100).toFixed(0)} in cycle deposits to spin.`
+          !qualified
+            ? `Need $${(WHEEL_QUALIFICATION_CENTS / 100).toFixed(0)} in qualifying deposits from the last 48 hours to spin.`
             : "Wheel spin is not available."
         );
       }
-
-      const cycleSpin = await tx.leaderboardWheelSpin.findUnique({
-        where: {
-          cycleId_crmContactId: { cycleId: cycle.id, crmContactId: input.crmContactId }
-        }
-      });
-      if (cycleSpin) throw wheelAlreadyConsumed();
 
       const points = selectWeightedPoints(distribution.outcomes, rng);
       if (points < WHEEL_MIN_POINTS || points > WHEEL_MAX_POINTS) {
@@ -849,72 +840,91 @@ export class PrismaWheelService {
     now?: Date;
   }): Promise<void> {
     const now = input.now ?? new Date();
-    const competition = await this.prisma.leaderboardCompetition.findFirst({
-      where: {
-        id: input.competitionId,
-        workspaceId: input.workspaceId,
-        ownerCoadminUserId: input.ownerCoadminUserId
-      }
-    });
-    if (!competition) return;
-    const cycles = await this.ensureCyclesForCompetition(competition);
-    const window = cycleContaining(competition, now);
-    const cycle =
-      (window ? cycles.find((c) => c.sequence === window.sequence) : null) ??
-      cycles.find(
-        (c) => now.getTime() >= c.startsAt.getTime() && now.getTime() < c.endsAt.getTime()
-      );
-    if (!cycle) return;
-    await this.recomputeQualification({
-      ownerCoadminUserId: input.ownerCoadminUserId,
-      competition,
-      cycle,
-      crmContactId: input.crmContactId,
-      now
+    await this.maybeInvalidateLastSpin(input.ownerCoadminUserId, input.crmContactId, now);
+  }
+
+  private async findLatestSpin(ownerCoadminUserId: string, crmContactId: string) {
+    return this.prisma.leaderboardWheelSpin.findFirst({
+      where: { ownerCoadminUserId, crmContactId },
+      orderBy: { spunAt: "desc" }
     });
   }
 
-  private async sumCycleDepositCents(input: {
+  private async maybeInvalidateLastSpin(
+    ownerCoadminUserId: string,
+    crmContactId: string,
+    now: Date
+  ): Promise<void> {
+    const spins = await this.prisma.leaderboardWheelSpin.findMany({
+      where: { ownerCoadminUserId, crmContactId },
+      orderBy: { spunAt: "desc" },
+      take: 2
+    });
+    const lastSpin = spins[0];
+    if (!lastSpin || lastSpin.qualificationInvalidatedAt != null) return;
+    const events = await this.prisma.leaderboardEvent.findMany({
+      where: {
+        ownerCoadminUserId,
+        crmContactId,
+        type: { in: ["DEPOSIT", "DEPOSIT_REVERSAL"] }
+      },
+      select: { type: true, depositAmountCents: true, occurredAt: true }
+    });
+    const consumedCents = sumConsumedQualificationCents(
+      events,
+      lastSpin.spunAt,
+      spins[1]?.spunAt ?? null
+    );
+    if (consumedCents < WHEEL_QUALIFICATION_CENTS) {
+      await this.prisma.leaderboardWheelSpin.updateMany({
+        where: { id: lastSpin.id, qualificationInvalidatedAt: null },
+        data: { qualificationInvalidatedAt: now }
+      });
+    }
+  }
+
+  private async sumRollingDepositCents(input: {
+    workspaceId: string;
     ownerCoadminUserId: string;
-    competitionId: string;
     crmContactId: string;
-    cycleStart: Date;
-    cycleEnd: Date;
+    now: Date;
+    lastSpinAt: Date | null;
     policy: WheelQualificationCreditPolicy;
     enabledAt: Date | null;
   }): Promise<number> {
-    return this.sumCycleDepositCentsTx(this.prisma, input);
+    return this.sumRollingDepositCentsTx(this.prisma, input);
   }
 
-  private async sumCycleDepositCentsTx(
+  private async sumRollingDepositCentsTx(
     db: PrismaClient | Tx,
     input: {
+      workspaceId: string;
       ownerCoadminUserId: string;
-      competitionId: string;
       crmContactId: string;
-      cycleStart: Date;
-      cycleEnd: Date;
+      now: Date;
+      lastSpinAt: Date | null;
       policy: WheelQualificationCreditPolicy;
       enabledAt: Date | null;
     }
   ): Promise<number> {
     if (input.policy === "UNSET") return 0;
-    const occurredAtFilter: Prisma.DateTimeFilter = {
-      gte: input.cycleStart,
-      lt: input.cycleEnd
-    };
+    const filter = qualificationOccurredAtFilter(input.now, input.lastSpinAt);
+    const occurredAt: { gte?: Date; gt?: Date; lte: Date } = { ...filter };
     if (input.policy === "CYCLE_DEPOSITS_AFTER_ENABLE") {
       if (!input.enabledAt) return 0;
-      const floor = Math.max(input.cycleStart.getTime(), input.enabledAt.getTime());
-      occurredAtFilter.gte = new Date(floor);
+      const floor = Math.max(
+        (occurredAt.gte ?? occurredAt.gt ?? input.now).getTime(),
+        input.enabledAt.getTime()
+      );
+      if (occurredAt.gte) occurredAt.gte = new Date(Math.max(occurredAt.gte.getTime(), floor));
     }
     const events = await db.leaderboardEvent.findMany({
       where: {
+        workspaceId: input.workspaceId,
         ownerCoadminUserId: input.ownerCoadminUserId,
-        competitionId: input.competitionId,
         crmContactId: input.crmContactId,
         type: { in: ["DEPOSIT", "DEPOSIT_REVERSAL"] },
-        occurredAt: occurredAtFilter
+        occurredAt
       },
       select: { depositAmountCents: true }
     });

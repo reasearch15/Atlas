@@ -437,7 +437,7 @@ describe("Telegram wheel spin — /rank button", () => {
     });
 
     const msg = state.chats.get(Number(telegramUserA))?.messages.at(-1);
-    expect(msg?.text).toContain("Used for this cycle");
+    expect(msg?.text).toContain("Qualified ✓");
     expect(msg?.replyMarkup?.inline_keyboard.flat().map((button) => button.callback_data)).toEqual([
       FREEPLAY_WHEEL_OPEN_CALLBACK_DATA
     ]);
@@ -743,7 +743,9 @@ describe("Telegram wheel spin — callback", () => {
 
     expect(spin).toHaveBeenCalledTimes(2);
     expect(state.callbackAnswers?.[0]?.text).toBe("Spin complete! 🎡");
-    expect(state.callbackAnswers?.[1]?.text).toBe("You already used your spin for this cycle.");
+    expect(state.callbackAnswers?.[1]?.text).toBe(
+      "You already used your spin. Next spin is available in 48 hours."
+    );
     const resultDms = (state.chats.get(Number(telegramUserA))?.messages ?? []).filter((m) =>
       m.text.includes("WHEEL RESULT")
     );
@@ -792,7 +794,7 @@ describe("Telegram wheel spin — callback", () => {
 
     expect(spin).toHaveBeenCalledTimes(1);
     expect(state.callbackAnswers?.at(-1)?.text).toBe(
-      "You already used your spin for this cycle."
+      "You already used your spin. Next spin is available in 48 hours."
     );
     expect(
       (state.chats.get(Number(telegramUserA))?.messages ?? []).some((m) =>

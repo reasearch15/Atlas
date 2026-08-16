@@ -16,6 +16,8 @@ export interface PersonalRankWheelStatus {
   readonly qualificationCentsRequired: number;
   readonly available: boolean;
   readonly consumed: boolean;
+  readonly qualified?: boolean;
+  readonly nextSpinAt?: string | null;
   readonly pointsAwarded: number | null;
   readonly cycleSequence: number | null;
 }
@@ -120,7 +122,7 @@ const PRIZE_REMINDER =
 export function formatPersonalRankMessage(input: PersonalRankMessageInput): string {
   const gapLines = buildGapLines(input);
   const ends = formatEndsLine(input.endsAt, input.timezone);
-  const wheelLines = buildWheelStatusLines(input.wheelStatus);
+  const wheelLines = buildWheelStatusLines(input.wheelStatus, input.timezone);
 
   return [
     "🏆 YOUR LEADERBOARD",
@@ -325,26 +327,40 @@ export function formatWheelSpinResultMessage(input: WheelSpinResultMessageInput)
   return lines.join("\n");
 }
 
-function buildWheelStatusLines(wheel: PersonalRankWheelStatus | null | undefined): string[] {
+function buildWheelStatusLines(
+  wheel: PersonalRankWheelStatus | null | undefined,
+  timezone: string
+): string[] {
   if (!wheel) return [];
   const have = (wheel.qualifyingDepositCents / 100).toFixed(0);
   const need = (wheel.qualificationCentsRequired / 100).toFixed(0);
   const remaining = Math.max(0, wheel.qualificationCentsRequired - wheel.qualifyingDepositCents);
   const remainingDollars = (remaining / 100).toFixed(0);
+  const qualified =
+    wheel.qualified ?? wheel.qualifyingDepositCents >= wheel.qualificationCentsRequired;
 
-  if (wheel.consumed) {
-    return [
-      "🎡 Wheel: Used for this cycle",
-      "Next opportunity begins at the next 48h cycle."
-    ];
-  }
   if (wheel.available) {
     return ["🎡 Wheel Spin Available!"];
   }
-  return [
+  if (qualified) {
+    return [
+      "🎡 Wheel: Qualified ✓",
+      formatNextSpinAvailableLine(wheel.nextSpinAt, timezone)
+    ];
+  }
+  const lines = [
     `🎡 Wheel: $${have} / $${need}`,
-    `$${remainingDollars} more qualifying deposits needed this cycle.`
+    `$${remainingDollars} more qualifying deposits needed.`
   ];
+  if (wheel.consumed || wheel.nextSpinAt) {
+    lines.push(formatNextSpinAvailableLine(wheel.nextSpinAt, timezone));
+  }
+  return lines;
+}
+
+function formatNextSpinAvailableLine(nextSpinAt: string | null | undefined, timezone: string): string {
+  if (!nextSpinAt) return "Next spin available in 48 hours.";
+  return `Next spin available ${formatCompetitionEndDisplay(new Date(nextSpinAt), timezone)}`;
 }
 
 function buildGapLines(input: PersonalRankMessageInput): string[] {
