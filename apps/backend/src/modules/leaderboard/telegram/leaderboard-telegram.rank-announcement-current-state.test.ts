@@ -479,4 +479,53 @@ describe("current-state rank announcements", () => {
     expect(dm).not.toContain("Moved from unranked → #10");
     expect(dm).not.toContain("Points: 10");
   });
+
+  it("sends Elijah-style #6 → #4 when still Top 10 at send time", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    addStanding(prisma, "redface", 364);
+    addStanding(prisma, "john", 285);
+    addStanding(prisma, "emily", 279);
+    addStanding(prisma, player, 190, { name: "Elijah Kitai" });
+    addStanding(prisma, "derek", 175);
+    addStanding(prisma, "kim", 165);
+
+    const id = await outbox.enqueueRankAnnouncement({
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      crmContactId: player,
+      fromRank: 6,
+      toRank: 4,
+      displayName: "Elijah Kitai",
+      reason: "climbing in the Top 10",
+      kind: "CLIMBED_IN_TOP_10",
+      totalPoints: 190,
+      pointsGained: 45,
+      pointsBehindNext: 89
+    });
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)[0]).toBe("🔥 Elijah Kitai moved #6 → #4!\n89 points behind #3.");
+  });
+
+  it("skips a stale climb if the player has left Top 10 before send", async () => {
+    const { prisma, tgState, outbox, processor } = seedProcessor();
+    ids(10).forEach((id, i) => addStanding(prisma, id, 300 - i * 5));
+    addStanding(prisma, player, 10, { name: "Elijah Kitai" });
+
+    const id = await outbox.enqueueRankAnnouncement({
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      crmContactId: player,
+      fromRank: 6,
+      toRank: 4,
+      displayName: "Elijah Kitai",
+      reason: "climbing in the Top 10",
+      kind: "CLIMBED_IN_TOP_10"
+    });
+    await processor.processJob(id);
+
+    expect(sentTexts(tgState)).toEqual([]);
+  });
 });

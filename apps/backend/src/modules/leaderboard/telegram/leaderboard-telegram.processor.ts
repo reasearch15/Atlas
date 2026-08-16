@@ -43,6 +43,7 @@ const RANK_SENSITIVE_PLAYER_DM_KINDS = new Set([
   "ENTER_TOP_3",
   "REACHED_NUMBER_1",
   "TOP_3_ORDER_CHANGED",
+  "CLIMBED_IN_TOP_10",
   "SIGNIFICANT_TOP_MOVE"
 ]);
 
@@ -629,13 +630,33 @@ export class LeaderboardTelegramProcessor {
           workspaceId: row.workspaceId,
           ownerCoadminUserId: row.ownerCoadminUserId,
           competitionId: row.competitionId,
-          crmContactId: payload.crmContactId
+          crmContactId: payload.crmContactId,
+          snapshotFromRank: payload.fromRank ?? null,
+          snapshotToRank: payload.toRank ?? null,
+          decision: "SKIPPED",
+          skipReason: "not_active_top10_or_zero_points"
         },
         "leaderboard.rank_announcement.skipped_obsolete"
       );
       return;
     }
 
+    this.logger?.info(
+      {
+        outboxId: row.id,
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        competitionId: row.competitionId,
+        crmContactId: payload.crmContactId,
+        snapshotFromRank: payload.fromRank ?? null,
+        snapshotToRank: payload.toRank ?? null,
+        sendTimeRank: current.rank,
+        sendTimePoints: current.totalPoints,
+        kind: payload.kind ?? null,
+        decision: "SENT"
+      },
+      "leaderboard.rank_announcement.sent"
+    );
     await this.client.sendMessage(token, integration.channelId, current.text);
     await this.prisma.leaderboardBotIntegration.update({
       where: { id: integration.id },

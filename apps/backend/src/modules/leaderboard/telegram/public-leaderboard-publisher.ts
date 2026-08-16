@@ -174,6 +174,21 @@ export async function publishPublicLeaderboardSnapshot(
     !input.skipRankAnnouncements && competition.status === "ACTIVE"
       ? detectRankAnnouncements(prevTop10, nextTop10)
       : [];
+  input.logger?.info?.(
+    {
+      ownerCoadminUserId: input.ownerCoadminUserId,
+      competitionId: competition.id,
+      skipRankAnnouncements: input.skipRankAnnouncements === true,
+      detectedCount: announcements.length,
+      announcements: announcements.map((event) => ({
+        crmContactId: event.crmContactId,
+        kind: event.kind,
+        fromRank: event.fromRank,
+        toRank: event.toRank
+      }))
+    },
+    "leaderboard.rank_announcement.detected"
+  );
 
   const timezone = settings?.timezone ?? LEADERBOARD_TIMEZONE;
   const brandName =

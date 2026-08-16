@@ -42,6 +42,7 @@ export function decidePlayerNotification(input: {
     "ENTER_TOP_3",
     "REACHED_NUMBER_1",
     "TOP_3_ORDER_CHANGED",
+    "CLIMBED_IN_TOP_10",
     "SIGNIFICANT_TOP_MOVE",
     "REFERRAL_MILESTONE",
     "FINAL_RESULT_WINNER",

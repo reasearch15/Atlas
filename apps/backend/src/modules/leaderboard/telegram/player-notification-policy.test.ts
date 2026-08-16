@@ -56,4 +56,17 @@ describe("decidePlayerNotification", () => {
     });
     expect(a.dedupeKey).toBe(b.dedupeKey);
   });
+
+  it("allows intra-Top-10 climb DMs", () => {
+    expect(
+      decidePlayerNotification({
+        competitionId: "c1",
+        crmContactId: "elijah",
+        kind: "CLIMBED_IN_TOP_10",
+        hasPlayerLink: true,
+        ownerCoadminUserId: "a",
+        botOwnerCoadminUserId: "a"
+      }).shouldNotify
+    ).toBe(true);
+  });
 });

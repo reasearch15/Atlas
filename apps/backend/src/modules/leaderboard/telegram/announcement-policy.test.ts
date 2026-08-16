@@ -154,6 +154,118 @@ describe("detectRankAnnouncements", () => {
     const events = detectRankAnnouncements(prev, next);
     expect(events.some((e) => e.kind === "REACHED_NUMBER_1" && e.crmContactId === "b")).toBe(true);
   });
+
+  it("Elijah: #6 → #4 inside Top 10 is a climb announcement", () => {
+    const prev = [
+      row("redface", 1, "Redface", 364),
+      row("john", 2, "John Mccloud", 285),
+      row("emily", 3, "Emily Skrodenis", 279),
+      row("derek", 4, "Derek Stone", 175),
+      row("kim", 5, "Kimberly Armes", 165),
+      row("elijah", 6, "Elijah Kitai", 145),
+      row("tanya", 7, "Tanya McLemore", 142)
+    ];
+    const next = [
+      row("redface", 1, "Redface", 364),
+      row("john", 2, "John Mccloud", 285),
+      row("emily", 3, "Emily Skrodenis", 279),
+      row("elijah", 4, "Elijah Kitai", 190),
+      row("derek", 5, "Derek Stone", 175),
+      row("kim", 6, "Kimberly Armes", 165),
+      row("tanya", 7, "Tanya McLemore", 142)
+    ];
+    const events = detectRankAnnouncements(prev, next);
+    expect(events).toEqual([
+      expect.objectContaining({
+        kind: "CLIMBED_IN_TOP_10",
+        crmContactId: "elijah",
+        fromRank: 6,
+        toRank: 4
+      })
+    ]);
+    expect(events.some((e) => e.crmContactId === "derek" || e.crmContactId === "kim")).toBe(false);
+  });
+
+  it("announces other intra-Top-10 climbs and ignores same-rank / drops", () => {
+    expect(
+      detectRankAnnouncements(
+        [row("a", 1, "A", 200), row("b", 10, "B", 60)],
+        [row("a", 1, "A", 200), row("b", 4, "B", 90)]
+      ).some((e) => e.crmContactId === "b" && e.kind === "CLIMBED_IN_TOP_10" && e.fromRank === 10 && e.toRank === 4)
+    ).toBe(true);
+
+    expect(
+      detectRankAnnouncements(
+        [row("a", 1, "A", 200), row("b", 5, "B", 80)],
+        [row("a", 1, "A", 200), row("b", 4, "B", 90)]
+      ).some((e) => e.crmContactId === "b" && e.fromRank === 5 && e.toRank === 4)
+    ).toBe(true);
+
+    expect(
+      detectRankAnnouncements(
+        [row("a", 1, "A", 200), row("b", 4, "B", 90)],
+        [row("a", 1, "A", 200), row("b", 4, "B", 95)]
+      )
+    ).toEqual([]);
+
+    expect(
+      detectRankAnnouncements(
+        [row("a", 1, "A", 200), row("b", 4, "B", 90), row("c", 6, "C", 70)],
+        [row("a", 1, "A", 200), row("c", 4, "C", 95), row("b", 6, "B", 90)]
+      ).some((e) => e.crmContactId === "b")
+    ).toBe(false);
+  });
+
+  it("still uses threshold kinds for #11→#9, #12→#4, #4→#2, and #3→#2", () => {
+    expect(
+      detectRankAnnouncements(
+        [
+          row("a", 1, "A", 200),
+          row("b", 2, "B", 180),
+          row("c", 3, "C", 160),
+          row("d", 4, "D", 140),
+          row("e", 5, "E", 120),
+          row("f", 6, "F", 100),
+          row("g", 7, "G", 90),
+          row("h", 8, "H", 80),
+          row("i", 9, "I", 70),
+          row("j", 10, "J", 60)
+        ],
+        [
+          row("a", 1, "A", 200),
+          row("b", 2, "B", 180),
+          row("c", 3, "C", 160),
+          row("d", 4, "D", 140),
+          row("e", 5, "E", 120),
+          row("f", 6, "F", 100),
+          row("g", 7, "G", 90),
+          row("climber", 9, "Climber", 75),
+          row("h", 10, "H", 80)
+        ]
+      ).some((e) => e.kind === "ENTER_TOP_10" && e.crmContactId === "climber")
+    ).toBe(true);
+
+    expect(
+      detectRankAnnouncements(
+        [row("a", 1, "A", 200), row("b", 2, "B", 180), row("c", 3, "C", 160), row("z", 12, "Z", 40)],
+        [row("a", 1, "A", 200), row("b", 2, "B", 180), row("c", 3, "C", 160), row("z", 4, "Z", 150)]
+      ).some((e) => e.kind === "ENTER_TOP_10" && e.crmContactId === "z" && e.toRank === 4)
+    ).toBe(true);
+
+    expect(
+      detectRankAnnouncements(
+        [row("a", 1), row("b", 2), row("c", 3), row("d", 4, "Dana", 50)],
+        [row("a", 1), row("d", 2, "Dana", 90), row("b", 3), row("c", 4)]
+      ).some((e) => e.kind === "ENTER_TOP_3" && e.crmContactId === "d")
+    ).toBe(true);
+
+    const top3 = detectRankAnnouncements(
+      [row("a", 1), row("b", 2), row("c", 3)],
+      [row("a", 1), row("c", 2), row("b", 3)]
+    );
+    expect(top3.every((e) => e.kind === "TOP_3_ORDER_CHANGED")).toBe(true);
+    expect(top3.map((e) => e.crmContactId).sort()).toEqual(["b", "c"]);
+  });
 });
 
 describe("previousTop10ForAnnouncements", () => {

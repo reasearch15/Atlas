@@ -1,6 +1,7 @@
 /**
  * Conservative public channel announcement policy.
- * Announce threshold crossings and Top 3 reorders — never every point tick.
+ * Announce threshold crossings, Top 3 reorders, and rank climbs inside Top 10 —
+ * never point-only ticks or downward moves.
  *
  * Initialization / zero-standing materialization is NOT an achievement:
  * - empty previous snapshot (first board post / new competition baseline)
@@ -11,7 +12,8 @@ export type AnnouncementKind =
   | "ENTER_TOP_10"
   | "ENTER_TOP_3"
   | "REACHED_NUMBER_1"
-  | "TOP_3_ORDER_CHANGED";
+  | "TOP_3_ORDER_CHANGED"
+  | "CLIMBED_IN_TOP_10";
 
 export interface AnnouncementStandingRow {
   readonly crmContactId: string;
@@ -34,10 +36,11 @@ export interface AnnouncementEvent {
 }
 
 const KIND_PRIORITY: Record<AnnouncementKind, number> = {
-  REACHED_NUMBER_1: 4,
-  ENTER_TOP_3: 3,
-  ENTER_TOP_10: 2,
-  TOP_3_ORDER_CHANGED: 1
+  REACHED_NUMBER_1: 5,
+  ENTER_TOP_3: 4,
+  ENTER_TOP_10: 3,
+  TOP_3_ORDER_CHANGED: 2,
+  CLIMBED_IN_TOP_10: 1
 };
 
 /**
@@ -132,6 +135,19 @@ export function detectRankAnnouncements(
         fromRank,
         toRank,
         reason: "a Top 3 reorder",
+        ...extras
+      });
+      continue;
+    }
+
+    if (toRank <= 10 && fromRank != null && fromRank <= 10 && fromRank > toRank) {
+      events.push({
+        kind: "CLIMBED_IN_TOP_10",
+        crmContactId: row.crmContactId,
+        displayName: row.displayName,
+        fromRank,
+        toRank,
+        reason: "climbing in the Top 10",
         ...extras
       });
     }
