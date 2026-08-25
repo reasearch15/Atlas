@@ -10,6 +10,7 @@ import { LeaderboardTelegramOutboxService, resumeLeaderboardTelegramOutboxSafely
 import { LeaderboardTelegramProcessor } from "./leaderboard-telegram.processor";
 import { startLeaderboardTelegramWorker } from "./leaderboard-telegram.worker";
 import { PrismaLeaderboardService } from "../leaderboard.prisma-service";
+import { EngagementService, runEngagementSweepSafely } from "../../engagement/engagement.service";
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -36,11 +37,13 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     client,
     webhookBaseUrl: app.env.LEADERBOARD_BOT_WEBHOOK_BASE_URL ?? null
   });
+  const engagement = new EngagementService(app.prisma, outbox);
   const processor = new LeaderboardTelegramProcessor({
     prisma: app.prisma,
     encryptionKey: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY,
     outbox,
     client,
+    engagement,
     logger: app.log
   });
   const lifecycleDomain = new PrismaLeaderboardService(app.prisma, {
@@ -60,7 +63,8 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     client,
     encryptionKey: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY,
     startTokenSecret: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY || app.env.JWT_ACCESS_SECRET,
-    outbox
+    outbox,
+    engagement
   });
 
   app.decorate("leaderboardTelegramOutbox", outbox);
@@ -73,11 +77,13 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
   setTimeout(() => {
     void resumeLeaderboardTelegramOutboxSafely(outbox, app.log);
     void completeExpiredCompetitionsSafely(lifecycleDomain, app.log);
+    void runEngagementSweepSafely(engagement, app.log);
   }, 2_500);
 
   const maintenance = setInterval(() => {
     void resumeLeaderboardTelegramOutboxSafely(outbox, app.log);
     void completeExpiredCompetitionsSafely(lifecycleDomain, app.log);
+    void runEngagementSweepSafely(engagement, app.log);
   }, 60_000);
   maintenance.unref?.();
 

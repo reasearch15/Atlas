@@ -6,6 +6,11 @@ import {
 import { AuditService } from "../../audit/audit.service";
 import { PrismaLeaderboardService } from "../leaderboard.prisma-service";
 import {
+  EngagementService,
+  dailyResultIdFromOutboxPayload,
+  pollIdFromOutboxPayload
+} from "../../engagement/engagement.service";
+import {
   HttpLeaderboardTelegramClient,
   LeaderboardTelegramApiError,
   type LeaderboardTelegramClient
@@ -54,6 +59,7 @@ export interface LeaderboardTelegramProcessorDeps {
   readonly outbox: LeaderboardTelegramOutboxService;
   readonly client?: LeaderboardTelegramClient;
   readonly domain?: PrismaLeaderboardService;
+  readonly engagement?: EngagementService;
   readonly audit?: AuditService;
   readonly logger?: { warn: (obj: unknown, msg?: string) => void; info: (obj: unknown, msg?: string) => void };
 }
@@ -67,6 +73,7 @@ export class LeaderboardTelegramProcessor {
   private readonly outbox: LeaderboardTelegramOutboxService;
   private readonly client: LeaderboardTelegramClient;
   private readonly domain: PrismaLeaderboardService;
+  private readonly engagement: EngagementService;
   private readonly audit: AuditService;
   private readonly logger: LeaderboardTelegramProcessorDeps["logger"];
 
@@ -76,6 +83,7 @@ export class LeaderboardTelegramProcessor {
     this.outbox = deps.outbox;
     this.client = deps.client ?? new HttpLeaderboardTelegramClient();
     this.domain = deps.domain ?? new PrismaLeaderboardService(deps.prisma);
+    this.engagement = deps.engagement ?? new EngagementService(deps.prisma, deps.outbox);
     this.audit = deps.audit ?? new AuditService(deps.prisma);
     this.logger = deps.logger;
   }
@@ -184,6 +192,33 @@ export class LeaderboardTelegramProcessor {
         case "PROCESS_BOT_UPDATE":
           // Updates are handled inline by the webhook/poller — no-op succeed.
           break;
+        case "POST_ENGAGEMENT_POLL": {
+          const pollId = pollIdFromOutboxPayload(row.payloadJson);
+          if (!pollId) {
+            await this.failPermanent(row.id, integration.id, "ENGAGEMENT_POLL_MISSING", "Engagement poll id missing");
+            return;
+          }
+          await this.engagement.completePost(pollId, this.client, token);
+          break;
+        }
+        case "CLOSE_ENGAGEMENT_POLL": {
+          const pollId = pollIdFromOutboxPayload(row.payloadJson);
+          if (!pollId) {
+            await this.failPermanent(row.id, integration.id, "ENGAGEMENT_POLL_MISSING", "Engagement poll id missing");
+            return;
+          }
+          await this.engagement.completeClose(pollId, this.client, token);
+          break;
+        }
+        case "ANNOUNCE_ENGAGEMENT_WINNERS": {
+          const dailyResultId = dailyResultIdFromOutboxPayload(row.payloadJson);
+          if (!dailyResultId) {
+            await this.failPermanent(row.id, integration.id, "ENGAGEMENT_RESULT_MISSING", "Daily result id missing");
+            return;
+          }
+          await this.engagement.completeAnnounce(dailyResultId, this.client, token);
+          break;
+        }
         default:
           await this.failPermanent(row.id, integration.id, "UNKNOWN_JOB_TYPE", `Unknown job type ${row.jobType}`);
           return;

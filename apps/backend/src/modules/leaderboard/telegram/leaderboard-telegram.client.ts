@@ -128,7 +128,8 @@ export interface LeaderboardTelegramClient {
     chatId: string | number,
     messageId: number,
     text: string,
-    parseMode?: TelegramParseMode
+    parseMode?: TelegramParseMode,
+    replyMarkup?: TelegramInlineKeyboardMarkup
   ): Promise<TelegramMessage | true>;
   editMessageMedia(
     token: string,
@@ -294,7 +295,8 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
     chatId: string | number,
     messageId: number,
     text: string,
-    parseMode?: TelegramParseMode
+    parseMode?: TelegramParseMode,
+    replyMarkup?: TelegramInlineKeyboardMarkup
   ): Promise<TelegramMessage | true> {
     const body: Record<string, unknown> = {
       chat_id: chatId,
@@ -302,6 +304,7 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
       text
     };
     if (parseMode) body.parse_mode = parseMode;
+    if (replyMarkup) body.reply_markup = replyMarkup;
     const raw = await this.callTelegram<Record<string, unknown> | true>(token, "editMessageText", body);
     if (raw === true) return true;
     return mapMessage(raw);
@@ -758,7 +761,7 @@ export function createFakeLeaderboardTelegramClient(
         date: Math.floor(Date.now() / 1000)
       };
     },
-    async editMessageText(token, chatId, messageId, text) {
+    async editMessageText(token, chatId, messageId, text, _parseMode, replyMarkup) {
       fail(token, "editMessageText");
       requireBot(token);
       const chat = requireChat(chatId);
@@ -779,7 +782,8 @@ export function createFakeLeaderboardTelegramClient(
           permanent: true
         });
       }
-      if (msg.text === text) return true;
+      if (replyMarkup) msg.replyMarkup = replyMarkup;
+      if (msg.text === text && !replyMarkup) return true;
       msg.text = text;
       return {
         messageId,

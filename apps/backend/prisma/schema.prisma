@@ -312,6 +312,9 @@ enum LeaderboardTelegramJobType {
   SEND_PLAYER_DM
   SEND_FINAL_RESULT_DM
   PROCESS_BOT_UPDATE
+  POST_ENGAGEMENT_POLL
+  CLOSE_ENGAGEMENT_POLL
+  ANNOUNCE_ENGAGEMENT_WINNERS
 }
 
 enum LeaderboardTelegramJobStatus {
@@ -337,6 +340,31 @@ enum LeaderboardTelegramArtifactStatus {
 enum FreeplayClaimStatus {
   UNCLAIMED
   CLAIMED
+}
+
+enum FreeplayClaimSource {
+  WHEEL
+  ENGAGEMENT_DAILY
+}
+
+enum EngagementPollStatus {
+  SCHEDULED
+  POSTING
+  OPEN
+  CLOSING
+  CLOSED
+  SETTLED
+  FAILED
+}
+
+enum EngagementPointKind {
+  POLL_PARTICIPATION
+  REFERRAL_CONTRIBUTION
+}
+
+enum EngagementDailyResultStatus {
+  SNAPSHOTTED
+  ANNOUNCED
 }
 
 model Workspace {
@@ -394,6 +422,12 @@ model Workspace {
   leaderboardWheelCycles LeaderboardWheelCycle[]
   leaderboardWheelQualifications LeaderboardWheelQualification[]
   leaderboardWheelSpins LeaderboardWheelSpin[]
+  engagementQuestionCycles EngagementQuestionCycle[]
+  engagementPolls EngagementPoll[]
+  engagementVotes EngagementVote[]
+  engagementPointLedger EngagementPointLedger[]
+  engagementDailyResults EngagementDailyResult[]
+  engagementDailyPrizes EngagementDailyPrize[]
 
   @@map("workspaces")
 }
@@ -472,6 +506,12 @@ model User {
   ownedLeaderboardWheelCycles LeaderboardWheelCycle[] @relation("LeaderboardWheelCycleOwner")
   ownedLeaderboardWheelQualifications LeaderboardWheelQualification[] @relation("LeaderboardWheelQualificationOwner")
   ownedLeaderboardWheelSpins LeaderboardWheelSpin[] @relation("LeaderboardWheelSpinOwner")
+  ownedEngagementQuestionCycles EngagementQuestionCycle[] @relation("EngagementQuestionCycleOwner")
+  ownedEngagementPolls EngagementPoll[] @relation("EngagementPollOwner")
+  ownedEngagementVotes EngagementVote[] @relation("EngagementVoteOwner")
+  ownedEngagementPointLedger EngagementPointLedger[] @relation("EngagementPointLedgerOwner")
+  ownedEngagementDailyResults EngagementDailyResult[] @relation("EngagementDailyResultOwner")
+  ownedEngagementDailyPrizes EngagementDailyPrize[] @relation("EngagementDailyPrizeOwner")
 
   @@index([username])
   @@index([workspaceId, role])
@@ -708,6 +748,12 @@ model CrmContact {
   leaderboardBotPlayerLinks LeaderboardBotPlayerLink[]
   leaderboardWheelQualifications LeaderboardWheelQualification[]
   leaderboardWheelSpins LeaderboardWheelSpin[]
+  engagementVotes EngagementVote[]
+  engagementPointLedger EngagementPointLedger[]
+  engagementDailyResultsFirst EngagementDailyResult[] @relation("EngagementDailyFirst")
+  engagementDailyResultsSecond EngagementDailyResult[] @relation("EngagementDailySecond")
+  engagementDailyResultsThird EngagementDailyResult[] @relation("EngagementDailyThird")
+  engagementDailyPrizes EngagementDailyPrize[]
 
   @@unique([workspaceId, telegramPeerId])
   @@index([workspaceId, lastSeenAt])
@@ -1530,6 +1576,8 @@ model LeaderboardBotIntegration {
   eligibilityCandidates         GiveawayEligibilityCandidate[]
   playerLinks                   LeaderboardBotPlayerLink[]
   telegramUpdates               LeaderboardTelegramUpdate[]
+  engagementPolls               EngagementPoll[]
+  engagementDailyResults        EngagementDailyResult[]
 
   @@index([workspaceId])
   @@map("leaderboard_bot_integrations")
@@ -1804,7 +1852,9 @@ model FreeplayClaim {
   ownerCoadminUserId String              @map("owner_coadmin_user_id") @db.Uuid
   crmContactId       String              @map("crm_contact_id") @db.Uuid
   chatId             String?             @map("chat_id") @db.Uuid
-  spinId             String              @unique @map("spin_id") @db.Uuid
+  spinId             String?             @unique @map("spin_id") @db.Uuid
+  source             FreeplayClaimSource @default(WHEEL)
+  idempotencyKey     String              @unique @map("idempotency_key") @db.VarChar(160)
   rewardAmountCents  Int                 @map("reward_amount_cents")
   status             FreeplayClaimStatus @default(UNCLAIMED)
   claimedAt          DateTime?           @map("claimed_at")
@@ -1812,8 +1862,206 @@ model FreeplayClaim {
   fulfillmentNote    String?             @map("fulfillment_note") @db.VarChar(500)
   createdAt          DateTime            @default(now()) @map("created_at")
   updatedAt          DateTime            @updatedAt @map("updated_at")
+  engagementPrize    EngagementDailyPrize?
 
   @@index([ownerCoadminUserId, crmContactId, status, createdAt])
   @@index([workspaceId, ownerCoadminUserId])
+  @@index([source])
   @@map("freeplay_claims")
+}
+
+/// Approved engagement poll question bank. Cycle/use state lives on cycle tables, not here.
+model EngagementQuestion {
+  id         String   @id @default(uuid()) @db.Uuid
+  externalId String   @unique @map("external_id") @db.VarChar(32)
+  category   String   @db.VarChar(80)
+  question   String   @db.VarChar(300)
+  option1    String   @map("option1") @db.VarChar(64)
+  option2    String   @map("option2") @db.VarChar(64)
+  option3    String   @map("option3") @db.VarChar(64)
+  option4    String   @map("option4") @db.VarChar(64)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  cycleItems EngagementQuestionCycleItem[]
+  polls      EngagementPoll[]
+
+  @@index([active, category])
+  @@map("engagement_questions")
+}
+
+/// One shuffled draw cycle per coadmin over the active question bank.
+model EngagementQuestionCycle {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  cycleNumber        Int      @map("cycle_number")
+  shuffledAt         DateTime @map("shuffled_at")
+  exhaustedAt        DateTime? @map("exhausted_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User      @relation("EngagementQuestionCycleOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  items              EngagementQuestionCycleItem[]
+  polls              EngagementPoll[]
+
+  @@unique([ownerCoadminUserId, cycleNumber])
+  @@index([ownerCoadminUserId, exhaustedAt])
+  @@map("engagement_question_cycles")
+}
+
+model EngagementQuestionCycleItem {
+  id         String    @id @default(uuid()) @db.Uuid
+  cycleId    String    @map("cycle_id") @db.Uuid
+  questionId String    @map("question_id") @db.Uuid
+  drawOrder  Int       @map("draw_order")
+  usedAt     DateTime? @map("used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  cycle      EngagementQuestionCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  question   EngagementQuestion      @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  @@unique([cycleId, questionId])
+  @@unique([cycleId, drawOrder])
+  @@index([cycleId, usedAt, drawOrder])
+  @@map("engagement_question_cycle_items")
+}
+
+/// One scheduled/posted Telegram engagement poll instance (per coadmin slot).
+model EngagementPoll {
+  id                   String                @id @default(uuid()) @db.Uuid
+  workspaceId          String                @map("workspace_id") @db.Uuid
+  ownerCoadminUserId   String                @map("owner_coadmin_user_id") @db.Uuid
+  botIntegrationId     String                @map("bot_integration_id") @db.Uuid
+  slotKey              String                @map("slot_key") @db.VarChar(32)
+  opensAt              DateTime              @map("opens_at")
+  closesAt             DateTime              @map("closes_at")
+  chicagoDate          String                @map("chicago_date") @db.VarChar(10)
+  status               EngagementPollStatus  @default(SCHEDULED)
+  questionId           String?               @map("question_id") @db.Uuid
+  cycleId              String?               @map("cycle_id") @db.Uuid
+  questionText         String?               @map("question_text") @db.VarChar(300)
+  option1              String?               @db.VarChar(64)
+  option2              String?               @db.VarChar(64)
+  option3              String?               @db.VarChar(64)
+  option4              String?               @db.VarChar(64)
+  category             String?               @db.VarChar(80)
+  channelId            String?               @map("channel_id") @db.VarChar(64)
+  telegramMessageId    String?               @map("telegram_message_id") @db.VarChar(64)
+  postedAt             DateTime?             @map("posted_at")
+  closedAt             DateTime?             @map("closed_at")
+  closeEditedAt        DateTime?             @map("close_edited_at")
+  settledAt            DateTime?             @map("settled_at")
+  optionCountsJson     Json?                 @map("option_counts_json")
+  winningOptionIndex   Int?                  @map("winning_option_index")
+  lastError            String?               @map("last_error") @db.VarChar(500)
+  createdAt            DateTime              @default(now()) @map("created_at")
+  updatedAt            DateTime              @updatedAt @map("updated_at")
+  workspace            Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin         User                  @relation("EngagementPollOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  botIntegration       LeaderboardBotIntegration @relation(fields: [botIntegrationId], references: [id], onDelete: Cascade)
+  question             EngagementQuestion?   @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  cycle                EngagementQuestionCycle? @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+  votes                EngagementVote[]
+  ledger               EngagementPointLedger[]
+
+  @@unique([ownerCoadminUserId, slotKey])
+  @@index([ownerCoadminUserId, status, opensAt])
+  @@index([ownerCoadminUserId, status, closesAt])
+  @@index([ownerCoadminUserId, chicagoDate])
+  @@index([botIntegrationId, status])
+  @@map("engagement_polls")
+}
+
+model EngagementVote {
+  id               String   @id @default(uuid()) @db.Uuid
+  pollId           String   @map("poll_id") @db.Uuid
+  workspaceId      String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String @map("owner_coadmin_user_id") @db.Uuid
+  telegramUserId   String   @map("telegram_user_id") @db.VarChar(32)
+  crmContactId     String   @map("crm_contact_id") @db.Uuid
+  optionIndex      Int      @map("option_index")
+  votedAt          DateTime @map("voted_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  poll             EngagementPoll @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  workspace        Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin     User           @relation("EngagementVoteOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  crmContact       CrmContact     @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+
+  @@unique([pollId, telegramUserId])
+  @@unique([pollId, crmContactId])
+  @@index([ownerCoadminUserId, crmContactId])
+  @@map("engagement_votes")
+}
+
+/// Append-only engagement ledger. Never written to leaderboard_events.
+model EngagementPointLedger {
+  id                 String               @id @default(uuid()) @db.Uuid
+  workspaceId        String               @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String               @map("owner_coadmin_user_id") @db.Uuid
+  crmContactId       String               @map("crm_contact_id") @db.Uuid
+  chicagoDate        String               @map("chicago_date") @db.VarChar(10)
+  kind               EngagementPointKind
+  points             Int
+  pollId             String?              @map("poll_id") @db.Uuid
+  referralId         String?              @map("referral_id") @db.Uuid
+  idempotencyKey     String               @unique @map("idempotency_key") @db.VarChar(200)
+  createdAt          DateTime             @default(now()) @map("created_at")
+  workspace          Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User                 @relation("EngagementPointLedgerOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  crmContact         CrmContact           @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  poll               EngagementPoll?      @relation(fields: [pollId], references: [id], onDelete: SetNull)
+
+  @@index([ownerCoadminUserId, chicagoDate, crmContactId])
+  @@index([pollId])
+  @@map("engagement_point_ledger")
+}
+
+model EngagementDailyResult {
+  id                   String                       @id @default(uuid()) @db.Uuid
+  workspaceId          String                       @map("workspace_id") @db.Uuid
+  ownerCoadminUserId   String                       @map("owner_coadmin_user_id") @db.Uuid
+  botIntegrationId     String                       @map("bot_integration_id") @db.Uuid
+  chicagoDate          String                       @map("chicago_date") @db.VarChar(10)
+  declaredAt           DateTime                     @map("declared_at")
+  status               EngagementDailyResultStatus  @default(SNAPSHOTTED)
+  firstCrmContactId    String?                      @map("first_crm_contact_id") @db.Uuid
+  secondCrmContactId   String?                      @map("second_crm_contact_id") @db.Uuid
+  thirdCrmContactId    String?                      @map("third_crm_contact_id") @db.Uuid
+  snapshotJson         Json                         @map("snapshot_json")
+  channelId            String?                      @map("channel_id") @db.VarChar(64)
+  telegramMessageId    String?                      @map("telegram_message_id") @db.VarChar(64)
+  announcedAt          DateTime?                    @map("announced_at")
+  createdAt            DateTime                     @default(now()) @map("created_at")
+  updatedAt            DateTime                     @updatedAt @map("updated_at")
+  workspace            Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin         User                         @relation("EngagementDailyResultOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  botIntegration       LeaderboardBotIntegration    @relation(fields: [botIntegrationId], references: [id], onDelete: Cascade)
+  firstContact         CrmContact?                  @relation("EngagementDailyFirst", fields: [firstCrmContactId], references: [id], onDelete: Restrict)
+  secondContact        CrmContact?                  @relation("EngagementDailySecond", fields: [secondCrmContactId], references: [id], onDelete: Restrict)
+  thirdContact         CrmContact?                  @relation("EngagementDailyThird", fields: [thirdCrmContactId], references: [id], onDelete: Restrict)
+  prizes               EngagementDailyPrize[]
+
+  @@unique([ownerCoadminUserId, chicagoDate])
+  @@index([ownerCoadminUserId, declaredAt])
+  @@map("engagement_daily_results")
+}
+
+model EngagementDailyPrize {
+  id                 String   @id @default(uuid()) @db.Uuid
+  dailyResultId      String   @map("daily_result_id") @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  prizeRank          Int      @map("prize_rank")
+  crmContactId       String   @map("crm_contact_id") @db.Uuid
+  amountCents        Int      @map("amount_cents")
+  freeplayClaimId    String   @unique @map("freeplay_claim_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at")
+  dailyResult        EngagementDailyResult @relation(fields: [dailyResultId], references: [id], onDelete: Cascade)
+  workspace          Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User                  @relation("EngagementDailyPrizeOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  crmContact         CrmContact            @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  freeplayClaim      FreeplayClaim         @relation(fields: [freeplayClaimId], references: [id], onDelete: Restrict)
+
+  @@unique([dailyResultId, prizeRank])
+  @@index([ownerCoadminUserId, crmContactId])
+  @@map("engagement_daily_prizes")
 }

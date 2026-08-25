@@ -37,6 +37,7 @@ import {
   LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA
 } from "./personal-rank-message";
 import { buildPlayTelegramKeyboard } from "./public-message";
+import { EngagementService, type EngagementVoteStatus } from "../../engagement/engagement.service";
 
 export interface BotWheelServicePort {
   getStatus(
@@ -99,6 +100,7 @@ export interface BotUpdateHandlerDeps {
   readonly wheel?: BotWheelServicePort;
   readonly freeplay?: BotFreeplayServicePort;
   readonly outbox?: BotTelegramOutboxPort;
+  readonly engagement?: Pick<EngagementService, "voteFromCallback">;
   /** Test-only RNG injection for Telegram spins. */
   readonly createWheelRng?: () => WheelRng;
 }
@@ -150,6 +152,7 @@ export class LeaderboardBotUpdateHandler {
   private readonly wheel: BotWheelServicePort;
   private readonly freeplay: BotFreeplayServicePort;
   private readonly outbox: BotTelegramOutboxPort | null;
+  private readonly engagement: Pick<EngagementService, "voteFromCallback">;
   private readonly createWheelRng: () => WheelRng;
 
   public constructor(deps: BotUpdateHandlerDeps) {
@@ -161,6 +164,7 @@ export class LeaderboardBotUpdateHandler {
     this.wheel = deps.wheel ?? new PrismaWheelService(deps.prisma);
     this.freeplay = deps.freeplay ?? new FreeplayService({ prisma: deps.prisma });
     this.outbox = deps.outbox ?? null;
+    this.engagement = deps.engagement ?? new EngagementService(deps.prisma);
     this.createWheelRng = deps.createWheelRng ?? createCryptoWheelRng;
   }
 
@@ -279,6 +283,17 @@ export class LeaderboardBotUpdateHandler {
     };
 
     const data = cq.data?.trim() ?? "";
+    if (data.startsWith("eng:v:")) {
+      const status = await this.engagement.voteFromCallback({
+        botIntegrationId: input.integration.id,
+        ownerCoadminUserId: input.integration.ownerCoadminUserId,
+        workspaceId: input.integration.workspaceId,
+        telegramUserId: String(cq.from.id),
+        data
+      });
+      await answer(engagementVoteCallbackText(status));
+      return;
+    }
     if (data === FREEPLAY_WHEEL_OPEN_CALLBACK_DATA) {
       await answer("Checking Freeplay Wheel…");
       await this.handleFreeplayStatusCallback({
@@ -912,6 +927,24 @@ function mapWheelSpinCallbackError(error: unknown): string {
     }
   }
   return "Could not spin right now. Try again later.";
+}
+
+function engagementVoteCallbackText(status: EngagementVoteStatus): string {
+  switch (status) {
+    case "recorded":
+      return "Vote recorded";
+    case "already_voted":
+      return "You already voted.";
+    case "unregistered":
+      return "Send /start first to join this engagement poll.";
+    case "closed":
+      return "This poll is closed.";
+    case "not_found":
+    case "invalid":
+      return "This poll is no longer available.";
+    default:
+      return "Could not record your vote.";
+  }
 }
 
 function payloadIsRank(text: string): boolean {

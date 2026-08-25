@@ -344,7 +344,8 @@ export type FreeplayPanelStatus = "ELIGIBLE" | "NOT_ELIGIBLE" | "ROLLING_LIMIT";
 
 export interface FreeplayPanelClaimDto {
   readonly id: string;
-  readonly spinId: string;
+  readonly spinId: string | null;
+  readonly source?: "WHEEL" | "ENGAGEMENT_DAILY";
   readonly crmContactId: string;
   readonly chatId: string | null;
   readonly rewardAmountCents: number;

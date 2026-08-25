@@ -39,7 +39,8 @@ interface SpinWindowRow {
 
 interface ClaimRow {
   id: string;
-  spinId: string;
+  spinId: string | null;
+  source: "WHEEL" | "ENGAGEMENT_DAILY";
   crmContactId: string;
   chatId: string | null;
   rewardAmountCents: number;
@@ -234,6 +235,8 @@ export class FreeplayService {
             crm_contact_id,
             chat_id,
             spin_id,
+            source,
+            idempotency_key,
             reward_amount_cents,
             status
           )
@@ -244,6 +247,8 @@ export class FreeplayService {
             ${input.crmContactId}::uuid,
             ${input.chatId ?? null}::uuid,
             ${spinId}::uuid,
+            'WHEEL',
+            ${`wheel:${spinId}`},
             ${rewardAmountCents},
             'UNCLAIMED'
           )
@@ -271,6 +276,64 @@ export class FreeplayService {
     };
   }
 
+  public async grantEngagementClaim(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly crmContactId: string;
+    readonly amountCents: number;
+    readonly idempotencyKey: string;
+    readonly tx?: Prisma.TransactionClient;
+  }): Promise<{ readonly claimId: string; readonly replay: boolean }> {
+    if (![100, 200, 500].includes(input.amountCents)) {
+      throw new AppError(400, "FREEPLAY_INVALID_AMOUNT", "Engagement Freeplay amount is invalid.");
+    }
+    const db: Db = input.tx ?? this.app.prisma;
+    const existing = await db.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM freeplay_claims WHERE idempotency_key = ${input.idempotencyKey} LIMIT 1
+    `;
+    if (existing[0]) return { claimId: existing[0].id, replay: true };
+    const claimId = randomUUID();
+    try {
+      await db.$executeRaw`
+        INSERT INTO freeplay_claims (
+          id,
+          workspace_id,
+          owner_coadmin_user_id,
+          crm_contact_id,
+          chat_id,
+          spin_id,
+          source,
+          idempotency_key,
+          reward_amount_cents,
+          status
+        )
+        VALUES (
+          ${claimId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.ownerCoadminUserId}::uuid,
+          ${input.crmContactId}::uuid,
+          NULL,
+          NULL,
+          'ENGAGEMENT_DAILY',
+          ${input.idempotencyKey},
+          ${input.amountCents},
+          'UNCLAIMED'
+        )
+      `;
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
+        const message = error instanceof Error ? error.message : "";
+        if (!/unique|duplicate/i.test(message)) throw error;
+      }
+      const raced = await db.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM freeplay_claims WHERE idempotency_key = ${input.idempotencyKey} LIMIT 1
+      `;
+      if (raced[0]) return { claimId: raced[0].id, replay: true };
+      throw error;
+    }
+    return { claimId, replay: false };
+  }
+
   public async claim(user: RequestUser, claimId: string, fulfillmentNote?: string): Promise<FreeplayStaffClaimDto> {
     const workspaceId = this.requireWorkspaceId(user);
     const claim = await this.app.prisma.$transaction(async (tx) => {
@@ -294,6 +357,7 @@ export class FreeplayService {
           AND status = 'UNCLAIMED'
         RETURNING id,
           spin_id AS "spinId",
+          source,
           crm_contact_id AS "crmContactId",
           chat_id AS "chatId",
           reward_amount_cents AS "rewardAmountCents",
@@ -442,6 +506,7 @@ export class FreeplayService {
     const rows = await db.$queryRaw<ClaimRow[]>`
       SELECT c.id,
         c.spin_id AS "spinId",
+        c.source,
         c.crm_contact_id AS "crmContactId",
         c.chat_id AS "chatId",
         c.reward_amount_cents AS "rewardAmountCents",
@@ -466,6 +531,7 @@ export class FreeplayService {
     return {
       id: row.id,
       spinId: row.spinId,
+      source: row.source ?? "WHEEL",
       crmContactId: row.crmContactId,
       chatId: row.chatId,
       rewardAmountCents: row.rewardAmountCents,

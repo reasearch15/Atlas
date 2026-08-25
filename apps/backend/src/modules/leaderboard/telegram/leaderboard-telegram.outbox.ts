@@ -407,10 +407,28 @@ export class LeaderboardTelegramOutboxService {
     return rows.length;
   }
 
+  public async enqueueEngagementJob(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly jobType: "POST_ENGAGEMENT_POLL" | "CLOSE_ENGAGEMENT_POLL" | "ANNOUNCE_ENGAGEMENT_WINNERS";
+    readonly idempotencyKey: string;
+    readonly payloadJson: Record<string, unknown>;
+  }): Promise<string> {
+    return this.upsertJob({
+      workspaceId: input.workspaceId,
+      ownerCoadminUserId: input.ownerCoadminUserId,
+      competitionId: null,
+      jobType: input.jobType,
+      idempotencyKey: input.idempotencyKey,
+      payloadJson: input.payloadJson,
+      resetTerminal: false
+    });
+  }
+
   private async upsertJob(input: {
     readonly workspaceId: string;
     readonly ownerCoadminUserId: string;
-    readonly competitionId: string;
+    readonly competitionId: string | null;
     readonly jobType: LeaderboardTelegramJobType;
     readonly idempotencyKey: string;
     readonly payloadJson: Record<string, unknown>;
@@ -492,7 +510,7 @@ export class LeaderboardTelegramOutboxService {
           jobType: input.jobType,
           status: "QUEUED",
           idempotencyKey: input.idempotencyKey,
-          payloadJson: input.payloadJson as Prisma.InputJsonValue
+          payloadJson: input.payloadJson as Prisma.InputJsonValue,
         }
       });
       await this.wakeBestEffort(created.id, 0);
