@@ -1,12 +1,8 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { FreeplayService } from "../freeplay/freeplay.service";
 import type { LeaderboardTelegramOutboxService } from "../leaderboard/telegram/leaderboard-telegram.outbox";
-import {
-  DAILY_DRAW_PRIZE_CENTS,
-  DRAW_BASE_WEIGHT,
-  DRAW_WINNER_COOLDOWN_DRAWS,
-  POLL_DURATION_MS
-} from "./engagement.constants";
+import { DAILY_DRAW_PRIZE_CENTS, DRAW_BASE_WEIGHT, DRAW_WINNER_COOLDOWN_DRAWS, POLL_DURATION_MS } from "./engagement.constants";
+import { selectNativePollMessagesToPrune } from "./engagement.poll-visibility";
 import {
   addChicagoDays,
   listSlotsInRange,
@@ -306,37 +302,107 @@ export class EngagementService {
   ): Promise<void> {
     const poll = await this.prisma.engagementPoll.findUnique({ where: { id: pollId } });
     if (!poll) return;
-    if (poll.telegramMessageId) {
-      if (poll.status === "POSTING") {
-        await this.prisma.engagementPoll.updateMany({
-          where: { id: pollId, status: "POSTING" },
-          data: { status: "OPEN", postedAt: poll.postedAt ?? new Date() }
-        });
+    if (!poll.telegramMessageId) {
+      if (!poll.channelId || !poll.questionText || !poll.option1 || !client.sendPoll) return;
+      const sent = await client.sendPoll(token, poll.channelId, {
+        question: poll.questionText,
+        options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
+        isAnonymous: true,
+        type: "regular",
+        allowsMultipleAnswers: false,
+        allowsRevoting: false
+      });
+      const telegramPollId = sent.poll?.id;
+      if (!telegramPollId) {
+        throw new Error("Telegram sendPoll did not return a native poll id");
       }
-      return;
+      await this.prisma.engagementPoll.updateMany({
+        where: { id: pollId, telegramMessageId: null },
+        data: {
+          telegramMessageId: String(sent.messageId),
+          telegramPollId,
+          status: "OPEN",
+          postedAt: new Date()
+        }
+      });
+    } else if (poll.status === "POSTING") {
+      await this.prisma.engagementPoll.updateMany({
+        where: { id: pollId, status: "POSTING" },
+        data: { status: "OPEN", postedAt: poll.postedAt ?? new Date() }
+      });
     }
-    if (!poll.channelId || !poll.questionText || !poll.option1 || !client.sendPoll) return;
-    const sent = await client.sendPoll(token, poll.channelId, {
-      question: poll.questionText,
-      options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
-      isAnonymous: true,
-      type: "regular",
-      allowsMultipleAnswers: false,
-      allowsRevoting: false
+
+    const posted = await this.prisma.engagementPoll.findUnique({ where: { id: pollId } });
+    if (!posted?.channelId || !posted.telegramMessageId || !posted.telegramPollId) return;
+    await this.pruneExcessVisibleNativePollMessages({
+      ownerCoadminUserId: posted.ownerCoadminUserId,
+      channelId: posted.channelId,
+      client,
+      token
     });
-    const telegramPollId = sent.poll?.id;
-    if (!telegramPollId) {
-      throw new Error("Telegram sendPoll did not return a native poll id");
-    }
-    await this.prisma.engagementPoll.updateMany({
-      where: { id: pollId, telegramMessageId: null },
-      data: {
-        telegramMessageId: String(sent.messageId),
-        telegramPollId,
-        status: "OPEN",
-        postedAt: new Date()
+  }
+
+  /**
+   * Keeps only the newest VISIBLE_NATIVE_POLL_LIMIT native poll messages in the channel.
+   * Candidates come solely from durable engagement_polls rows with telegram_poll_id set.
+   */
+  private async pruneExcessVisibleNativePollMessages(input: {
+    readonly ownerCoadminUserId: string;
+    readonly channelId: string;
+    readonly client: LeaderboardTelegramClient;
+    readonly token: string;
+  }): Promise<void> {
+    const visible = await this.prisma.engagementPoll.findMany({
+      where: {
+        ownerCoadminUserId: input.ownerCoadminUserId,
+        channelId: input.channelId,
+        telegramPollId: { not: null },
+        telegramMessageId: { not: null }
+      },
+      select: {
+        id: true,
+        channelId: true,
+        telegramMessageId: true,
+        telegramPollId: true,
+        postedAt: true
+      },
+      orderBy: [{ postedAt: "asc" }, { id: "asc" }]
+    });
+    const candidates = visible.flatMap((row) => {
+      if (!row.channelId || !row.telegramMessageId || !row.telegramPollId) return [];
+      return [
+        {
+          id: row.id,
+          channelId: row.channelId,
+          telegramMessageId: row.telegramMessageId,
+          telegramPollId: row.telegramPollId,
+          postedAt: row.postedAt
+        }
+      ];
+    });
+    const toPrune = selectNativePollMessagesToPrune(candidates);
+    for (const old of toPrune) {
+      try {
+        await input.client.deleteMessage(
+          input.token,
+          old.channelId,
+          Number(old.telegramMessageId)
+        );
+      } catch (error) {
+        if (!isTelegramMessageMissingError(error)) throw error;
       }
-    });
+      // Clear only this poll's durable message ref so retries cannot re-delete it
+      // and unrelated channel messages are never targeted.
+      await this.prisma.engagementPoll.updateMany({
+        where: {
+          id: old.id,
+          channelId: old.channelId,
+          telegramMessageId: old.telegramMessageId,
+          telegramPollId: old.telegramPollId
+        },
+        data: { telegramMessageId: null }
+      });
+    }
   }
 
   public async completeClose(
@@ -1219,5 +1285,12 @@ function isPollAlreadyClosedError(error: unknown): boolean {
   return (
     error instanceof LeaderboardTelegramApiError &&
     /already been closed|POLL_CLOSED|poll_closed/i.test(error.description)
+  );
+}
+
+function isTelegramMessageMissingError(error: unknown): boolean {
+  return (
+    error instanceof LeaderboardTelegramApiError &&
+    /message to delete not found|message can't be deleted|MESSAGE_ID_INVALID/i.test(error.description)
   );
 }

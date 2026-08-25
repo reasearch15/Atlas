@@ -26,3 +26,5 @@ export const DAILY_DRAW_PRIZE_CENTS = 500;
 export const TELEGRAM_QUESTION_MAX = 300;
 export const TELEGRAM_BUTTON_MAX = 64;
 export const ENGAGEMENT_CALLBACK_PREFIX = "eng:v:";
+/** Channel keeps at most this many native engagement poll messages visible. */
+export const VISIBLE_NATIVE_POLL_LIMIT = 3;

@@ -458,13 +458,173 @@ describe("native poll answers without scoring", () => {
       crmContactId: contactA,
       ownerCoadminUserId: owner
     });
-    expect(legacyRuntime.voteFromCallback(buildVoteCallbackData(legacyPollId, 0), "100", new Date())).toBe("recorded");
+    expect(legacyRuntime.voteFromCallback(buildVoteCallbackData(legacyPollId, 0), "100", opensAt)).toBe("recorded");
     await legacyRuntime.sweep(closesAt);
     const legacyMessage = legacyState.chats
       .get(Number(channelId))
       ?.messages.find((message) => message.messageId === 1);
     expect(legacyMessage?.text).toContain("POLL RESULTS");
     expect(legacyRuntime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
+  });
+});
+
+describe("native poll channel visibility retention", () => {
+  function visibleNativePollMessages(state: FakeLeaderboardTelegramState) {
+    return (state.chats.get(Number(channelId))?.messages ?? []).filter((m) => !m.deleted && Boolean(m.poll));
+  }
+
+  function trackedVisiblePolls(runtime: MemoryEngagementRuntime) {
+    return runtime.polls
+      .filter((p) => p.telegramPollId && p.telegramMessageId)
+      .sort((a, b) => (a.postedAt?.getTime() ?? 0) - (b.postedAt?.getTime() ?? 0));
+  }
+
+  it("keeps the first three native polls visible with nothing deleted", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    expect(visibleNativePollMessages(state)).toHaveLength(3);
+    expect(trackedVisiblePolls(runtime)).toHaveLength(3);
+    expect(state.chats.get(Number(channelId))?.messages.every((m) => !m.deleted)).toBe(true);
+  });
+
+  it("deletes the oldest native poll when the 4th is posted", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    const first = runtime.polls.find((p) => p.slotKey === "2026-08-25T06:00")!;
+    const firstMessageId = first.telegramMessageId;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    expect(visibleNativePollMessages(state)).toHaveLength(3);
+    expect(first.telegramMessageId).toBeNull();
+    expect(
+      state.chats.get(Number(channelId))?.messages.find((m) => String(m.messageId) === firstMessageId)?.deleted
+    ).toBe(true);
+    expect(trackedVisiblePolls(runtime).map((p) => p.slotKey)).toEqual([
+      "2026-08-25T10:00",
+      "2026-08-25T14:00",
+      "2026-08-25T18:00"
+    ]);
+  });
+
+  it("deletes the next-oldest when the 5th native poll posts", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    const second = runtime.polls.find((p) => p.slotKey === "2026-08-25T10:00")!;
+    const secondMessageId = second.telegramMessageId;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T22:00:01"));
+    expect(visibleNativePollMessages(state)).toHaveLength(3);
+    expect(second.telegramMessageId).toBeNull();
+    expect(
+      state.chats.get(Number(channelId))?.messages.find((m) => String(m.messageId) === secondMessageId)?.deleted
+    ).toBe(true);
+    expect(trackedVisiblePolls(runtime).map((p) => p.slotKey)).toEqual([
+      "2026-08-25T14:00",
+      "2026-08-25T18:00",
+      "2026-08-25T22:00"
+    ]);
+  });
+
+  it("continues when an old poll message was already deleted manually", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    const first = runtime.polls.find((p) => p.slotKey === "2026-08-25T06:00")!;
+    const firstMessage = state.chats
+      .get(Number(channelId))
+      ?.messages.find((m) => String(m.messageId) === first.telegramMessageId);
+    expect(firstMessage).toBeTruthy();
+    firstMessage!.deleted = true;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    expect(runtime.polls.find((p) => p.slotKey === "2026-08-25T18:00")?.telegramPollId).toBeTruthy();
+    expect(first.telegramMessageId).toBeNull();
+    expect(visibleNativePollMessages(state)).toHaveLength(3);
+  });
+
+  it("never deletes unrelated channel messages when pruning old polls", async () => {
+    const { runtime, state, now } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
+    const client = createFakeLeaderboardTelegramClient(state);
+    await client.sendMessage("token", channelId, "Leaderboard snapshot — do not delete");
+    await client.sendPhoto("token", channelId, Buffer.from("fake-png"), {
+      caption: "Daily Freeplay winner"
+    });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    const messages = state.chats.get(Number(channelId))?.messages ?? [];
+    const leaderboard = messages.find((m) => m.text?.includes("Leaderboard snapshot"));
+    const draw = messages.find((m) => m.caption?.includes("Daily Freeplay winner"));
+    expect(leaderboard?.deleted).toBeFalsy();
+    expect(draw?.deleted).toBeFalsy();
+    expect(visibleNativePollMessages(state)).toHaveLength(3);
+    expect(now).toBeTruthy();
+  });
+
+  it("cleans up the correct old poll after a restart using persisted message ids", async () => {
+    const sharedState: FakeLeaderboardTelegramState = {
+      bots: new Map([["token", { id: 1, isBot: true, firstName: "Bot", username: "sayubot" }]]),
+      chats: new Map([
+        [
+          Number(channelId),
+          {
+            id: Number(channelId),
+            type: "channel",
+            members: new Map([[100, "member"]]),
+            messages: [],
+            nextMessageId: 1
+          }
+        ]
+      ])
+    };
+    const firstClient = createFakeLeaderboardTelegramClient(sharedState);
+    const firstRuntime = new MemoryEngagementRuntime(undefined, firstClient, sharedState);
+    firstRuntime.importQuestions(tinyBank(12));
+    firstRuntime.integrations.push({
+      id: integrationId,
+      workspaceId: workspace,
+      ownerCoadminUserId: owner,
+      channelId,
+      postingEnabled: true,
+      disconnectedAt: null,
+      botToken: "token"
+    });
+    await firstRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await firstRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await firstRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+
+    // Simulate process restart: new runtime reloads durable poll rows (message ids included).
+    const restartedClient = createFakeLeaderboardTelegramClient(sharedState);
+    const restarted = new MemoryEngagementRuntime(undefined, restartedClient, sharedState);
+    restarted.importQuestions(tinyBank(12));
+    restarted.integrations.push({
+      id: integrationId,
+      workspaceId: workspace,
+      ownerCoadminUserId: owner,
+      channelId,
+      postingEnabled: true,
+      disconnectedAt: null,
+      botToken: "token"
+    });
+    for (const poll of firstRuntime.polls) {
+      restarted.polls.push({ ...poll });
+    }
+    const oldestMessageId = restarted.polls.find((p) => p.slotKey === "2026-08-25T06:00")?.telegramMessageId;
+    expect(oldestMessageId).toBeTruthy();
+    await restarted.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    expect(
+      sharedState.chats.get(Number(channelId))?.messages.find((m) => String(m.messageId) === oldestMessageId)
+        ?.deleted
+    ).toBe(true);
+    expect(
+      restarted.polls.filter((p) => p.telegramPollId && p.telegramMessageId).map((p) => p.slotKey).sort()
+    ).toEqual(["2026-08-25T10:00", "2026-08-25T14:00", "2026-08-25T18:00"]);
   });
 });
 

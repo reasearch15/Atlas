@@ -5,6 +5,7 @@ import {
   DRAW_WINNER_COOLDOWN_DRAWS,
   POLL_DURATION_MS
 } from "./engagement.constants";
+import { selectNativePollMessagesToPrune } from "./engagement.poll-visibility";
 import {
   EMPTY_INLINE_KEYBOARD,
   formatClosedPollMessage,
@@ -175,6 +176,7 @@ export interface MemoryFreeplayClaim {
 type ChannelClient = Pick<LeaderboardTelegramClient, "sendMessage" | "editMessageText"> & {
   sendPoll?: LeaderboardTelegramClient["sendPoll"];
   stopPoll?: LeaderboardTelegramClient["stopPoll"];
+  deleteMessage?: LeaderboardTelegramClient["deleteMessage"];
   getChatMember?: LeaderboardTelegramClient["getChatMember"];
   sendPhoto?: LeaderboardTelegramClient["sendPhoto"];
 };
@@ -534,6 +536,53 @@ export class MemoryEngagementRuntime {
         poll.status = "OPEN";
         poll.postedAt = now;
         this.completeOutbox(postPollOutboxKey(poll.id));
+        await this.pruneExcessVisibleNativePollMessages(integration);
+      }
+    }
+  }
+
+  private async pruneExcessVisibleNativePollMessages(
+    integration: (typeof this.integrations)[number]
+  ): Promise<void> {
+    if (!integration.channelId || !this.client?.deleteMessage) return;
+    const visible = this.polls.filter(
+      (p) =>
+        p.ownerCoadminUserId === integration.ownerCoadminUserId &&
+        p.channelId === integration.channelId &&
+        Boolean(p.telegramPollId) &&
+        Boolean(p.telegramMessageId)
+    );
+    const candidates = visible.flatMap((p) => {
+      if (!p.channelId || !p.telegramMessageId || !p.telegramPollId) return [];
+      return [
+        {
+          id: p.id,
+          channelId: p.channelId,
+          telegramMessageId: p.telegramMessageId,
+          telegramPollId: p.telegramPollId,
+          postedAt: p.postedAt
+        }
+      ];
+    });
+    const toPrune = selectNativePollMessagesToPrune(candidates);
+    for (const old of toPrune) {
+      const poll = this.polls.find((p) => p.id === old.id);
+      if (!poll || poll.telegramMessageId !== old.telegramMessageId) continue;
+      try {
+        await this.client.deleteMessage(
+          integration.botToken,
+          old.channelId,
+          Number(old.telegramMessageId)
+        );
+      } catch {
+        // Missing/already-deleted Telegram messages must not block posting.
+      }
+      if (
+        poll.telegramMessageId === old.telegramMessageId &&
+        poll.telegramPollId === old.telegramPollId &&
+        poll.channelId === old.channelId
+      ) {
+        poll.telegramMessageId = null;
       }
     }
   }
