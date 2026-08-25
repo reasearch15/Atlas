@@ -7,7 +7,9 @@ import { AuditService } from "../../audit/audit.service";
 import { PrismaLeaderboardService } from "../leaderboard.prisma-service";
 import {
   EngagementService,
+  chicagoDateFromOutboxPayload,
   dailyResultIdFromOutboxPayload,
+  drawIdFromOutboxPayload,
   pollIdFromOutboxPayload
 } from "../../engagement/engagement.service";
 import {
@@ -217,6 +219,29 @@ export class LeaderboardTelegramProcessor {
             return;
           }
           await this.engagement.completeAnnounce(dailyResultId, this.client, token);
+          break;
+        }
+        case "RUN_ENGAGEMENT_DAILY_DRAW": {
+          const chicagoDate = chicagoDateFromOutboxPayload(row.payloadJson);
+          if (!chicagoDate) {
+            await this.failPermanent(row.id, integration.id, "ENGAGEMENT_DRAW_DATE_MISSING", "Daily draw Chicago date missing");
+            return;
+          }
+          await this.engagement.completeDailyDraw({
+            ownerCoadminUserId: integration.ownerCoadminUserId,
+            chicagoDate,
+            client: this.client,
+            token
+          });
+          break;
+        }
+        case "ANNOUNCE_ENGAGEMENT_DAILY_DRAW": {
+          const drawId = drawIdFromOutboxPayload(row.payloadJson);
+          if (!drawId) {
+            await this.failPermanent(row.id, integration.id, "ENGAGEMENT_DRAW_MISSING", "Daily draw id missing");
+            return;
+          }
+          await this.engagement.completeDailyDrawAnnounce(drawId, this.client, token);
           break;
         }
         default:

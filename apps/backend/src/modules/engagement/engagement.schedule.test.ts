@@ -10,7 +10,9 @@ import {
   listSlotsInRange,
   pollClosesAt,
   pollOpensAt,
-  scoringChicagoDateForInstant
+  scoringChicagoDateForInstant,
+  addChicagoDays,
+  chicagoDateDiffDays
 } from "./engagement.schedule";
 
 describe("engagement schedule", () => {
@@ -72,5 +74,11 @@ describe("engagement schedule", () => {
     expect(isEligibleEngagementDeclarationDate("2026-08-24", ["2026-08-25"])).toBe(false);
     expect(isEligibleEngagementDeclarationDate("2026-08-25", ["2026-08-25", "2026-08-26"])).toBe(true);
     expect(isEligibleEngagementDeclarationDate("2026-08-26", ["2026-08-25"])).toBe(true);
+  });
+
+  it("computes Chicago date differences for the 7-draw cooldown window", () => {
+    expect(chicagoDateDiffDays("2026-08-25", "2026-08-26")).toBe(1);
+    expect(chicagoDateDiffDays("2026-08-25", "2026-09-01")).toBe(7);
+    expect(addChicagoDays("2026-08-25", 8)).toBe("2026-09-02");
   });
 });

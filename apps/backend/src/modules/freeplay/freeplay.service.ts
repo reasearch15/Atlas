@@ -40,7 +40,7 @@ interface SpinWindowRow {
 interface ClaimRow {
   id: string;
   spinId: string | null;
-  source: "WHEEL" | "ENGAGEMENT_DAILY";
+  source: "WHEEL" | "ENGAGEMENT_DAILY" | "ENGAGEMENT_DAILY_DRAW";
   crmContactId: string;
   chatId: string | null;
   rewardAmountCents: number;
@@ -282,11 +282,13 @@ export class FreeplayService {
     readonly crmContactId: string;
     readonly amountCents: number;
     readonly idempotencyKey: string;
+    readonly source?: "ENGAGEMENT_DAILY" | "ENGAGEMENT_DAILY_DRAW";
     readonly tx?: Prisma.TransactionClient;
   }): Promise<{ readonly claimId: string; readonly replay: boolean }> {
     if (![100, 200, 500].includes(input.amountCents)) {
       throw new AppError(400, "FREEPLAY_INVALID_AMOUNT", "Engagement Freeplay amount is invalid.");
     }
+    const source = input.source ?? "ENGAGEMENT_DAILY";
     const db: Db = input.tx ?? this.app.prisma;
     const existing = await db.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM freeplay_claims WHERE idempotency_key = ${input.idempotencyKey} LIMIT 1
@@ -314,7 +316,7 @@ export class FreeplayService {
           ${input.crmContactId}::uuid,
           NULL,
           NULL,
-          'ENGAGEMENT_DAILY',
+          ${source}::"FreeplayClaimSource",
           ${input.idempotencyKey},
           ${input.amountCents},
           'UNCLAIMED'

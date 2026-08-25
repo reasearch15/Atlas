@@ -315,6 +315,8 @@ enum LeaderboardTelegramJobType {
   POST_ENGAGEMENT_POLL
   CLOSE_ENGAGEMENT_POLL
   ANNOUNCE_ENGAGEMENT_WINNERS
+  RUN_ENGAGEMENT_DAILY_DRAW
+  ANNOUNCE_ENGAGEMENT_DAILY_DRAW
 }
 
 enum LeaderboardTelegramJobStatus {
@@ -345,6 +347,7 @@ enum FreeplayClaimStatus {
 enum FreeplayClaimSource {
   WHEEL
   ENGAGEMENT_DAILY
+  ENGAGEMENT_DAILY_DRAW
 }
 
 enum EngagementPollStatus {
@@ -365,6 +368,12 @@ enum EngagementPointKind {
 enum EngagementDailyResultStatus {
   SNAPSHOTTED
   ANNOUNCED
+}
+
+enum EngagementDailyDrawStatus {
+  DRAWN
+  ANNOUNCED
+  NO_ELIGIBLE
 }
 
 model Workspace {
@@ -428,6 +437,7 @@ model Workspace {
   engagementPointLedger EngagementPointLedger[]
   engagementDailyResults EngagementDailyResult[]
   engagementDailyPrizes EngagementDailyPrize[]
+  engagementDailyDraws EngagementDailyDraw[]
 
   @@map("workspaces")
 }
@@ -512,6 +522,7 @@ model User {
   ownedEngagementPointLedger EngagementPointLedger[] @relation("EngagementPointLedgerOwner")
   ownedEngagementDailyResults EngagementDailyResult[] @relation("EngagementDailyResultOwner")
   ownedEngagementDailyPrizes EngagementDailyPrize[] @relation("EngagementDailyPrizeOwner")
+  ownedEngagementDailyDraws EngagementDailyDraw[] @relation("EngagementDailyDrawOwner")
 
   @@index([username])
   @@index([workspaceId, role])
@@ -754,6 +765,7 @@ model CrmContact {
   engagementDailyResultsSecond EngagementDailyResult[] @relation("EngagementDailySecond")
   engagementDailyResultsThird EngagementDailyResult[] @relation("EngagementDailyThird")
   engagementDailyPrizes EngagementDailyPrize[]
+  engagementDailyDrawWins EngagementDailyDraw[] @relation("EngagementDailyDrawWinner")
 
   @@unique([workspaceId, telegramPeerId])
   @@index([workspaceId, lastSeenAt])
@@ -1578,6 +1590,7 @@ model LeaderboardBotIntegration {
   telegramUpdates               LeaderboardTelegramUpdate[]
   engagementPolls               EngagementPoll[]
   engagementDailyResults        EngagementDailyResult[]
+  engagementDailyDraws          EngagementDailyDraw[]
 
   @@index([workspaceId])
   @@map("leaderboard_bot_integrations")
@@ -1862,7 +1875,8 @@ model FreeplayClaim {
   fulfillmentNote    String?             @map("fulfillment_note") @db.VarChar(500)
   createdAt          DateTime            @default(now()) @map("created_at")
   updatedAt          DateTime            @updatedAt @map("updated_at")
-  engagementPrize    EngagementDailyPrize?
+  engagementPrize     EngagementDailyPrize?
+  engagementDailyDraw EngagementDailyDraw?
 
   @@index([ownerCoadminUserId, crmContactId, status, createdAt])
   @@index([workspaceId, ownerCoadminUserId])
@@ -2065,4 +2079,42 @@ model EngagementDailyPrize {
   @@unique([dailyResultId, prizeRank])
   @@index([ownerCoadminUserId, crmContactId])
   @@map("engagement_daily_prizes")
+}
+
+/// Daily $5 Freeplay lucky-subscriber draw. Independent of native channel polls.
+/// Candidates are Atlas-known linked players whose current channel membership was
+/// positively verified; Telegram Bot API cannot list every subscriber.
+model EngagementDailyDraw {
+  id                         String                     @id @default(uuid()) @db.Uuid
+  workspaceId                String                     @map("workspace_id") @db.Uuid
+  ownerCoadminUserId         String                     @map("owner_coadmin_user_id") @db.Uuid
+  botIntegrationId           String                     @map("bot_integration_id") @db.Uuid
+  chicagoDate                String                     @map("chicago_date") @db.VarChar(10)
+  status                     EngagementDailyDrawStatus
+  winnerCrmContactId         String?                    @map("winner_crm_contact_id") @db.Uuid
+  winnerTelegramUserId       String?                    @map("winner_telegram_user_id") @db.VarChar(32)
+  winnerBaseWeight           Int?                       @map("winner_base_weight")
+  winnerReferralWeight       Int?                       @map("winner_referral_weight")
+  winnerTotalWeight          Int?                       @map("winner_total_weight")
+  winnerActiveReferralCount  Int?                       @map("winner_active_referral_count")
+  candidateCount             Int                        @map("candidate_count")
+  totalWeight                Int                        @map("total_weight")
+  randomPick                 Int?                       @map("random_pick")
+  snapshotJson               Json                       @map("snapshot_json")
+  freeplayClaimId            String?                    @unique @map("freeplay_claim_id") @db.Uuid
+  channelId                  String?                    @map("channel_id") @db.VarChar(64)
+  telegramMessageId          String?                    @map("telegram_message_id") @db.VarChar(64)
+  drawnAt                    DateTime                   @map("drawn_at")
+  announcedAt                DateTime?                  @map("announced_at")
+  createdAt                  DateTime                   @default(now()) @map("created_at")
+  updatedAt                  DateTime                   @updatedAt @map("updated_at")
+  workspace                  Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin               User                       @relation("EngagementDailyDrawOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  botIntegration             LeaderboardBotIntegration  @relation(fields: [botIntegrationId], references: [id], onDelete: Cascade)
+  winnerContact              CrmContact?                @relation("EngagementDailyDrawWinner", fields: [winnerCrmContactId], references: [id], onDelete: Restrict)
+  freeplayClaim              FreeplayClaim?             @relation(fields: [freeplayClaimId], references: [id], onDelete: Restrict)
+
+  @@unique([ownerCoadminUserId, chicagoDate])
+  @@index([ownerCoadminUserId, drawnAt])
+  @@map("engagement_daily_draws")
 }

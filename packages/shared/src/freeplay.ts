@@ -10,7 +10,7 @@ export interface FreeplayPlayerStatusDto {
 export interface FreeplayStaffClaimDto {
   readonly id: string;
   readonly spinId: string | null;
-  readonly source?: "WHEEL" | "ENGAGEMENT_DAILY";
+  readonly source?: "WHEEL" | "ENGAGEMENT_DAILY" | "ENGAGEMENT_DAILY_DRAW";
   readonly crmContactId: string;
   readonly chatId: string | null;
   readonly rewardAmountCents: number;

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { chicagoWallTimeToUtc } from "../leaderboard/competition-schedule";
-import { createFakeLeaderboardTelegramClient, LeaderboardTelegramApiError, type FakeLeaderboardTelegramState } from "../leaderboard/telegram/leaderboard-telegram.client";
+import { createFakeLeaderboardTelegramClient, type FakeLeaderboardTelegramState } from "../leaderboard/telegram/leaderboard-telegram.client";
+import type { WheelRng } from "../leaderboard/wheel-rng";
 import { MemoryEngagementRuntime } from "./engagement.memory";
 import { buildVoteCallbackData } from "./engagement.messages";
 import type { EngagementQuestionInput } from "./question-bank";
+import { DAILY_DRAW_PRIZE_CENTS } from "./engagement.constants";
+import { dailyDrawFreeplayIdempotencyKey } from "./engagement.draw";
 
 const owner = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
 const workspace = "11111111-1111-4111-8111-111111111111";
@@ -34,18 +37,43 @@ function tinyBank(count = 4): EngagementQuestionInput[] {
   }));
 }
 
-function setup(now = chicagoWallTimeToUtc("2026-08-25T10:00:00"), questions = tinyBank()) {
+function rngPick(pick: number): WheelRng {
+  return {
+    nextInt(maxExclusive: number) {
+      if (pick < 0 || pick >= maxExclusive) {
+        throw new Error(`pick ${pick} is outside 0..${maxExclusive - 1}`);
+      }
+      return pick;
+    }
+  };
+}
+
+function setup(
+  now = chicagoWallTimeToUtc("2026-08-25T10:00:00"),
+  questions = tinyBank(),
+  rng?: WheelRng
+) {
   const state: FakeLeaderboardTelegramState = {
     bots: new Map([["token", { id: 1, isBot: true, firstName: "Bot", username: "sayubot" }]]),
     chats: new Map([
       [
         Number(channelId),
-        { id: Number(channelId), type: "channel", members: new Map(), messages: [], nextMessageId: 1 }
+        {
+          id: Number(channelId),
+          type: "channel",
+          members: new Map([
+            [100, "member"],
+            [200, "member"],
+            [300, "member"]
+          ]),
+          messages: [],
+          nextMessageId: 1
+        }
       ]
     ])
   };
   const client = createFakeLeaderboardTelegramClient(state);
-  const runtime = new MemoryEngagementRuntime(undefined, client, state);
+  const runtime = new MemoryEngagementRuntime(undefined, client, state, rng);
   runtime.importQuestions(questions);
   runtime.integrations.push({
     id: integrationId,
@@ -111,7 +139,7 @@ describe("engagement voting and settlement", () => {
     expect(runtime.vote({ pollId: poll.id, telegramUserId: "300", optionIndex: 0, now: new Date() })).toBe("closed");
   });
 
-  it("settles 5 vs 10 total and is idempotent", async () => {
+  it("settles poll counts without awarding engagement points", async () => {
     const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
@@ -120,13 +148,9 @@ describe("engagement voting and settlement", () => {
     runtime.vote({ pollId: poll.id, telegramUserId: "300", optionIndex: 0, now: new Date() });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:30"));
-    const awards = runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION");
-    expect(awards).toHaveLength(3);
-    expect(awards.find((row) => row.crmContactId === contactA)?.points).toBe(10);
-    expect(awards.find((row) => row.crmContactId === contactB)?.points).toBe(5);
-    expect(awards.every((row) => row.points === 5 || row.points === 10)).toBe(true);
-    expect(awards.some((row) => row.points === 15)).toBe(false);
+    expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
     expect(poll.winningOptionIndex).toBe(0);
+    expect(poll.optionCounts).toEqual([2, 1, 0, 0]);
   });
 
   it("does not post more than one poll for a slot and persists message ids", async () => {
@@ -166,7 +190,7 @@ describe("engagement poll presentation", () => {
     expect(poll.telegramPollId).toBeTruthy();
     expect(message?.poll?.id).toBe(poll.telegramPollId);
     expect(message?.poll?.question).toBe(poll.questionText);
-    expect(message?.poll?.isAnonymous).toBe(false);
+    expect(message?.poll?.isAnonymous).toBe(true);
     expect(message?.poll?.type).toBe("regular");
     expect(message?.poll?.allowsMultipleAnswers).toBe(false);
     expect(message?.poll?.allowsRevoting).toBe(false);
@@ -272,216 +296,23 @@ describe("engagement poll presentation", () => {
   });
 });
 
-describe("engagement daily declaration", () => {
-  it("keeps the 10 PM poll on the next declaration day", async () => {
+describe("engagement poll schedule", () => {
+  it("keeps the 10 PM poll on the next Chicago scoring date and awards no poll points", async () => {
     const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T22:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T22:00:01"));
     const poll = runtime.polls.find((p) => p.slotKey === "2026-08-25T22:00")!;
+    expect(poll.chicagoDate).toBe("2026-08-26");
     runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
-    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-25")).toBeUndefined();
-    expect(runtime.ledger.filter((row) => row.chicagoDate === "2026-08-25" && row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
+    expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
+    expect(runtime.results).toHaveLength(0);
+    expect(runtime.draws.find((row) => row.chicagoDate === "2026-08-25")).toBeUndefined();
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T02:00:00"));
-    expect(runtime.ledger.filter((row) => row.chicagoDate === "2026-08-26" && row.kind === "POLL_PARTICIPATION")).toHaveLength(1);
+    expect(poll.status).toBe("SETTLED");
+    expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T23:00:00"));
-    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-26")).toBeTruthy();
-  });
-
-  it("sums poll points plus independently aged referrals and declares Top 3 once", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    runtime.referrals.push(
-      { id: "ref-old", ownerCoadminUserId: owner, referrerCrmContactId: contactA, status: "ACTIVE", awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00") },
-      { id: "ref-new", ownerCoadminUserId: owner, referrerCrmContactId: contactA, status: "ACTIVE", awardedAt: chicagoWallTimeToUtc("2026-08-25T12:00:00") },
-      { id: "ref-dead", ownerCoadminUserId: owner, referrerCrmContactId: contactB, status: "REVERSED", awardedAt: chicagoWallTimeToUtc("2026-08-25T12:00:00") }
-    );
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 0, now: new Date() });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:30"));
-    const result = runtime.results.find((r) => r.chicagoDate === "2026-08-25")!;
-    expect(runtime.results.filter((r) => r.chicagoDate === "2026-08-25")).toHaveLength(1);
-    expect(result.firstCrmContactId).toBe(contactA);
-    const emily = (result.snapshot as Array<{ crmContactId: string; referralPoints: number; pollPoints: number }>).find(
-      (row) => row.crmContactId === contactA
-    );
-    expect(emily?.referralPoints).toBe(70);
-    const aug25Grants = runtime.claims.filter((c) =>
-      c.idempotencyKey.startsWith(`eng:fp:${owner}:2026-08-25:`)
-    );
-    expect(aug25Grants).toHaveLength(2);
-    expect(runtime.claims.find((c) => c.crmContactId === contactA)?.rewardAmountCents).toBe(500);
-    expect(runtime.claims.find((c) => c.crmContactId === contactB)?.rewardAmountCents).toBe(200);
-    const announcement = state.chats.get(Number(channelId))?.messages.at(-1)?.text ?? "";
-    expect(announcement).toContain("DAILY ENGAGEMENT WINNERS");
-    expect(announcement).toContain("Emily — $5 Freeplay");
-    expect(announcement).not.toContain("70");
-    expect(result.telegramMessageId).toBeTruthy();
-    const ledgerCount = runtime.ledger.length;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:01:00"));
-    expect(runtime.ledger.length).toBe(ledgerCount);
-    expect(runtime.claims.filter((c) => c.idempotencyKey.startsWith(`eng:fp:${owner}:2026-08-25:`))).toHaveLength(2);
-  });
-
-  it("does not carry prior-day poll points into the next declaration", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T23:00:00"));
-    const next = runtime.results.find((r) => r.chicagoDate === "2026-08-26");
-    const snapshot = (next?.snapshot as Array<{ crmContactId: string; pollPoints: number }> | undefined) ?? [];
-    expect(snapshot.find((row) => row.crmContactId === contactA)?.pollPoints ?? 0).toBe(0);
-    expect(runtime.ledger.filter((row) => row.chicagoDate === "2026-08-25")).not.toHaveLength(0);
-  });
-});
-
-describe("engagement activation boundary", () => {
-  it("does not synthesize a historical daily result from old referrals on a fresh deploy", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    runtime.referrals.push(
-      {
-        id: "ref-old-floor",
-        ownerCoadminUserId: owner,
-        referrerCrmContactId: contactA,
-        status: "ACTIVE",
-        awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00")
-      },
-      {
-        id: "ref-old-other",
-        ownerCoadminUserId: owner,
-        referrerCrmContactId: contactB,
-        status: "ACTIVE",
-        awardedAt: chicagoWallTimeToUtc("2026-02-01T12:00:00")
-      }
-    );
-    expect(runtime.polls).toHaveLength(0);
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:45"));
-    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-24")).toBeUndefined();
+    expect(runtime.draws.filter((row) => row.chicagoDate === "2026-08-26")).toHaveLength(1);
     expect(runtime.results).toHaveLength(0);
-    expect(runtime.claims.filter((c) => c.idempotencyKey.includes(":2026-08-24:"))).toHaveLength(0);
-    expect(runtime.ledger.filter((row) => row.chicagoDate === "2026-08-24")).toHaveLength(0);
-    expect(runtime.polls.some((p) => p.slotKey === "2026-08-25T10:00" && p.status === "OPEN")).toBe(true);
-    expect(runtime.polls.some((p) => p.slotKey === "2026-08-25T14:00")).toBe(true);
-    expect(runtime.polls.some((p) => p.slotKey === "2026-08-25T22:00")).toBe(true);
-  });
-
-  it("can create the first legitimate daily result after polling has started", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    runtime.referrals.push({
-      id: "ref-old-floor",
-      ownerCoadminUserId: owner,
-      referrerCrmContactId: contactA,
-      status: "ACTIVE",
-      awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00")
-    });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
-    const result = runtime.results.find((r) => r.chicagoDate === "2026-08-25");
-    expect(result).toBeTruthy();
-    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-24")).toBeUndefined();
-    const emily = (result?.snapshot as Array<{ crmContactId: string; referralPoints: number; pollPoints: number }>).find(
-      (row) => row.crmContactId === contactA
-    );
-    expect(emily?.pollPoints).toBe(10);
-    expect(emily?.referralPoints).toBe(20);
-    expect(result?.firstCrmContactId).toBe(contactA);
-  });
-
-  it("recovers a missed legitimate declaration after engagement has been running", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T08:00:00"));
-    expect(runtime.results.some((r) => r.chicagoDate === "2026-08-25")).toBe(true);
-    expect(runtime.results.some((r) => r.chicagoDate === "2026-08-24")).toBe(false);
-  });
-
-  it("lets historical referrals contribute a 20-point floor without creating historical days", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    runtime.referrals.push({
-      id: "ref-old-floor",
-      ownerCoadminUserId: owner,
-      referrerCrmContactId: contactB,
-      status: "ACTIVE",
-      awardedAt: chicagoWallTimeToUtc("2026-03-15T12:00:00")
-    });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    expect(runtime.results).toHaveLength(0);
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 0, now: new Date() });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
-    const result = runtime.results.find((r) => r.chicagoDate === "2026-08-25")!;
-    const john = (result.snapshot as Array<{ crmContactId: string; referralPoints: number; totalPoints: number }>).find(
-      (row) => row.crmContactId === contactB
-    );
-    expect(john?.referralPoints).toBe(20);
-    expect(john?.totalPoints).toBe(30);
-    expect(runtime.results.map((r) => r.chicagoDate)).toEqual(["2026-08-25"]);
-  });
-
-  it("does not disturb current or future scheduled polls while skipping historical catch-up", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    runtime.referrals.push({
-      id: "ref-old-floor",
-      ownerCoadminUserId: owner,
-      referrerCrmContactId: contactA,
-      status: "ACTIVE",
-      awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00")
-    });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const tenAm = runtime.polls.find((p) => p.slotKey === "2026-08-25T10:00")!;
-    const twoPm = runtime.polls.find((p) => p.slotKey === "2026-08-25T14:00")!;
-    const tenPm = runtime.polls.find((p) => p.slotKey === "2026-08-25T22:00")!;
-    expect(tenAm.status).toBe("OPEN");
-    expect(tenAm.telegramMessageId).toBeTruthy();
-    expect(twoPm.status).toBe("SCHEDULED");
-    expect(tenPm.status).toBe("SCHEDULED");
-    expect(tenPm.chicagoDate).toBe("2026-08-26");
-    expect(pollChannelMessages(state)).toHaveLength(1);
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    expect(runtime.polls.find((p) => p.slotKey === "2026-08-25T10:00")?.status).toBe("SETTLED");
-    expect(runtime.polls.find((p) => p.slotKey === "2026-08-25T14:00")?.status).toBe("OPEN");
-    expect(runtime.results).toHaveLength(0);
-  });
-
-  it("keeps repeated startup sweeps idempotent around the activation boundary", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    runtime.referrals.push({
-      id: "ref-old-floor",
-      ownerCoadminUserId: owner,
-      referrerCrmContactId: contactA,
-      status: "ACTIVE",
-      awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00")
-    });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const pollCount = runtime.polls.length;
-    const ledgerCount = runtime.ledger.length;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:20"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:01:00"));
-    expect(runtime.results).toHaveLength(0);
-    expect(runtime.polls).toHaveLength(pollCount);
-    expect(runtime.ledger).toHaveLength(ledgerCount);
-    expect(pollChannelMessages(state)).toHaveLength(1);
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
-    const afterDeclare = runtime.results.length;
-    const afterClaims = runtime.claims.length;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:30"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:01:00"));
-    expect(runtime.results).toHaveLength(afterDeclare);
-    expect(runtime.claims).toHaveLength(afterClaims);
-    expect(runtime.results.filter((r) => r.chicagoDate === "2026-08-25")).toHaveLength(1);
   });
 });
 
@@ -493,15 +324,6 @@ describe("engagement recovery", () => {
     expect(poll.status).toBe("OPEN");
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:05:00"));
     expect(poll.status).toBe("SETTLED");
-  });
-
-  it("completes an undeclared 11 PM result on startup", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T08:00:00"));
-    expect(runtime.results.some((r) => r.chicagoDate === "2026-08-25")).toBe(true);
   });
 
   it("does not duplicate a poll message after a successful send", async () => {
@@ -529,37 +351,7 @@ describe("engagement recovery", () => {
   });
 });
 
-describe("engagement freeplay grants", () => {
-  it("creates wheel-free $5/$2/$1 claims and does not duplicate on retry", () => {
-    const { runtime } = setup();
-    const first = runtime.grantEngagementClaim({
-      ownerCoadminUserId: owner,
-      crmContactId: contactA,
-      amountCents: 500,
-      idempotencyKey: "eng:fp:owner:2026-08-25:1"
-    });
-    const replay = runtime.grantEngagementClaim({
-      ownerCoadminUserId: owner,
-      crmContactId: contactA,
-      amountCents: 500,
-      idempotencyKey: "eng:fp:owner:2026-08-25:1"
-    });
-    runtime.addWheelClaim({
-      ownerCoadminUserId: owner,
-      crmContactId: contactA,
-      spinId: "spin-1",
-      idempotencyKey: "wheel:spin-1",
-      rewardAmountCents: 200
-    });
-    expect(first.replay).toBe(false);
-    expect(replay.replay).toBe(true);
-    expect(replay.claimId).toBe(first.claimId);
-    expect(runtime.claims.find((c) => c.id === first.claimId)?.spinId).toBeNull();
-    expect(runtime.claims.find((c) => c.source === "WHEEL")?.spinId).toBe("spin-1");
-  });
-});
-
-describe("native poll answers and scoring", () => {
+describe("native poll answers without scoring", () => {
   it("routes poll_answer by Telegram poll id and ignores username", async () => {
     const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
@@ -575,123 +367,32 @@ describe("native poll answers and scoring", () => {
     ).toBe("recorded");
     expect(runtime.votes[0]?.crmContactId).toBe(contactA);
     expect(runtime.votes[0]?.optionIndex).toBe(2);
-    expect(
-      runtime.voteFromPollAnswer({
-        telegramPollId: "missing-poll",
-        telegramUserId: "100",
-        optionIds: [0],
-        now: new Date()
-      })
-    ).toBe("not_found");
   });
 
-  it("updates a changed answer, handles empty option_ids, and is duplicate-safe", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    expect(
-      runtime.voteFromPollAnswer({
-        telegramPollId: poll.telegramPollId!,
-        telegramUserId: "100",
-        optionIds: [0],
-        now: new Date()
-      })
-    ).toBe("recorded");
-    expect(
-      runtime.voteFromPollAnswer({
-        telegramPollId: poll.telegramPollId!,
-        telegramUserId: "100",
-        optionIds: [0],
-        now: new Date()
-      })
-    ).toBe("recorded");
-    expect(
-      runtime.voteFromPollAnswer({
-        telegramPollId: poll.telegramPollId!,
-        telegramUserId: "100",
-        optionIds: [3],
-        now: new Date()
-      })
-    ).toBe("updated");
-    expect(runtime.votes).toHaveLength(1);
-    expect(runtime.votes[0]?.optionIndex).toBe(3);
-    expect(
-      runtime.voteFromPollAnswer({
-        telegramPollId: poll.telegramPollId!,
-        telegramUserId: "100",
-        optionIds: [],
-        now: new Date()
-      })
-    ).toBe("withdrawn");
-    expect(runtime.votes).toHaveLength(0);
-  });
-
-  it("gives unregistered voters no points while still counting them in the public winner", async () => {
+  it("counts unregistered native votes publicly without awarding anyone points", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    expect(
-      runtime.voteFromPollAnswer({
-        telegramPollId: poll.telegramPollId!,
-        telegramUserId: "999",
-        optionIds: [1],
-        now: new Date()
-      })
-    ).toBe("unregistered");
-    expect(
-      runtime.voteFromPollAnswer({
-        telegramPollId: poll.telegramPollId!,
-        telegramUserId: "888",
-        optionIds: [1],
-        now: new Date()
-      })
-    ).toBe("unregistered");
-    expect(
-      runtime.voteFromPollAnswer({
-        telegramPollId: poll.telegramPollId!,
-        telegramUserId: "100",
-        optionIds: [0],
-        now: new Date()
-      })
-    ).toBe("recorded");
-    expect(runtime.votes).toHaveLength(1);
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    const message = state.chats.get(Number(channelId))?.messages[0];
-    expect(message?.poll?.options.map((option) => option.voterCount)).toEqual([1, 2, 0, 0]);
-    expect(poll.winningOptionIndex).toBe(1);
-    const awards = runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION");
-    expect(awards).toHaveLength(1);
-    expect(awards[0]?.crmContactId).toBe(contactA);
-    expect(awards[0]?.points).toBe(5);
-  });
-
-  it("uses the lowest option index on a native-count tie and awards 10 vs 5 without doubling", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
-      telegramUserId: "100",
+      telegramUserId: "999",
       optionIds: [1],
       now: new Date()
     });
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
-      telegramUserId: "200",
-      optionIds: [2],
+      telegramUserId: "100",
+      optionIds: [0],
       now: new Date()
     });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:30"));
-    expect(poll.winningOptionIndex).toBe(1);
-    const awards = runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION");
-    expect(awards).toHaveLength(2);
-    expect(awards.find((row) => row.crmContactId === contactA)?.points).toBe(10);
-    expect(awards.find((row) => row.crmContactId === contactB)?.points).toBe(5);
-    expect(awards.some((row) => row.points === 15)).toBe(false);
+    expect(state.chats.get(Number(channelId))?.messages[0]?.poll?.options.map((option) => option.voterCount)).toEqual([
+      1, 1, 0, 0
+    ]);
+    expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
   });
 
-  it("keeps old custom-button polls working without a Telegram poll id", async () => {
+  it("keeps old custom-button polls working without a Telegram poll id or points", async () => {
     const legacyState: FakeLeaderboardTelegramState = {
       bots: new Map([["token", { id: 1, isBot: true, firstName: "Bot", username: "sayubot" }]]),
       chats: new Map([
@@ -726,39 +427,11 @@ describe("native poll answers and scoring", () => {
     await legacyRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = legacyRuntime.polls.find((p) => p.status === "OPEN")!;
     expect(poll.telegramPollId).toBeNull();
-    const open = legacyState.chats.get(Number(channelId))?.messages[0];
-    expect(open?.replyMarkup?.inline_keyboard).toHaveLength(4);
-    expect(
-      legacyRuntime.voteFromCallback(buildVoteCallbackData(poll.id, 0), "100", new Date())
-    ).toBe("recorded");
+    expect(legacyState.chats.get(Number(channelId))?.messages[0]?.replyMarkup?.inline_keyboard).toHaveLength(4);
+    expect(legacyRuntime.voteFromCallback(buildVoteCallbackData(poll.id, 0), "100", new Date())).toBe("recorded");
     await legacyRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    const closed = legacyState.chats.get(Number(channelId))?.messages[0];
-    expect(String(closed?.messageId)).toBe(poll.telegramMessageId);
-    expect(closed?.text).toContain("POLL RESULTS");
-    expect(closed?.replyMarkup?.inline_keyboard).toEqual([]);
-    expect(legacyRuntime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")[0]?.points).toBe(10);
-  });
-
-  it("falls back to callback buttons when Telegram rejects non-anonymous channel polls", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    state.failures = new Map([
-      [
-        "token:sendPoll",
-        new LeaderboardTelegramApiError({
-          httpStatus: 400,
-          telegramErrorCode: 400,
-          description: "Bad Request: non-anonymous polls can't be sent to channel chats",
-          permanent: true
-        })
-      ]
-    ]);
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    const message = state.chats.get(Number(channelId))?.messages[0];
-    expect(poll.telegramPollId).toBeNull();
-    expect(message?.poll).toBeUndefined();
-    expect(message?.replyMarkup?.inline_keyboard).toHaveLength(4);
-    expect(message?.text).toContain("WHICH WOULD YOU CHOOSE");
+    expect(legacyState.chats.get(Number(channelId))?.messages[0]?.text).toContain("POLL RESULTS");
+    expect(legacyRuntime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
   });
 });
 

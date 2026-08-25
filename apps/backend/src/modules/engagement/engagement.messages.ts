@@ -77,6 +77,34 @@ export function formatDailyWinnersMessage(input: {
   return lines.join("\n");
 }
 
+export function formatDailyDrawCaption(input: {
+  readonly displayName: string;
+  readonly referralWeight: number;
+  readonly activeReferralCount: number;
+}): string {
+  const name = input.displayName.trim() || "Player";
+  const lines = [
+    `🎉 Congratulations ${name}!`,
+    "",
+    "You won today's $5 Freeplay Lucky Subscriber Draw."
+  ];
+  if (input.referralWeight > 0) {
+    const boost =
+      input.activeReferralCount === 1
+        ? "1 active referral boosted today's winning chances!"
+        : `${input.activeReferralCount} active referrals boosted today's winning chances!`;
+    lines.push("", "🔥 Your successful referrals increased your chances in today's draw.", `🔥 ${boost}`);
+  }
+  lines.push(
+    "",
+    "Every eligible registered subscriber has a chance to win.",
+    "Successful referrals increase your chance.",
+    "Each new successful referral starts with a strong boost, then fades over time.",
+    "Refer players to increase your chances in future daily draws."
+  );
+  return lines.join("\n");
+}
+
 export function buildPollInlineKeyboard(
   pollId: string,
   options: readonly [string, string, string, string]

@@ -410,7 +410,12 @@ export class LeaderboardTelegramOutboxService {
   public async enqueueEngagementJob(input: {
     readonly workspaceId: string;
     readonly ownerCoadminUserId: string;
-    readonly jobType: "POST_ENGAGEMENT_POLL" | "CLOSE_ENGAGEMENT_POLL" | "ANNOUNCE_ENGAGEMENT_WINNERS";
+    readonly jobType:
+      | "POST_ENGAGEMENT_POLL"
+      | "CLOSE_ENGAGEMENT_POLL"
+      | "ANNOUNCE_ENGAGEMENT_WINNERS"
+      | "RUN_ENGAGEMENT_DAILY_DRAW"
+      | "ANNOUNCE_ENGAGEMENT_DAILY_DRAW";
     readonly idempotencyKey: string;
     readonly payloadJson: Record<string, unknown>;
   }): Promise<string> {

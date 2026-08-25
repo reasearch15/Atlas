@@ -1,44 +1,53 @@
 import { randomUUID } from "node:crypto";
 import {
-  DAILY_PRIZES_CENTS,
+  DAILY_DRAW_PRIZE_CENTS,
+  DRAW_BASE_WEIGHT,
+  DRAW_WINNER_COOLDOWN_DRAWS,
   POLL_DURATION_MS
 } from "./engagement.constants";
 import {
   EMPTY_INLINE_KEYBOARD,
   buildPollInlineKeyboard,
   formatClosedPollMessage,
-  formatDailyWinnersMessage,
+  formatDailyDrawCaption,
   formatOpenPollMessage,
   parseVoteCallbackData
 } from "./engagement.messages";
 import {
+  addChicagoDays,
   listSlotsInRange,
   latestDeclarationChicagoDate,
   declarationInstantForChicagoDate,
   isEligibleEngagementDeclarationDate
 } from "./engagement.schedule";
 import {
-  announceOutboxKey,
   closePollOutboxKey,
-  freeplayGrantIdempotencyKey,
-  pollParticipationIdempotencyKey,
-  pollPointsForVote,
   postPollOutboxKey,
-  rankEngagementPlayers,
-  referralContributionAtDeclaration,
-  referralContributionIdempotencyKey,
   countOptionVotes,
   parseStoredOptionCounts,
   nativeCountsFromPollOptions,
-  winningOptionIndex,
-  type EngagementScoreTotal
+  winningOptionIndex
 } from "./engagement.scoring";
+import {
+  candidateDrawWeight,
+  dailyDrawAnnounceOutboxKey,
+  dailyDrawFreeplayIdempotencyKey,
+  dailyDrawOutboxKey,
+  drawReferralWeightAtDeclaration,
+  isDailyDrawEligibleChatMember,
+  isInDailyDrawWinnerCooldown,
+  selectWeightedDailyDrawCandidate,
+  snapshotDailyDrawCandidates,
+  type DailyDrawCandidate
+} from "./engagement.draw";
+import { renderDailyDrawWinnerCard } from "./engagement.draw-card";
 import { shuffleIds, validateQuestionBank, type EngagementQuestionInput } from "./question-bank";
 import {
   applyFakePollAnswer,
   type FakeLeaderboardTelegramState,
   type LeaderboardTelegramClient
 } from "../leaderboard/telegram/leaderboard-telegram.client";
+import { createCryptoWheelRng, type WheelRng } from "../leaderboard/wheel-rng";
 
 export type VoteStatus =
   | "recorded"
@@ -134,12 +143,33 @@ export interface MemoryDailyResult {
   announcedAt: Date | null;
 }
 
+export interface MemoryDailyDraw {
+  id: string;
+  ownerCoadminUserId: string;
+  chicagoDate: string;
+  status: "DRAWN" | "ANNOUNCED" | "NO_ELIGIBLE";
+  winnerCrmContactId: string | null;
+  winnerTelegramUserId: string | null;
+  winnerBaseWeight: number | null;
+  winnerReferralWeight: number | null;
+  winnerTotalWeight: number | null;
+  winnerActiveReferralCount: number | null;
+  candidateCount: number;
+  totalWeight: number;
+  randomPick: number | null;
+  snapshot: unknown;
+  freeplayClaimId: string | null;
+  telegramMessageId: string | null;
+  drawnAt: Date;
+  announcedAt: Date | null;
+}
+
 export interface MemoryFreeplayClaim {
   id: string;
   ownerCoadminUserId: string;
   crmContactId: string;
   spinId: string | null;
-  source: "WHEEL" | "ENGAGEMENT_DAILY";
+  source: "WHEEL" | "ENGAGEMENT_DAILY" | "ENGAGEMENT_DAILY_DRAW";
   idempotencyKey: string;
   rewardAmountCents: number;
 }
@@ -147,6 +177,8 @@ export interface MemoryFreeplayClaim {
 type ChannelClient = Pick<LeaderboardTelegramClient, "sendMessage" | "editMessageText"> & {
   sendPoll?: LeaderboardTelegramClient["sendPoll"];
   stopPoll?: LeaderboardTelegramClient["stopPoll"];
+  getChatMember?: LeaderboardTelegramClient["getChatMember"];
+  sendPhoto?: LeaderboardTelegramClient["sendPhoto"];
 };
 
 export class MemoryEngagementRuntime {
@@ -155,6 +187,7 @@ export class MemoryEngagementRuntime {
   public readonly votes: VoteRow[] = [];
   public readonly ledger: LedgerRow[] = [];
   public readonly results: MemoryDailyResult[] = [];
+  public readonly draws: MemoryDailyDraw[] = [];
   public readonly claims: MemoryFreeplayClaim[] = [];
   public readonly outbox: Array<{ jobType: string; idempotencyKey: string; payload: Record<string, unknown>; status: string }> =
     [];
@@ -195,7 +228,8 @@ export class MemoryEngagementRuntime {
   public constructor(
     private readonly random = Math.random,
     private readonly client?: ChannelClient,
-    private readonly telegramState?: FakeLeaderboardTelegramState
+    private readonly telegramState?: FakeLeaderboardTelegramState,
+    private readonly rng: WheelRng = createCryptoWheelRng()
   ) {}
 
   private lock<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -241,7 +275,7 @@ export class MemoryEngagementRuntime {
         this.ensureSlots(integration, now);
         await this.postDue(integration, now);
         await this.closeDue(integration, now);
-        await this.declareDue(integration, now);
+        await this.drawDue(integration, now);
       }
     });
   }
@@ -373,6 +407,7 @@ export class MemoryEngagementRuntime {
     crmContactId: string;
     amountCents: number;
     idempotencyKey: string;
+    source?: "ENGAGEMENT_DAILY" | "ENGAGEMENT_DAILY_DRAW";
   }): { claimId: string; replay: boolean } {
     const existing = this.claims.find((c) => c.idempotencyKey === input.idempotencyKey);
     if (existing) return { claimId: existing.id, replay: true };
@@ -381,7 +416,7 @@ export class MemoryEngagementRuntime {
       ownerCoadminUserId: input.ownerCoadminUserId,
       crmContactId: input.crmContactId,
       spinId: null,
-      source: "ENGAGEMENT_DAILY",
+      source: input.source ?? "ENGAGEMENT_DAILY",
       idempotencyKey: input.idempotencyKey,
       rewardAmountCents: input.amountCents
     };
@@ -485,33 +520,16 @@ export class MemoryEngagementRuntime {
       if (this.client && integration.channelId && poll.questionText && poll.option1) {
         if (!poll.telegramMessageId) {
           if (this.client.sendPoll) {
-            try {
-              const sent = await this.client.sendPoll(integration.botToken, integration.channelId, {
-                question: poll.questionText,
-                options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
-                isAnonymous: false,
-                type: "regular",
-                allowsMultipleAnswers: false,
-                allowsRevoting: false
-              });
-              poll.telegramMessageId = String(sent.messageId);
-              poll.telegramPollId = sent.poll?.id ?? null;
-            } catch {
-              const sent = await this.client.sendMessage(
-                integration.botToken,
-                integration.channelId,
-                formatOpenPollMessage(poll.questionText),
-                {
-                  replyMarkup: buildPollInlineKeyboard(poll.id, [
-                    poll.option1,
-                    poll.option2!,
-                    poll.option3!,
-                    poll.option4!
-                  ])
-                }
-              );
-              poll.telegramMessageId = String(sent.messageId);
-            }
+            const sent = await this.client.sendPoll(integration.botToken, integration.channelId, {
+              question: poll.questionText,
+              options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
+              isAnonymous: true,
+              type: "regular",
+              allowsMultipleAnswers: false,
+              allowsRevoting: false
+            });
+            poll.telegramMessageId = String(sent.messageId);
+            poll.telegramPollId = sent.poll?.id ?? null;
           } else {
             const sent = await this.client.sendMessage(
               integration.botToken,
@@ -608,24 +626,6 @@ export class MemoryEngagementRuntime {
     const counts = nativeCounts ?? registeredCounts;
     const totalVotes = counts.reduce((sum, n) => sum + n, 0);
     const winner = totalVotes > 0 ? winningOptionIndex(counts) : null;
-    if (winner != null) {
-      for (const vote of votes) {
-        const key = pollParticipationIdempotencyKey(poll.id, vote.crmContactId);
-        if (this.ledger.some((row) => row.idempotencyKey === key)) continue;
-        this.ledger.push({
-          id: randomUUID(),
-          ownerCoadminUserId: poll.ownerCoadminUserId,
-          crmContactId: vote.crmContactId,
-          chicagoDate: poll.chicagoDate,
-          kind: "POLL_PARTICIPATION",
-          points: pollPointsForVote(vote.optionIndex, winner),
-          pollId: poll.id,
-          referralId: null,
-          idempotencyKey: key,
-          createdAt: now
-        });
-      }
-    }
     poll.optionCounts = counts;
     poll.winningOptionIndex = winner;
     poll.closedAt = now;
@@ -633,7 +633,7 @@ export class MemoryEngagementRuntime {
     poll.status = "SETTLED";
   }
 
-  private async declareDue(integration: (typeof this.integrations)[number], now: Date): Promise<void> {
+  private async drawDue(integration: (typeof this.integrations)[number], now: Date): Promise<void> {
     const chicagoDate = latestDeclarationChicagoDate(now);
     const declareAt = declarationInstantForChicagoDate(chicagoDate);
     if (now.getTime() < declareAt.getTime()) return;
@@ -641,124 +641,170 @@ export class MemoryEngagementRuntime {
       .filter((p) => p.ownerCoadminUserId === integration.ownerCoadminUserId)
       .map((p) => p.chicagoDate);
     if (!isEligibleEngagementDeclarationDate(chicagoDate, pollDates)) return;
-    if (this.results.some((r) => r.ownerCoadminUserId === integration.ownerCoadminUserId && r.chicagoDate === chicagoDate)) {
-      const existing = this.results.find(
-        (r) => r.ownerCoadminUserId === integration.ownerCoadminUserId && r.chicagoDate === chicagoDate
-      )!;
-      await this.announce(existing, integration, now);
+    const existing = this.draws.find(
+      (row) => row.ownerCoadminUserId === integration.ownerCoadminUserId && row.chicagoDate === chicagoDate
+    );
+    if (existing) {
+      await this.announceDraw(existing, integration, now);
       return;
     }
-    const referralRows = this.referrals.filter(
-      (r) =>
-        r.ownerCoadminUserId === integration.ownerCoadminUserId &&
-        r.status === "ACTIVE" &&
-        r.awardedAt.getTime() < declareAt.getTime()
-    );
-    for (const referral of referralRows) {
-      const points = referralContributionAtDeclaration(referral.awardedAt, declareAt);
-      if (points <= 0) continue;
-      const key = referralContributionIdempotencyKey(integration.ownerCoadminUserId, chicagoDate, referral.id);
-      if (this.ledger.some((row) => row.idempotencyKey === key)) continue;
-      this.ledger.push({
+    this.enqueue("RUN_ENGAGEMENT_DAILY_DRAW", dailyDrawOutboxKey(integration.ownerCoadminUserId, chicagoDate), {
+      chicagoDate
+    });
+    const candidates = await this.loadDrawCandidates(integration, chicagoDate, declareAt);
+    const snapshot = snapshotDailyDrawCandidates(candidates);
+    const totalWeight = candidates.reduce((sum, row) => sum + row.totalWeight, 0);
+    if (candidates.length === 0 || totalWeight <= 0) {
+      this.draws.push({
         id: randomUUID(),
         ownerCoadminUserId: integration.ownerCoadminUserId,
-        crmContactId: referral.referrerCrmContactId,
         chicagoDate,
-        kind: "REFERRAL_CONTRIBUTION",
-        points,
-        pollId: null,
-        referralId: referral.id,
-        idempotencyKey: key,
-        createdAt: now
+        status: "NO_ELIGIBLE",
+        winnerCrmContactId: null,
+        winnerTelegramUserId: null,
+        winnerBaseWeight: null,
+        winnerReferralWeight: null,
+        winnerTotalWeight: null,
+        winnerActiveReferralCount: null,
+        candidateCount: 0,
+        totalWeight: 0,
+        randomPick: null,
+        snapshot,
+        freeplayClaimId: null,
+        telegramMessageId: null,
+        drawnAt: now,
+        announcedAt: null
       });
+      this.completeOutbox(dailyDrawOutboxKey(integration.ownerCoadminUserId, chicagoDate));
+      return;
     }
-    const totals = new Map<string, EngagementScoreTotal>();
-    for (const row of this.ledger.filter(
-      (l) => l.ownerCoadminUserId === integration.ownerCoadminUserId && l.chicagoDate === chicagoDate
-    )) {
-      const current = totals.get(row.crmContactId) ?? {
-        crmContactId: row.crmContactId,
-        totalPoints: 0,
-        pollPoints: 0,
-        referralPoints: 0,
-        pointsReachedAt: row.createdAt
-      };
-      totals.set(row.crmContactId, {
-        ...current,
-        totalPoints: current.totalPoints + row.points,
-        pollPoints: current.pollPoints + (row.kind === "POLL_PARTICIPATION" ? row.points : 0),
-        referralPoints: current.referralPoints + (row.kind === "POLL_PARTICIPATION" ? 0 : row.points),
-        pointsReachedAt:
-          row.createdAt.getTime() >= current.pointsReachedAt.getTime()
-            ? row.createdAt
-            : current.pointsReachedAt
-      });
-    }
-    const ranked = rankEngagementPlayers([...totals.values()]);
-    const top = ranked.slice(0, 3);
-    const result: MemoryDailyResult = {
+    const picked = selectWeightedDailyDrawCandidate(candidates, this.rng);
+    const winner = picked.selected;
+    const granted = this.grantEngagementClaim({
+      ownerCoadminUserId: integration.ownerCoadminUserId,
+      crmContactId: winner.crmContactId,
+      amountCents: DAILY_DRAW_PRIZE_CENTS,
+      idempotencyKey: dailyDrawFreeplayIdempotencyKey(integration.ownerCoadminUserId, chicagoDate),
+      source: "ENGAGEMENT_DAILY_DRAW"
+    });
+    const draw: MemoryDailyDraw = {
       id: randomUUID(),
       ownerCoadminUserId: integration.ownerCoadminUserId,
       chicagoDate,
-      declaredAt: now,
-      status: "SNAPSHOTTED",
-      firstCrmContactId: top[0]?.crmContactId ?? null,
-      secondCrmContactId: top[1]?.crmContactId ?? null,
-      thirdCrmContactId: top[2]?.crmContactId ?? null,
-      snapshot: ranked.map((row, index) => ({
-        rank: index + 1,
-        crmContactId: row.crmContactId,
-        totalPoints: row.totalPoints,
-        pollPoints: row.pollPoints,
-        referralPoints: row.referralPoints,
-        pointsReachedAt: row.pointsReachedAt.toISOString()
-      })),
+      status: "DRAWN",
+      winnerCrmContactId: winner.crmContactId,
+      winnerTelegramUserId: winner.telegramUserId,
+      winnerBaseWeight: winner.baseWeight,
+      winnerReferralWeight: winner.referralWeight,
+      winnerTotalWeight: winner.totalWeight,
+      winnerActiveReferralCount: winner.activeReferralCount,
+      candidateCount: candidates.length,
+      totalWeight: picked.totalWeight,
+      randomPick: picked.pick,
+      snapshot,
+      freeplayClaimId: granted.claimId,
       telegramMessageId: null,
+      drawnAt: now,
       announcedAt: null
     };
-    this.results.push(result);
-    const winners = [result.firstCrmContactId, result.secondCrmContactId, result.thirdCrmContactId];
-    winners.forEach((crmContactId, index) => {
-      if (!crmContactId) return;
-      const prizeRank = index + 1;
-      const amountCents = DAILY_PRIZES_CENTS[index]!;
-      this.grantEngagementClaim({
-        ownerCoadminUserId: integration.ownerCoadminUserId,
-        crmContactId,
-        amountCents,
-        idempotencyKey: freeplayGrantIdempotencyKey(integration.ownerCoadminUserId, chicagoDate, prizeRank)
-      });
-    });
-    this.enqueue("ANNOUNCE_ENGAGEMENT_WINNERS", announceOutboxKey(integration.ownerCoadminUserId, chicagoDate), {
-      dailyResultId: result.id
-    });
-    await this.announce(result, integration, now);
+    this.draws.push(draw);
+    this.completeOutbox(dailyDrawOutboxKey(integration.ownerCoadminUserId, chicagoDate));
+    this.enqueue(
+      "ANNOUNCE_ENGAGEMENT_DAILY_DRAW",
+      dailyDrawAnnounceOutboxKey(integration.ownerCoadminUserId, chicagoDate),
+      { drawId: draw.id, chicagoDate }
+    );
+    await this.announceDraw(draw, integration, now);
   }
 
-  private async announce(
-    result: MemoryDailyResult,
+  private async loadDrawCandidates(
+    integration: (typeof this.integrations)[number],
+    chicagoDate: string,
+    declareAt: Date
+  ): Promise<DailyDrawCandidate[]> {
+    if (!integration.channelId || !this.client?.getChatMember) return [];
+    const getChatMember = this.client.getChatMember;
+    const cooldownStart = addChicagoDays(chicagoDate, -DRAW_WINNER_COOLDOWN_DRAWS);
+    const recentWins = this.draws.filter(
+      (row) =>
+        row.ownerCoadminUserId === integration.ownerCoadminUserId &&
+        row.winnerCrmContactId &&
+        row.chicagoDate >= cooldownStart &&
+        row.chicagoDate < chicagoDate
+    );
+    const winsByContact = new Map<string, string[]>();
+    for (const row of recentWins) {
+      if (!row.winnerCrmContactId) continue;
+      const list = winsByContact.get(row.winnerCrmContactId) ?? [];
+      list.push(row.chicagoDate);
+      winsByContact.set(row.winnerCrmContactId, list);
+    }
+    const referralWeightByContact = new Map<string, { weight: number; activeCount: number }>();
+    for (const referral of this.referrals) {
+      if (referral.ownerCoadminUserId !== integration.ownerCoadminUserId || referral.status !== "ACTIVE") continue;
+      if (referral.awardedAt.getTime() >= declareAt.getTime()) continue;
+      const weight = drawReferralWeightAtDeclaration(referral.awardedAt, declareAt);
+      const current = referralWeightByContact.get(referral.referrerCrmContactId) ?? { weight: 0, activeCount: 0 };
+      referralWeightByContact.set(referral.referrerCrmContactId, {
+        weight: current.weight + weight,
+        activeCount: current.activeCount + (weight > 0 ? 1 : 0)
+      });
+    }
+    const candidates: DailyDrawCandidate[] = [];
+    for (const link of this.playerLinks) {
+      if (link.botIntegrationId !== integration.id || link.ownerCoadminUserId !== integration.ownerCoadminUserId) {
+        continue;
+      }
+      if (isInDailyDrawWinnerCooldown(winsByContact.get(link.crmContactId) ?? [], chicagoDate)) continue;
+      let member;
+      try {
+        member = await getChatMember(integration.botToken, integration.channelId, link.telegramUserId);
+      } catch {
+        continue;
+      }
+      if (!isDailyDrawEligibleChatMember(member)) continue;
+      const referral = referralWeightByContact.get(link.crmContactId) ?? { weight: 0, activeCount: 0 };
+      candidates.push({
+        crmContactId: link.crmContactId,
+        telegramUserId: link.telegramUserId,
+        displayName: this.contacts.get(link.crmContactId)?.displayName ?? "Player",
+        baseWeight: DRAW_BASE_WEIGHT,
+        referralWeight: referral.weight,
+        totalWeight: candidateDrawWeight(referral.weight),
+        activeReferralCount: referral.activeCount
+      });
+    }
+    return candidates;
+  }
+
+  private async announceDraw(
+    draw: MemoryDailyDraw,
     integration: (typeof this.integrations)[number],
     now: Date
   ): Promise<void> {
-    if (result.telegramMessageId) {
-      result.status = "ANNOUNCED";
+    if (draw.telegramMessageId) {
+      draw.status = "ANNOUNCED";
       return;
     }
-    if (!this.client || !integration.channelId) return;
-    const name = (id: string | null) => (id ? this.contacts.get(id)?.displayName ?? "Player" : null);
-    const sent = await this.client.sendMessage(
-      integration.botToken,
-      integration.channelId,
-      formatDailyWinnersMessage({
-        firstName: name(result.firstCrmContactId),
-        secondName: name(result.secondCrmContactId),
-        thirdName: name(result.thirdCrmContactId)
-      })
-    );
-    result.telegramMessageId = String(sent.messageId);
-    result.announcedAt = now;
-    result.status = "ANNOUNCED";
-    this.completeOutbox(announceOutboxKey(integration.ownerCoadminUserId, result.chicagoDate));
+    if (!draw.winnerCrmContactId || !this.client?.sendPhoto || !integration.channelId) return;
+    const displayName = this.contacts.get(draw.winnerCrmContactId)?.displayName ?? "Player";
+    const photo = await renderDailyDrawWinnerCard({
+      displayName,
+      activeReferralCount: draw.winnerActiveReferralCount ?? 0,
+      referralWeight: draw.winnerReferralWeight ?? 0
+    });
+    const sent = await this.client.sendPhoto(integration.botToken, integration.channelId, photo, {
+      caption: formatDailyDrawCaption({
+        displayName,
+        referralWeight: draw.winnerReferralWeight ?? 0,
+        activeReferralCount: draw.winnerActiveReferralCount ?? 0
+      }),
+      filename: "daily-freeplay-winner.png"
+    });
+    draw.telegramMessageId = String(sent.messageId);
+    draw.announcedAt = now;
+    draw.status = "ANNOUNCED";
+    this.completeOutbox(dailyDrawAnnounceOutboxKey(integration.ownerCoadminUserId, draw.chicagoDate));
   }
 
   private enqueue(jobType: string, idempotencyKey: string, payload: Record<string, unknown>): void {

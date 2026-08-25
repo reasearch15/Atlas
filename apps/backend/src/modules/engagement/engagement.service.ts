@@ -1,42 +1,47 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { FreeplayService } from "../freeplay/freeplay.service";
 import type { LeaderboardTelegramOutboxService } from "../leaderboard/telegram/leaderboard-telegram.outbox";
-import { DAILY_PRIZES_CENTS } from "./engagement.constants";
+import { DAILY_DRAW_PRIZE_CENTS, DRAW_BASE_WEIGHT, DRAW_WINNER_COOLDOWN_DRAWS } from "./engagement.constants";
 import {
+  addChicagoDays,
   listSlotsInRange,
   latestDeclarationChicagoDate,
   declarationInstantForChicagoDate,
   isEligibleEngagementDeclarationDate
 } from "./engagement.schedule";
 import {
-  announceOutboxKey,
   closePollOutboxKey,
-  freeplayGrantIdempotencyKey,
-  pollParticipationIdempotencyKey,
-  pollPointsForVote,
   postPollOutboxKey,
-  rankEngagementPlayers,
-  referralContributionAtDeclaration,
-  referralContributionIdempotencyKey,
   countOptionVotes,
   parseStoredOptionCounts,
   nativeCountsFromPollOptions,
-  winningOptionIndex,
-  type EngagementScoreTotal
+  winningOptionIndex
 } from "./engagement.scoring";
+import {
+  candidateDrawWeight,
+  dailyDrawAnnounceOutboxKey,
+  dailyDrawFreeplayIdempotencyKey,
+  dailyDrawOutboxKey,
+  drawReferralWeightAtDeclaration,
+  isDailyDrawEligibleChatMember,
+  isInDailyDrawWinnerCooldown,
+  selectWeightedDailyDrawCandidate,
+  snapshotDailyDrawCandidates,
+  type DailyDrawCandidate
+} from "./engagement.draw";
+import { renderDailyDrawWinnerCard } from "./engagement.draw-card";
 import { shuffleIds, validateQuestionBank, type EngagementQuestionInput } from "./question-bank";
 import {
   parseVoteCallbackData,
-  formatOpenPollMessage,
   formatClosedPollMessage,
-  formatDailyWinnersMessage,
-  buildPollInlineKeyboard,
+  formatDailyDrawCaption,
   EMPTY_INLINE_KEYBOARD
 } from "./engagement.messages";
 import {
   LeaderboardTelegramApiError,
   type LeaderboardTelegramClient
 } from "../leaderboard/telegram/leaderboard-telegram.client";
+import { createCryptoWheelRng, type WheelRng } from "../leaderboard/wheel-rng";
 
 export type EngagementVoteStatus =
   | "recorded"
@@ -56,7 +61,8 @@ export class EngagementService {
   public constructor(
     private readonly prisma: PrismaClient,
     private readonly outbox?: LeaderboardTelegramOutboxService,
-    private readonly freeplay?: FreeplayService
+    private readonly freeplay?: FreeplayService,
+    private readonly rng: WheelRng = createCryptoWheelRng()
   ) {}
 
   public async importQuestionBank(rows: readonly EngagementQuestionInput[]): Promise<{ upserted: number }> {
@@ -87,7 +93,7 @@ export class EngagementService {
       await this.ensureSlots(integration, now);
       await this.enqueueDuePosts(integration, now);
       await this.closeDuePolls(integration, now);
-      await this.declareDue(integration, now);
+      await this.enqueueDueDailyDraw(integration, now);
     }
   }
 
@@ -178,43 +184,24 @@ export class EngagementService {
       }
       return;
     }
-    if (!poll.channelId || !poll.questionText || !poll.option1) return;
-    if (client.sendPoll) {
-      try {
-        const sent = await client.sendPoll(token, poll.channelId, {
-          question: poll.questionText,
-          options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
-          isAnonymous: false,
-          type: "regular",
-          allowsMultipleAnswers: false,
-          allowsRevoting: false
-        });
-        const telegramPollId = sent.poll?.id;
-        if (!telegramPollId) {
-          throw new Error("Telegram sendPoll did not return a native poll id");
-        }
-        await this.prisma.engagementPoll.updateMany({
-          where: { id: pollId, telegramMessageId: null },
-          data: {
-            telegramMessageId: String(sent.messageId),
-            telegramPollId,
-            status: "OPEN",
-            postedAt: new Date()
-          }
-        });
-        return;
-      } catch (error) {
-        if (!isChannelNonAnonymousPollError(error)) throw error;
-        // Telegram forbids identifiable native polls in channels. Keep callback posting.
-      }
-    }
-    const sent = await client.sendMessage(token, poll.channelId, formatOpenPollMessage(poll.questionText), {
-      replyMarkup: buildPollInlineKeyboard(poll.id, [poll.option1, poll.option2!, poll.option3!, poll.option4!])
+    if (!poll.channelId || !poll.questionText || !poll.option1 || !client.sendPoll) return;
+    const sent = await client.sendPoll(token, poll.channelId, {
+      question: poll.questionText,
+      options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
+      isAnonymous: true,
+      type: "regular",
+      allowsMultipleAnswers: false,
+      allowsRevoting: false
     });
+    const telegramPollId = sent.poll?.id;
+    if (!telegramPollId) {
+      throw new Error("Telegram sendPoll did not return a native poll id");
+    }
     await this.prisma.engagementPoll.updateMany({
       where: { id: pollId, telegramMessageId: null },
       data: {
         telegramMessageId: String(sent.messageId),
+        telegramPollId,
         status: "OPEN",
         postedAt: new Date()
       }
@@ -307,38 +294,184 @@ export class EngagementService {
   }
 
   public async completeAnnounce(
-    dailyResultId: string,
+    _dailyResultId: string,
+    _client: LeaderboardTelegramClient,
+    _token: string
+  ): Promise<void> {
+    // Old poll-ranking Top 3 $5/$2/$1 declaration stays disabled.
+  }
+
+  public async completeDailyDraw(input: {
+    readonly ownerCoadminUserId: string;
+    readonly chicagoDate: string;
+    readonly client: LeaderboardTelegramClient;
+    readonly token: string;
+    readonly now?: Date;
+  }): Promise<void> {
+    const now = input.now ?? new Date();
+    const declareAt = declarationInstantForChicagoDate(input.chicagoDate);
+    if (now.getTime() < declareAt.getTime()) return;
+    const integration = await this.prisma.leaderboardBotIntegration.findUnique({
+      where: { ownerCoadminUserId: input.ownerCoadminUserId }
+    });
+    if (!integration || integration.disconnectedAt || !integration.channelId || !integration.postingEnabled) {
+      return;
+    }
+    const earliestPoll = await this.prisma.engagementPoll.findFirst({
+      where: { ownerCoadminUserId: integration.ownerCoadminUserId },
+      orderBy: { chicagoDate: "asc" },
+      select: { chicagoDate: true }
+    });
+    if (!isEligibleEngagementDeclarationDate(input.chicagoDate, earliestPoll ? [earliestPoll.chicagoDate] : [])) {
+      return;
+    }
+    const existing = await this.prisma.engagementDailyDraw.findUnique({
+      where: {
+        ownerCoadminUserId_chicagoDate: {
+          ownerCoadminUserId: integration.ownerCoadminUserId,
+          chicagoDate: input.chicagoDate
+        }
+      }
+    });
+    if (existing) {
+      await this.ensureDailyDrawClaimAndAnnounce(existing.id, integration, now);
+      return;
+    }
+    const candidates = await this.loadDailyDrawCandidates(integration, input.client, input.token, input.chicagoDate, declareAt);
+    const snapshot = snapshotDailyDrawCandidates(candidates);
+    const totalWeight = candidates.reduce((sum, row) => sum + row.totalWeight, 0);
+    if (candidates.length === 0 || totalWeight <= 0) {
+      try {
+        await this.prisma.engagementDailyDraw.create({
+          data: {
+            workspaceId: integration.workspaceId,
+            ownerCoadminUserId: integration.ownerCoadminUserId,
+            botIntegrationId: integration.id,
+            chicagoDate: input.chicagoDate,
+            status: "NO_ELIGIBLE",
+            candidateCount: 0,
+            totalWeight: 0,
+            snapshotJson: snapshot as unknown as Prisma.InputJsonValue,
+            channelId: integration.channelId,
+            drawnAt: now
+          }
+        });
+      } catch (error) {
+        if (!isUniqueViolation(error)) throw error;
+      }
+      return;
+    }
+    const picked = selectWeightedDailyDrawCandidate(candidates, this.rng);
+    const winner = picked.selected;
+    const grants = this.freeplay ?? new FreeplayService({ prisma: this.prisma });
+    let drawId: string | null = null;
+    try {
+      drawId = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.engagementDailyDraw.create({
+          data: {
+            workspaceId: integration.workspaceId,
+            ownerCoadminUserId: integration.ownerCoadminUserId,
+            botIntegrationId: integration.id,
+            chicagoDate: input.chicagoDate,
+            status: "DRAWN",
+            winnerCrmContactId: winner.crmContactId,
+            winnerTelegramUserId: winner.telegramUserId,
+            winnerBaseWeight: winner.baseWeight,
+            winnerReferralWeight: winner.referralWeight,
+            winnerTotalWeight: winner.totalWeight,
+            winnerActiveReferralCount: winner.activeReferralCount,
+            candidateCount: candidates.length,
+            totalWeight: picked.totalWeight,
+            randomPick: picked.pick,
+            snapshotJson: snapshot as unknown as Prisma.InputJsonValue,
+            channelId: integration.channelId,
+            drawnAt: now
+          }
+        });
+        const granted = await grants.grantEngagementClaim({
+          workspaceId: integration.workspaceId,
+          ownerCoadminUserId: integration.ownerCoadminUserId,
+          crmContactId: winner.crmContactId,
+          amountCents: DAILY_DRAW_PRIZE_CENTS,
+          idempotencyKey: dailyDrawFreeplayIdempotencyKey(integration.ownerCoadminUserId, input.chicagoDate),
+          source: "ENGAGEMENT_DAILY_DRAW",
+          tx
+        });
+        await tx.engagementDailyDraw.update({
+          where: { id: created.id },
+          data: { freeplayClaimId: granted.claimId }
+        });
+        return created.id;
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const raced = await this.prisma.engagementDailyDraw.findUnique({
+        where: {
+          ownerCoadminUserId_chicagoDate: {
+            ownerCoadminUserId: integration.ownerCoadminUserId,
+            chicagoDate: input.chicagoDate
+          }
+        }
+      });
+      drawId = raced?.id ?? null;
+    }
+    if (!drawId) return;
+    await this.ensureDailyDrawClaimAndAnnounce(drawId, integration, now);
+  }
+
+  public async completeDailyDrawAnnounce(
+    drawId: string,
     client: LeaderboardTelegramClient,
     token: string
   ): Promise<void> {
-    const result = await this.prisma.engagementDailyResult.findUnique({
-      where: { id: dailyResultId },
-      include: { firstContact: true, secondContact: true, thirdContact: true }
+    const draw = await this.prisma.engagementDailyDraw.findUnique({
+      where: { id: drawId },
+      include: { winnerContact: true }
     });
-    if (!result || result.telegramMessageId || !result.channelId) {
-      if (result?.telegramMessageId) {
-        await this.prisma.engagementDailyResult.updateMany({
-          where: { id: dailyResultId, status: "SNAPSHOTTED" },
-          data: { status: "ANNOUNCED", announcedAt: result.announcedAt ?? new Date() }
+    if (!draw || draw.telegramMessageId || !draw.channelId || !draw.winnerCrmContactId) {
+      if (draw?.telegramMessageId && draw.status === "DRAWN") {
+        await this.prisma.engagementDailyDraw.updateMany({
+          where: { id: drawId, status: "DRAWN" },
+          data: { status: "ANNOUNCED", announcedAt: draw.announcedAt ?? new Date() }
         });
       }
       return;
     }
-    const sent = await client.sendMessage(
-      token,
-      result.channelId,
-      formatDailyWinnersMessage({
-        firstName: result.firstContact?.displayName ?? null,
-        secondName: result.secondContact?.displayName ?? null,
-        thirdName: result.thirdContact?.displayName ?? null
-      })
-    );
-    await this.prisma.engagementDailyResult.update({
-      where: { id: dailyResultId },
+    if (!draw.freeplayClaimId) {
+      const grants = this.freeplay ?? new FreeplayService({ prisma: this.prisma });
+      const granted = await grants.grantEngagementClaim({
+        workspaceId: draw.workspaceId,
+        ownerCoadminUserId: draw.ownerCoadminUserId,
+        crmContactId: draw.winnerCrmContactId,
+        amountCents: DAILY_DRAW_PRIZE_CENTS,
+        idempotencyKey: dailyDrawFreeplayIdempotencyKey(draw.ownerCoadminUserId, draw.chicagoDate),
+        source: "ENGAGEMENT_DAILY_DRAW"
+      });
+      await this.prisma.engagementDailyDraw.update({
+        where: { id: draw.id },
+        data: { freeplayClaimId: granted.claimId }
+      });
+    }
+    const displayName = draw.winnerContact?.displayName?.trim() || "Player";
+    const photo = await renderDailyDrawWinnerCard({
+      displayName,
+      activeReferralCount: draw.winnerActiveReferralCount ?? 0,
+      referralWeight: draw.winnerReferralWeight ?? 0
+    });
+    const sent = await client.sendPhoto(token, draw.channelId, photo, {
+      caption: formatDailyDrawCaption({
+        displayName,
+        referralWeight: draw.winnerReferralWeight ?? 0,
+        activeReferralCount: draw.winnerActiveReferralCount ?? 0
+      }),
+      filename: "daily-freeplay-winner.png"
+    });
+    await this.prisma.engagementDailyDraw.update({
+      where: { id: drawId },
       data: { telegramMessageId: String(sent.messageId) }
     });
-    await this.prisma.engagementDailyResult.updateMany({
-      where: { id: dailyResultId, status: "SNAPSHOTTED" },
+    await this.prisma.engagementDailyDraw.updateMany({
+      where: { id: drawId, status: "DRAWN" },
       data: { status: "ANNOUNCED", announcedAt: new Date() }
     });
   }
@@ -735,33 +868,10 @@ export class EngagementService {
     if (claimed.count !== 1 && poll.status !== "CLOSING" && poll.status !== "CLOSED") return;
     const votes = await tx.engagementVote.findMany({ where: { pollId } });
     const registeredCounts = countOptionVotes(votes.map((vote) => vote.optionIndex));
-    // Public winner uses native Telegram voter_count when present so unregistered
-    // channel votes count. Points still use only registered engagement_votes.
     const nativeCounts = poll.telegramPollId ? parseStoredOptionCounts(poll.optionCountsJson) : null;
     const counts = nativeCounts ?? registeredCounts;
     const totalVotes = counts.reduce((sum, n) => sum + n, 0);
     const winner = totalVotes > 0 ? winningOptionIndex(counts) : null;
-    if (winner != null) {
-      for (const vote of votes) {
-        const key = pollParticipationIdempotencyKey(poll.id, vote.crmContactId);
-        try {
-          await tx.engagementPointLedger.create({
-            data: {
-              workspaceId: poll.workspaceId,
-              ownerCoadminUserId: poll.ownerCoadminUserId,
-              crmContactId: vote.crmContactId,
-              chicagoDate: poll.chicagoDate,
-              kind: "POLL_PARTICIPATION",
-              points: pollPointsForVote(vote.optionIndex, winner),
-              pollId: poll.id,
-              idempotencyKey: key
-            }
-          });
-        } catch (error) {
-          if (!isUniqueViolation(error)) throw error;
-        }
-      }
-    }
     await tx.engagementPoll.update({
       where: { id: pollId },
       data: {
@@ -774,7 +884,7 @@ export class EngagementService {
     });
   }
 
-  private async declareDue(
+  private async enqueueDueDailyDraw(
     integration: {
       id: string;
       workspaceId: string;
@@ -783,6 +893,7 @@ export class EngagementService {
     },
     now: Date
   ): Promise<void> {
+    if (!this.outbox) return;
     const chicagoDate = latestDeclarationChicagoDate(now);
     const declareAt = declarationInstantForChicagoDate(chicagoDate);
     if (now.getTime() < declareAt.getTime()) return;
@@ -794,7 +905,7 @@ export class EngagementService {
     if (!isEligibleEngagementDeclarationDate(chicagoDate, earliestPoll ? [earliestPoll.chicagoDate] : [])) {
       return;
     }
-    const existing = await this.prisma.engagementDailyResult.findUnique({
+    const existing = await this.prisma.engagementDailyDraw.findUnique({
       where: {
         ownerCoadminUserId_chicagoDate: {
           ownerCoadminUserId: integration.ownerCoadminUserId,
@@ -803,57 +914,95 @@ export class EngagementService {
       }
     });
     if (existing) {
-      if (this.outbox) {
+      if (existing.winnerCrmContactId && !existing.telegramMessageId) {
         await this.outbox.enqueueEngagementJob({
           workspaceId: integration.workspaceId,
           ownerCoadminUserId: integration.ownerCoadminUserId,
-          jobType: "ANNOUNCE_ENGAGEMENT_WINNERS",
-          idempotencyKey: announceOutboxKey(integration.ownerCoadminUserId, chicagoDate),
-          payloadJson: { dailyResultId: existing.id }
+          jobType: "ANNOUNCE_ENGAGEMENT_DAILY_DRAW",
+          idempotencyKey: dailyDrawAnnounceOutboxKey(integration.ownerCoadminUserId, chicagoDate),
+          payloadJson: { drawId: existing.id, chicagoDate }
         });
       }
       return;
     }
-    let resultId: string | null = null;
-    try {
-      resultId = await this.prisma.$transaction((tx) =>
-        this.declareTx(tx, integration, chicagoDate, declareAt, now)
-      );
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      const raced = await this.prisma.engagementDailyResult.findUnique({
-        where: {
-          ownerCoadminUserId_chicagoDate: {
-            ownerCoadminUserId: integration.ownerCoadminUserId,
-            chicagoDate
-          }
-        }
-      });
-      resultId = raced?.id ?? null;
-    }
-    if (!resultId || !this.outbox) return;
     await this.outbox.enqueueEngagementJob({
       workspaceId: integration.workspaceId,
       ownerCoadminUserId: integration.ownerCoadminUserId,
-      jobType: "ANNOUNCE_ENGAGEMENT_WINNERS",
-      idempotencyKey: announceOutboxKey(integration.ownerCoadminUserId, chicagoDate),
-      payloadJson: { dailyResultId: resultId }
+      jobType: "RUN_ENGAGEMENT_DAILY_DRAW",
+      idempotencyKey: dailyDrawOutboxKey(integration.ownerCoadminUserId, chicagoDate),
+      payloadJson: { chicagoDate }
     });
   }
 
-  private async declareTx(
-    tx: Prisma.TransactionClient,
+  private async ensureDailyDrawClaimAndAnnounce(
+    drawId: string,
+    integration: { workspaceId: string; ownerCoadminUserId: string },
+    now: Date
+  ): Promise<void> {
+    const draw = await this.prisma.engagementDailyDraw.findUnique({ where: { id: drawId } });
+    if (!draw) return;
+    if (draw.winnerCrmContactId && !draw.freeplayClaimId) {
+      const grants = this.freeplay ?? new FreeplayService({ prisma: this.prisma });
+      const granted = await grants.grantEngagementClaim({
+        workspaceId: draw.workspaceId,
+        ownerCoadminUserId: draw.ownerCoadminUserId,
+        crmContactId: draw.winnerCrmContactId,
+        amountCents: DAILY_DRAW_PRIZE_CENTS,
+        idempotencyKey: dailyDrawFreeplayIdempotencyKey(draw.ownerCoadminUserId, draw.chicagoDate),
+        source: "ENGAGEMENT_DAILY_DRAW"
+      });
+      await this.prisma.engagementDailyDraw.update({
+        where: { id: draw.id },
+        data: { freeplayClaimId: granted.claimId }
+      });
+    }
+    if (!this.outbox || !draw.winnerCrmContactId || draw.telegramMessageId) return;
+    await this.outbox.enqueueEngagementJob({
+      workspaceId: integration.workspaceId,
+      ownerCoadminUserId: integration.ownerCoadminUserId,
+      jobType: "ANNOUNCE_ENGAGEMENT_DAILY_DRAW",
+      idempotencyKey: dailyDrawAnnounceOutboxKey(integration.ownerCoadminUserId, draw.chicagoDate),
+      payloadJson: { drawId: draw.id, chicagoDate: draw.chicagoDate, at: now.toISOString() }
+    });
+  }
+
+  private async loadDailyDrawCandidates(
     integration: {
       id: string;
       workspaceId: string;
       ownerCoadminUserId: string;
       channelId: string | null;
     },
+    client: LeaderboardTelegramClient,
+    token: string,
     chicagoDate: string,
-    declareAt: Date,
-    now: Date
-  ): Promise<string> {
-    const awards = await tx.referralMilestoneAward.findMany({
+    declareAt: Date
+  ): Promise<DailyDrawCandidate[]> {
+    if (!integration.channelId) return [];
+    const links = await this.prisma.leaderboardBotPlayerLink.findMany({
+      where: {
+        botIntegrationId: integration.id,
+        ownerCoadminUserId: integration.ownerCoadminUserId
+      },
+      include: { crmContact: true }
+    });
+    const cooldownStart = addChicagoDays(chicagoDate, -DRAW_WINNER_COOLDOWN_DRAWS);
+    const recentWins = await this.prisma.engagementDailyDraw.findMany({
+      where: {
+        ownerCoadminUserId: integration.ownerCoadminUserId,
+        winnerCrmContactId: { not: null },
+        chicagoDate: { gte: cooldownStart, lt: chicagoDate }
+      },
+      select: { winnerCrmContactId: true, chicagoDate: true }
+    });
+    const winsByContact = new Map<string, string[]>();
+    for (const row of recentWins) {
+      if (!row.winnerCrmContactId) continue;
+      const list = winsByContact.get(row.winnerCrmContactId) ?? [];
+      list.push(row.chicagoDate);
+      winsByContact.set(row.winnerCrmContactId, list);
+    }
+    const awards = await this.prisma.referralMilestoneAward.findMany({
       where: {
         milestoneCode: "FIRST_10",
         status: "ACTIVE",
@@ -862,104 +1011,40 @@ export class EngagementService {
       },
       include: { referral: true }
     });
+    const referralWeightByContact = new Map<string, { weight: number; activeCount: number }>();
     for (const award of awards) {
-      const points = referralContributionAtDeclaration(award.awardedAt, declareAt);
-      if (points <= 0) continue;
+      const weight = drawReferralWeightAtDeclaration(award.awardedAt, declareAt);
+      const crmContactId = award.referral.referrerCrmContactId;
+      const current = referralWeightByContact.get(crmContactId) ?? { weight: 0, activeCount: 0 };
+      referralWeightByContact.set(crmContactId, {
+        weight: current.weight + weight,
+        activeCount: current.activeCount + (weight > 0 ? 1 : 0)
+      });
+    }
+    const candidates: DailyDrawCandidate[] = [];
+    for (const link of links) {
+      if (isInDailyDrawWinnerCooldown(winsByContact.get(link.crmContactId) ?? [], chicagoDate)) {
+        continue;
+      }
+      let member;
       try {
-        await tx.engagementPointLedger.create({
-          data: {
-            workspaceId: integration.workspaceId,
-            ownerCoadminUserId: integration.ownerCoadminUserId,
-            crmContactId: award.referral.referrerCrmContactId,
-            chicagoDate,
-            kind: "REFERRAL_CONTRIBUTION",
-            points,
-            referralId: award.referralId,
-            idempotencyKey: referralContributionIdempotencyKey(
-              integration.ownerCoadminUserId,
-              chicagoDate,
-              award.referralId
-            )
-          }
-        });
-      } catch (error) {
-        if (!isUniqueViolation(error)) throw error;
+        member = await client.getChatMember(token, integration.channelId, link.telegramUserId);
+      } catch {
+        continue;
       }
-    }
-    const rows = await tx.engagementPointLedger.findMany({
-      where: { ownerCoadminUserId: integration.ownerCoadminUserId, chicagoDate }
-    });
-    const totals = new Map<string, EngagementScoreTotal>();
-    for (const row of rows) {
-      const current = totals.get(row.crmContactId) ?? {
-        crmContactId: row.crmContactId,
-        totalPoints: 0,
-        pollPoints: 0,
-        referralPoints: 0,
-        pointsReachedAt: row.createdAt
-      };
-      totals.set(row.crmContactId, {
-        ...current,
-        totalPoints: current.totalPoints + row.points,
-        pollPoints: current.pollPoints + (row.kind === "POLL_PARTICIPATION" ? row.points : 0),
-        referralPoints: current.referralPoints + (row.kind === "POLL_PARTICIPATION" ? 0 : row.points),
-        pointsReachedAt:
-          row.createdAt.getTime() >= current.pointsReachedAt.getTime()
-            ? row.createdAt
-            : current.pointsReachedAt
+      if (!isDailyDrawEligibleChatMember(member)) continue;
+      const referral = referralWeightByContact.get(link.crmContactId) ?? { weight: 0, activeCount: 0 };
+      candidates.push({
+        crmContactId: link.crmContactId,
+        telegramUserId: link.telegramUserId,
+        displayName: link.crmContact.displayName,
+        baseWeight: DRAW_BASE_WEIGHT,
+        referralWeight: referral.weight,
+        totalWeight: candidateDrawWeight(referral.weight),
+        activeReferralCount: referral.activeCount
       });
     }
-    const ranked = rankEngagementPlayers([...totals.values()]);
-    const top = ranked.slice(0, 3);
-    const created = await tx.engagementDailyResult.create({
-      data: {
-        workspaceId: integration.workspaceId,
-        ownerCoadminUserId: integration.ownerCoadminUserId,
-        botIntegrationId: integration.id,
-        chicagoDate,
-        declaredAt: now,
-        status: "SNAPSHOTTED",
-        firstCrmContactId: top[0]?.crmContactId ?? null,
-        secondCrmContactId: top[1]?.crmContactId ?? null,
-        thirdCrmContactId: top[2]?.crmContactId ?? null,
-        channelId: integration.channelId,
-        snapshotJson: ranked.map((row, index) => ({
-          rank: index + 1,
-          crmContactId: row.crmContactId,
-          totalPoints: row.totalPoints,
-          pollPoints: row.pollPoints,
-          referralPoints: row.referralPoints,
-          pointsReachedAt: row.pointsReachedAt.toISOString()
-        }))
-      }
-    });
-    const grants = this.freeplay ?? new FreeplayService({ prisma: this.prisma });
-    const winners = [created.firstCrmContactId, created.secondCrmContactId, created.thirdCrmContactId];
-    for (const [index, crmContactId] of winners.entries()) {
-      if (!crmContactId) continue;
-      const prizeRank = index + 1;
-      const amountCents = DAILY_PRIZES_CENTS[index]!;
-      const granted = await grants.grantEngagementClaim({
-        workspaceId: integration.workspaceId,
-        ownerCoadminUserId: integration.ownerCoadminUserId,
-        crmContactId,
-        amountCents,
-        idempotencyKey: freeplayGrantIdempotencyKey(integration.ownerCoadminUserId, chicagoDate, prizeRank),
-        tx
-      });
-      await tx.engagementDailyPrize.create({
-        data: {
-          dailyResultId: created.id,
-          workspaceId: integration.workspaceId,
-          ownerCoadminUserId: integration.ownerCoadminUserId,
-          prizeRank,
-          crmContactId,
-          amountCents,
-          freeplayClaimId: granted.claimId
-        }
-      });
-    }
-    return created.id;
+    return candidates;
   }
 }
 
@@ -987,16 +1072,21 @@ export function dailyResultIdFromOutboxPayload(payload: unknown): string | null 
   return typeof id === "string" ? id : null;
 }
 
+export function chicagoDateFromOutboxPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const chicagoDate = (payload as { chicagoDate?: unknown }).chicagoDate;
+  return typeof chicagoDate === "string" ? chicagoDate : null;
+}
+
+export function drawIdFromOutboxPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const id = (payload as { drawId?: unknown }).drawId;
+  return typeof id === "string" ? id : null;
+}
+
 function isPollAlreadyClosedError(error: unknown): boolean {
   return (
     error instanceof LeaderboardTelegramApiError &&
     /already been closed|POLL_CLOSED|poll_closed/i.test(error.description)
-  );
-}
-
-function isChannelNonAnonymousPollError(error: unknown): boolean {
-  return (
-    error instanceof LeaderboardTelegramApiError &&
-    /non-anonymous polls can't be sent to channel/i.test(error.description)
   );
 }

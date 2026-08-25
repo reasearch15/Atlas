@@ -102,6 +102,16 @@ export function latestDeclarationChicagoDate(now: Date): string {
   return zoned.minus({ days: 1 }).toFormat("yyyy-MM-dd");
 }
 
+export function chicagoDateDiffDays(from: string, to: string): number {
+  const start = DateTime.fromISO(from, { zone: ENGAGEMENT_TIMEZONE }).startOf("day");
+  const end = DateTime.fromISO(to, { zone: ENGAGEMENT_TIMEZONE }).startOf("day");
+  return Math.round(end.diff(start, "days").days);
+}
+
+export function addChicagoDays(chicagoDate: string, days: number): string {
+  return DateTime.fromISO(chicagoDate, { zone: ENGAGEMENT_TIMEZONE }).plus({ days }).toFormat("yyyy-MM-dd");
+}
+
 export function declarationInstantForChicagoDate(chicagoDate: string): Date {
   return declarationInstantOn(chicagoDate);
 }

@@ -328,7 +328,7 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
       chat_id: chatId,
       question: options.question,
       options: options.options.map((text) => ({ text })),
-      is_anonymous: options.isAnonymous ?? false,
+      is_anonymous: options.isAnonymous ?? true,
       type: options.type ?? "regular",
       allows_multiple_answers: options.allowsMultipleAnswers ?? false,
       allows_revoting: options.allowsRevoting ?? false
@@ -770,6 +770,7 @@ export interface FakeLeaderboardTelegramState {
   /** token → bot user */
   bots: Map<string, TelegramUser>;
   chats: Map<number, FakeTelegramChatState>;
+  botUserIds?: Set<number>;
   /** Forced failures keyed by `${token}:${method}` */
   failures?: Map<string, LeaderboardTelegramApiError>;
   webhooks?: Map<string, { url: string; secretToken?: string; allowedUpdates?: readonly string[] }>;
@@ -841,7 +842,7 @@ export function createFakeLeaderboardTelegramClient(
       }
       return {
         status,
-        user: { id: uid, isBot: false, firstName: `User${uid}` }
+        user: { id: uid, isBot: Boolean(state.botUserIds?.has(uid)), firstName: `User${uid}` }
       };
     },
     async getChatAdministrators(token, chatId) {
@@ -917,7 +918,7 @@ export function createFakeLeaderboardTelegramClient(
         options: options.options.map((text) => ({ text, voterCount: 0 })),
         totalVoterCount: 0,
         isClosed: false,
-        isAnonymous: options.isAnonymous ?? false,
+        isAnonymous: options.isAnonymous ?? true,
         type: options.type ?? "regular",
         allowsMultipleAnswers: options.allowsMultipleAnswers ?? false,
         allowsRevoting: options.allowsRevoting ?? false,
