@@ -27,8 +27,10 @@ import {
 import { shuffleIds, validateQuestionBank, type EngagementQuestionInput } from "./question-bank";
 import {
   parseVoteCallbackData,
+  formatOpenPollMessage,
   formatClosedPollMessage,
   formatDailyWinnersMessage,
+  buildPollInlineKeyboard,
   EMPTY_INLINE_KEYBOARD
 } from "./engagement.messages";
 import {
@@ -177,26 +179,42 @@ export class EngagementService {
       return;
     }
     if (!poll.channelId || !poll.questionText || !poll.option1) return;
-    if (!client.sendPoll) {
-      throw new Error("Telegram client does not support sendPoll");
+    if (client.sendPoll) {
+      try {
+        const sent = await client.sendPoll(token, poll.channelId, {
+          question: poll.questionText,
+          options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
+          isAnonymous: false,
+          type: "regular",
+          allowsMultipleAnswers: false,
+          allowsRevoting: false
+        });
+        const telegramPollId = sent.poll?.id;
+        if (!telegramPollId) {
+          throw new Error("Telegram sendPoll did not return a native poll id");
+        }
+        await this.prisma.engagementPoll.updateMany({
+          where: { id: pollId, telegramMessageId: null },
+          data: {
+            telegramMessageId: String(sent.messageId),
+            telegramPollId,
+            status: "OPEN",
+            postedAt: new Date()
+          }
+        });
+        return;
+      } catch (error) {
+        if (!isChannelNonAnonymousPollError(error)) throw error;
+        // Telegram forbids identifiable native polls in channels. Keep callback posting.
+      }
     }
-    const sent = await client.sendPoll(token, poll.channelId, {
-      question: poll.questionText,
-      options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
-      isAnonymous: false,
-      type: "regular",
-      allowsMultipleAnswers: false,
-      allowsRevoting: false
+    const sent = await client.sendMessage(token, poll.channelId, formatOpenPollMessage(poll.questionText), {
+      replyMarkup: buildPollInlineKeyboard(poll.id, [poll.option1, poll.option2!, poll.option3!, poll.option4!])
     });
-    const telegramPollId = sent.poll?.id;
-    if (!telegramPollId) {
-      throw new Error("Telegram sendPoll did not return a native poll id");
-    }
     await this.prisma.engagementPoll.updateMany({
       where: { id: pollId, telegramMessageId: null },
       data: {
         telegramMessageId: String(sent.messageId),
-        telegramPollId,
         status: "OPEN",
         postedAt: new Date()
       }
@@ -973,5 +991,12 @@ function isPollAlreadyClosedError(error: unknown): boolean {
   return (
     error instanceof LeaderboardTelegramApiError &&
     /already been closed|POLL_CLOSED|poll_closed/i.test(error.description)
+  );
+}
+
+function isChannelNonAnonymousPollError(error: unknown): boolean {
+  return (
+    error instanceof LeaderboardTelegramApiError &&
+    /non-anonymous polls can't be sent to channel/i.test(error.description)
   );
 }

@@ -485,16 +485,33 @@ export class MemoryEngagementRuntime {
       if (this.client && integration.channelId && poll.questionText && poll.option1) {
         if (!poll.telegramMessageId) {
           if (this.client.sendPoll) {
-            const sent = await this.client.sendPoll(integration.botToken, integration.channelId, {
-              question: poll.questionText,
-              options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
-              isAnonymous: false,
-              type: "regular",
-              allowsMultipleAnswers: false,
-              allowsRevoting: false
-            });
-            poll.telegramMessageId = String(sent.messageId);
-            poll.telegramPollId = sent.poll?.id ?? null;
+            try {
+              const sent = await this.client.sendPoll(integration.botToken, integration.channelId, {
+                question: poll.questionText,
+                options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
+                isAnonymous: false,
+                type: "regular",
+                allowsMultipleAnswers: false,
+                allowsRevoting: false
+              });
+              poll.telegramMessageId = String(sent.messageId);
+              poll.telegramPollId = sent.poll?.id ?? null;
+            } catch {
+              const sent = await this.client.sendMessage(
+                integration.botToken,
+                integration.channelId,
+                formatOpenPollMessage(poll.questionText),
+                {
+                  replyMarkup: buildPollInlineKeyboard(poll.id, [
+                    poll.option1,
+                    poll.option2!,
+                    poll.option3!,
+                    poll.option4!
+                  ])
+                }
+              );
+              poll.telegramMessageId = String(sent.messageId);
+            }
           } else {
             const sent = await this.client.sendMessage(
               integration.botToken,

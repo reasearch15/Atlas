@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { chicagoWallTimeToUtc } from "../leaderboard/competition-schedule";
-import { createFakeLeaderboardTelegramClient, type FakeLeaderboardTelegramState } from "../leaderboard/telegram/leaderboard-telegram.client";
+import { createFakeLeaderboardTelegramClient, LeaderboardTelegramApiError, type FakeLeaderboardTelegramState } from "../leaderboard/telegram/leaderboard-telegram.client";
 import { MemoryEngagementRuntime } from "./engagement.memory";
 import { buildVoteCallbackData } from "./engagement.messages";
 import type { EngagementQuestionInput } from "./question-bank";
@@ -737,6 +737,28 @@ describe("native poll answers and scoring", () => {
     expect(closed?.text).toContain("POLL RESULTS");
     expect(closed?.replyMarkup?.inline_keyboard).toEqual([]);
     expect(legacyRuntime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")[0]?.points).toBe(10);
+  });
+
+  it("falls back to callback buttons when Telegram rejects non-anonymous channel polls", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    state.failures = new Map([
+      [
+        "token:sendPoll",
+        new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: non-anonymous polls can't be sent to channel chats",
+          permanent: true
+        })
+      ]
+    ]);
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    const message = state.chats.get(Number(channelId))?.messages[0];
+    expect(poll.telegramPollId).toBeNull();
+    expect(message?.poll).toBeUndefined();
+    expect(message?.replyMarkup?.inline_keyboard).toHaveLength(4);
+    expect(message?.text).toContain("WHICH WOULD YOU CHOOSE");
   });
 });
 
