@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 210 20% 98%;
+  --foreground: 222 22% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 22% 12%;
+  --primary: 174 70% 30%;
+  --primary-foreground: 0 0% 100%;
+  --muted: 215 18% 91%;
+  --muted-foreground: 218 12% 38%;
+  --accent: 44 92% 55%;
+  --accent-foreground: 222 22% 12%;
+  --destructive: 0 72% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 214 18% 82%;
+  --input: 214 18% 82%;
+  --ring: 174 70% 30%;
+  /* Synced from Visual Viewport while messaging shells are mounted. */
+  --app-vv-height: 100dvh;
+  --app-vv-offset-top: 0px;
+  --app-vv-offset-left: 0px;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+html,
+body {
+  height: 100%;
+  width: 100%;
+  /*
+   * Set both axes explicitly. `overflow-x: hidden` alone computes overflow-y to
+   * `auto`, which makes the document a mobile scroll root and lets the chat page
+   * drag (header/composer leave the screen).
+   */
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+body {
+  min-height: 100dvh;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/*
+ * Applied by StaffShell / WorkspaceShell while the messaging app is mounted.
+ * Document is fixed so it cannot scroll; the shell frame tracks visualViewport
+ * (soft keyboard open/close) via --app-vv-* variables.
+ */
+html.app-viewport-lock,
+html.app-viewport-lock body {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  min-height: 0;
+  max-height: none;
+}
+
+html.app-viewport-lock body {
+  /* Avoid 100dvh min-height fighting the visual viewport frame. */
+  min-height: 0;
+  height: 100%;
+}
+
+.app-viewport-frame {
+  position: fixed;
+  top: var(--app-vv-offset-top, 0px);
+  left: var(--app-vv-offset-left, 0px);
+  width: 100%;
+  height: var(--app-vv-height, 100dvh);
+  max-height: var(--app-vv-height, 100dvh);
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* PWA / mobile shell helpers */
+.safe-pb {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.safe-pt {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* Inbox unread urgency — high visibility, live color bands, reduced-motion safe. */
+.inbox-row-urgency {
+  transition:
+    background-color 0.55s ease,
+    box-shadow 0.55s ease;
+}
+
+.inbox-row-urgency-fresh {
+  background-color: #d1fae5; /* emerald-100 */
+}
+
+.inbox-row-urgency-waiting {
+  background-color: #fde68a; /* amber-200 soft */
+}
+
+.inbox-row-urgency-urgent {
+  background-color: #fecaca; /* red-200 */
+}
+
+@keyframes inbox-arrival-pulse {
+  0%,
+  100% {
+    box-shadow:
+      inset 5px 0 0 #10b981,
+      0 0 0 0 rgb(16 185 129 / 0%);
+  }
+  50% {
+    box-shadow:
+      inset 5px 0 0 #059669,
+      0 0 0 3px rgb(16 185 129 / 40%);
+  }
+}
+
+@keyframes inbox-urgent-pulse {
+  0%,
+  88%,
+  100% {
+    filter: brightness(1);
+  }
+  94% {
+    filter: brightness(0.96);
+  }
+}
+
+.inbox-row-arrival-pulse {
+  animation: inbox-arrival-pulse 0.9s ease-in-out 5;
+  z-index: 1;
+}
+
+.inbox-row-urgent-pulse {
+  animation: inbox-urgent-pulse 45s ease-in-out infinite;
+}
+
+.atlas-push-highlight {
+  outline: 2px solid rgb(15 118 110 / 70%);
+  outline-offset: 2px;
+  border-radius: 1rem;
+  transition: outline-color 0.4s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inbox-row-urgency {
+    transition: none;
+  }
+
+  .inbox-row-arrival-pulse,
+  .inbox-row-urgent-pulse {
+    animation: none;
+  }
+}

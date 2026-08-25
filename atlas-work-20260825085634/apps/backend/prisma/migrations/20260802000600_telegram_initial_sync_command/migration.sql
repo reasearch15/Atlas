@@ -1,0 +1,1 @@
+ALTER TYPE "TelegramOutboundOperation" ADD VALUE IF NOT EXISTS 'INITIAL_SYNC';

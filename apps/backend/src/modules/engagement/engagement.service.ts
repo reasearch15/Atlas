@@ -5,7 +5,8 @@ import { DAILY_PRIZES_CENTS } from "./engagement.constants";
 import {
   listSlotsInRange,
   latestDeclarationChicagoDate,
-  declarationInstantForChicagoDate
+  declarationInstantForChicagoDate,
+  isEligibleEngagementDeclarationDate
 } from "./engagement.schedule";
 import {
   announceOutboxKey,
@@ -17,7 +18,7 @@ import {
   rankEngagementPlayers,
   referralContributionAtDeclaration,
   referralContributionIdempotencyKey,
-  votePercentages,
+  countOptionVotes,
   winningOptionIndex,
   type EngagementScoreTotal
 } from "./engagement.scoring";
@@ -149,9 +150,11 @@ export class EngagementService {
   ): Promise<void> {
     const poll = await this.prisma.engagementPoll.findUnique({ where: { id: pollId } });
     if (!poll?.telegramMessageId || !poll.channelId || !poll.questionText || poll.closeEditedAt) return;
-    const counts = Array.isArray(poll.optionCountsJson)
-      ? (poll.optionCountsJson as number[])
-      : [0, 0, 0, 0];
+    const votes = await this.prisma.engagementVote.findMany({
+      where: { pollId },
+      select: { optionIndex: true }
+    });
+    const counts = countOptionVotes(votes.map((vote) => vote.optionIndex));
     const options = [poll.option1!, poll.option2!, poll.option3!, poll.option4!] as [
       string,
       string,
@@ -165,9 +168,7 @@ export class EngagementService {
       formatClosedPollMessage({
         question: poll.questionText,
         options,
-        counts,
-        percentages: votePercentages(counts),
-        winningOptionIndex: poll.winningOptionIndex ?? 0
+        counts
       }),
       undefined,
       EMPTY_INLINE_KEYBOARD
@@ -518,29 +519,28 @@ export class EngagementService {
     if (poll.status === "SETTLED") return;
     if (claimed.count !== 1 && poll.status !== "CLOSING" && poll.status !== "CLOSED") return;
     const votes = await tx.engagementVote.findMany({ where: { pollId } });
-    const counts = [0, 0, 0, 0];
-    for (const vote of votes) {
-      const index = vote.optionIndex;
-      if (index >= 0 && index < counts.length) counts[index] = (counts[index] ?? 0) + 1;
-    }
-    const winner = winningOptionIndex(counts);
-    for (const vote of votes) {
-      const key = pollParticipationIdempotencyKey(poll.id, vote.crmContactId);
-      try {
-        await tx.engagementPointLedger.create({
-          data: {
-            workspaceId: poll.workspaceId,
-            ownerCoadminUserId: poll.ownerCoadminUserId,
-            crmContactId: vote.crmContactId,
-            chicagoDate: poll.chicagoDate,
-            kind: "POLL_PARTICIPATION",
-            points: pollPointsForVote(vote.optionIndex, winner),
-            pollId: poll.id,
-            idempotencyKey: key
-          }
-        });
-      } catch (error) {
-        if (!isUniqueViolation(error)) throw error;
+    const counts = countOptionVotes(votes.map((vote) => vote.optionIndex));
+    const totalVotes = counts.reduce((sum, n) => sum + n, 0);
+    const winner = totalVotes > 0 ? winningOptionIndex(counts) : null;
+    if (winner != null) {
+      for (const vote of votes) {
+        const key = pollParticipationIdempotencyKey(poll.id, vote.crmContactId);
+        try {
+          await tx.engagementPointLedger.create({
+            data: {
+              workspaceId: poll.workspaceId,
+              ownerCoadminUserId: poll.ownerCoadminUserId,
+              crmContactId: vote.crmContactId,
+              chicagoDate: poll.chicagoDate,
+              kind: "POLL_PARTICIPATION",
+              points: pollPointsForVote(vote.optionIndex, winner),
+              pollId: poll.id,
+              idempotencyKey: key
+            }
+          });
+        } catch (error) {
+          if (!isUniqueViolation(error)) throw error;
+        }
       }
     }
     await tx.engagementPoll.update({
@@ -567,6 +567,14 @@ export class EngagementService {
     const chicagoDate = latestDeclarationChicagoDate(now);
     const declareAt = declarationInstantForChicagoDate(chicagoDate);
     if (now.getTime() < declareAt.getTime()) return;
+    const earliestPoll = await this.prisma.engagementPoll.findFirst({
+      where: { ownerCoadminUserId: integration.ownerCoadminUserId },
+      orderBy: { chicagoDate: "asc" },
+      select: { chicagoDate: true }
+    });
+    if (!isEligibleEngagementDeclarationDate(chicagoDate, earliestPoll ? [earliestPoll.chicagoDate] : [])) {
+      return;
+    }
     const existing = await this.prisma.engagementDailyResult.findUnique({
       where: {
         ownerCoadminUserId_chicagoDate: {

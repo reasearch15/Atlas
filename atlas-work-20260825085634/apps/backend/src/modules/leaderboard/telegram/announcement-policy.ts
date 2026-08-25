@@ -1,0 +1,235 @@
+/**
+ * Conservative public channel announcement policy.
+ * Announce threshold crossings, Top 3 reorders, and rank climbs inside Top 10 —
+ * never point-only ticks or downward moves.
+ *
+ * Initialization / zero-standing materialization is NOT an achievement:
+ * - empty previous snapshot (first board post / new competition baseline)
+ * - players still at 0 total points (seeded standings, bind-while-active)
+ */
+
+export type AnnouncementKind =
+  | "ENTER_TOP_10"
+  | "ENTER_TOP_3"
+  | "REACHED_NUMBER_1"
+  | "TOP_3_ORDER_CHANGED"
+  | "CLIMBED_IN_TOP_10";
+
+export interface AnnouncementStandingRow {
+  readonly crmContactId: string;
+  readonly rank: number;
+  readonly displayName: string;
+  readonly totalPoints?: number;
+}
+
+export interface AnnouncementEvent {
+  readonly kind: AnnouncementKind;
+  readonly crmContactId: string;
+  readonly displayName: string;
+  readonly fromRank: number | null;
+  readonly toRank: number;
+  /** Short reason fragment for formatRankAnnouncement. */
+  readonly reason: string;
+  readonly totalPoints?: number;
+  readonly pointsGained?: number | null;
+  readonly pointsBehindNext?: number | null;
+}
+
+const KIND_PRIORITY: Record<AnnouncementKind, number> = {
+  REACHED_NUMBER_1: 5,
+  ENTER_TOP_3: 4,
+  ENTER_TOP_10: 3,
+  TOP_3_ORDER_CHANGED: 2,
+  CLIMBED_IN_TOP_10: 1
+};
+
+/**
+ * Diff previous vs next Top 10 snapshots and return meaningful announcement events only.
+ *
+ * `prevTop10` empty means baseline materialization (enable seed, first refresh, new
+ * competition) — never emit unranked→#N / Top 10 / Top 3 / #1 achievements.
+ */
+export function detectRankAnnouncements(
+  prevTop10: readonly AnnouncementStandingRow[],
+  nextTop10: readonly AnnouncementStandingRow[]
+): AnnouncementEvent[] {
+  // First public snapshot / competition baseline: display ranks exist, achievements do not.
+  if (prevTop10.length === 0) {
+    return [];
+  }
+
+  const prevById = indexByContact(prevTop10);
+  const nextOrdered = [...nextTop10].sort((a, b) => a.rank - b.rank);
+  const events: AnnouncementEvent[] = [];
+
+  for (const row of nextOrdered) {
+    if (row.rank < 1 || row.rank > 10) continue;
+
+    // Zero-point display ranks (everyone tied at 0, or newly seeded standing) are not achievements.
+    if ((row.totalPoints ?? 0) <= 0) continue;
+
+    const prev = prevById.get(row.crmContactId);
+    const fromRank = prev?.rank ?? null;
+    const toRank = row.rank;
+    const totalPoints = row.totalPoints;
+    const pointsGained =
+      totalPoints != null && prev?.totalPoints != null ? totalPoints - prev.totalPoints : null;
+    const pointsBehindNext = gapToRankAbove(nextOrdered, toRank, totalPoints);
+    const extras = {
+      ...(totalPoints != null ? { totalPoints } : {}),
+      ...(pointsGained != null ? { pointsGained } : {}),
+      ...(pointsBehindNext != null ? { pointsBehindNext } : {})
+    };
+
+    if (toRank === 1 && fromRank !== 1) {
+      events.push({
+        kind: "REACHED_NUMBER_1",
+        crmContactId: row.crmContactId,
+        displayName: row.displayName,
+        fromRank,
+        toRank,
+        reason: "reaching #1",
+        ...extras,
+        pointsBehindNext: null
+      });
+      continue;
+    }
+
+    if (toRank <= 3 && (fromRank == null || fromRank > 3)) {
+      events.push({
+        kind: "ENTER_TOP_3",
+        crmContactId: row.crmContactId,
+        displayName: row.displayName,
+        fromRank,
+        toRank,
+        reason: "entering Top 3",
+        ...extras
+      });
+      continue;
+    }
+
+    if (toRank <= 10 && (fromRank == null || fromRank > 10)) {
+      events.push({
+        kind: "ENTER_TOP_10",
+        crmContactId: row.crmContactId,
+        displayName: row.displayName,
+        fromRank,
+        toRank,
+        reason: "entering Top 10",
+        ...extras
+      });
+      continue;
+    }
+
+    if (
+      toRank <= 3 &&
+      fromRank != null &&
+      fromRank <= 3 &&
+      fromRank !== toRank &&
+      top3OrderChanged(prevTop10, nextTop10)
+    ) {
+      events.push({
+        kind: "TOP_3_ORDER_CHANGED",
+        crmContactId: row.crmContactId,
+        displayName: row.displayName,
+        fromRank,
+        toRank,
+        reason: "a Top 3 reorder",
+        ...extras
+      });
+      continue;
+    }
+
+    if (toRank <= 10 && fromRank != null && fromRank <= 10 && fromRank > toRank) {
+      events.push({
+        kind: "CLIMBED_IN_TOP_10",
+        crmContactId: row.crmContactId,
+        displayName: row.displayName,
+        fromRank,
+        toRank,
+        reason: "climbing in the Top 10",
+        ...extras
+      });
+    }
+  }
+
+  return events.sort((a, b) => {
+    const byKind = KIND_PRIORITY[b.kind] - KIND_PRIORITY[a.kind];
+    if (byKind !== 0) return byKind;
+    return a.toRank - b.toRank;
+  });
+}
+
+function indexByContact(
+  rows: readonly AnnouncementStandingRow[]
+): Map<string, AnnouncementStandingRow> {
+  const map = new Map<string, AnnouncementStandingRow>();
+  for (const row of rows) {
+    map.set(row.crmContactId, row);
+  }
+  return map;
+}
+
+function top3OrderChanged(
+  prevTop10: readonly AnnouncementStandingRow[],
+  nextTop10: readonly AnnouncementStandingRow[]
+): boolean {
+  const prev = orderedTop3Ids(prevTop10);
+  const next = orderedTop3Ids(nextTop10);
+  if (prev.length !== next.length) return true;
+  return prev.some((id, i) => id !== next[i]);
+}
+
+function orderedTop3Ids(rows: readonly AnnouncementStandingRow[]): string[] {
+  return [...rows]
+    .filter((r) => r.rank >= 1 && r.rank <= 3)
+    .sort((a, b) => a.rank - b.rank)
+    .map((r) => r.crmContactId);
+}
+
+function gapToRankAbove(
+  ordered: readonly AnnouncementStandingRow[],
+  rank: number,
+  totalPoints: number | undefined
+): number | null {
+  if (rank <= 1 || totalPoints == null) return null;
+  const above = ordered.find((r) => r.rank === rank - 1);
+  if (above?.totalPoints == null) return null;
+  return Math.max(0, above.totalPoints - totalPoints);
+}
+
+/**
+ * Only diff against the prior snapshot for the SAME competition.
+ * A new competition (or missing prior competition id) is baseline materialization.
+ */
+export function previousTop10ForAnnouncements(
+  persistentMessageCompetitionId: string | null | undefined,
+  competitionId: string,
+  lastPublicTop10Json: unknown
+): AnnouncementStandingRow[] {
+  if (
+    persistentMessageCompetitionId != null &&
+    persistentMessageCompetitionId !== competitionId
+  ) {
+    return [];
+  }
+  return parsePostedTop10Snapshot(lastPublicTop10Json);
+}
+
+export function parsePostedTop10Snapshot(value: unknown): AnnouncementStandingRow[] {
+  if (!Array.isArray(value)) return [];
+  const rows: AnnouncementStandingRow[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.crmContactId !== "string" || typeof row.rank !== "number") continue;
+    const parsed: AnnouncementStandingRow = {
+      crmContactId: row.crmContactId,
+      rank: row.rank,
+      displayName: typeof row.displayName === "string" ? row.displayName : "Player",
+      ...(typeof row.totalPoints === "number" ? { totalPoints: row.totalPoints } : {})
+    };
+    rows.push(parsed);
+  }
+  return rows;
+}

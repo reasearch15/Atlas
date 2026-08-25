@@ -1,0 +1,30 @@
+[Unit]
+Description=Atlas backend (Fastify API + WebSocket)
+After=network-online.target
+Wants=network-online.target
+# Start after local Postgres/Redis/MinIO if those units exist on the host.
+# After=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas/current
+EnvironmentFile=/opt/atlas/shared/.env
+Environment=NODE_ENV=production
+# Verified production entry after build: apps/backend/dist/apps/backend/src/index.js
+ExecStart=/usr/bin/pnpm --filter @atlas/backend start
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+TimeoutStartSec=60
+# Logs to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atlas-backend
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

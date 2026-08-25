@@ -15,7 +15,11 @@ const contactC = "d3333333-dddd-4ddd-8ddd-ddddddddddd3";
 
 function pollChannelMessages(state: FakeLeaderboardTelegramState) {
   return (state.chats.get(Number(channelId))?.messages ?? []).filter(
-    (m) => !m.deleted && (m.text?.includes("WHICH WOULD YOU CHOOSE") || m.text?.includes("POLL CLOSED"))
+    (m) =>
+      !m.deleted &&
+      (m.text?.includes("WHICH WOULD YOU CHOOSE") ||
+        m.text?.includes("POLL RESULTS") ||
+        m.text?.includes("POLL CLOSED"))
   );
 }
 
@@ -138,13 +142,114 @@ describe("engagement voting and settlement", () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    const openMessageId = poll.telegramMessageId;
     runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
     const message = state.chats.get(Number(channelId))?.messages[0];
-    expect(message?.text).toContain("POLL CLOSED");
-    expect(message?.text).toContain("Winning choice:");
+    expect(String(message?.messageId)).toBe(openMessageId);
+    expect(message?.text).toContain("POLL RESULTS");
+    expect(message?.text).toContain("🏆 Winning choice:");
+    expect(message?.text).toMatch(/— 100%/);
     expect(message?.replyMarkup?.inline_keyboard).toEqual([]);
     expect(poll.closeEditedAt).not.toBeNull();
+  });
+});
+
+describe("engagement poll presentation", () => {
+  it("posts an open poll with a timed-vote hint and four buttons, without percentages", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    const message = state.chats.get(Number(channelId))?.messages.find(
+      (m) => String(m.messageId) === poll.telegramMessageId
+    );
+    expect(message?.text).toContain("WHICH WOULD YOU CHOOSE");
+    expect(message?.text).toContain(poll.questionText ?? "");
+    expect(message?.text).toContain("👇 Vote below — results in 4 hours");
+    expect(message?.text).not.toMatch(/\d+%/);
+    expect(message?.replyMarkup?.inline_keyboard).toHaveLength(4);
+    expect(message?.replyMarkup?.inline_keyboard?.map((row) => row[0]?.text)).toEqual([
+      poll.option1,
+      poll.option2,
+      poll.option3,
+      poll.option4
+    ]);
+  });
+
+  it("does not edit the public message after individual votes", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const before = state.chats.get(Number(channelId))?.messages[0]?.text;
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
+    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 1, now: new Date() });
+    const after = state.chats.get(Number(channelId))?.messages[0];
+    expect(after?.text).toBe(before);
+    expect(after?.text).not.toMatch(/\d+%/);
+    expect(after?.replyMarkup?.inline_keyboard).toHaveLength(4);
+    expect(pollChannelMessages(state)).toHaveLength(1);
+  });
+
+  it("edits the same message on close using percentages from stored votes", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    const openMessageId = poll.telegramMessageId;
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
+    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 0, now: new Date() });
+    runtime.vote({ pollId: poll.id, telegramUserId: "300", optionIndex: 1, now: new Date() });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    const message = state.chats.get(Number(channelId))?.messages.find(
+      (m) => String(m.messageId) === openMessageId
+    );
+    expect(runtime.votes).toHaveLength(3);
+    expect(poll.optionCounts).toEqual([2, 1, 0, 0]);
+    expect(message?.text).toContain("POLL RESULTS");
+    expect(message?.text).toContain(`${poll.option1} — 67%`);
+    expect(message?.text).toContain(`${poll.option2} — 33%`);
+    expect(message?.text).toContain(`${poll.option3} — 0%`);
+    expect(message?.text).toContain(`${poll.option4} — 0%`);
+    expect(message?.text).toContain(`🥇 ${poll.option1} — 67%`);
+    expect(message?.text).toContain(`🏆 Winning choice: ${poll.option1}`);
+    expect(message?.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(pollChannelMessages(state).filter((m) => String(m.messageId) === openMessageId)).toHaveLength(1);
+  });
+
+  it("handles a zero-vote close without awarding points", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    const message = state.chats.get(Number(channelId))?.messages[0];
+    expect(poll.status).toBe("SETTLED");
+    expect(poll.winningOptionIndex).toBeNull();
+    expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
+    expect(message?.text).toContain("POLL RESULTS");
+    expect(message?.text).toContain(poll.questionText ?? "");
+    expect(message?.text).toContain("No votes this round.");
+    expect(message?.text).not.toMatch(/\d+%/);
+    expect(message?.text).not.toContain("Winning choice");
+    expect(message?.replyMarkup?.inline_keyboard).toEqual([]);
+  });
+
+  it("does not re-edit a closed poll inconsistently on retry", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 2, now: new Date() });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    const closed = state.chats.get(Number(channelId))?.messages[0];
+    const closedText = closed?.text;
+    const closedMarkup = closed?.replyMarkup;
+    const firstCloseAt = poll.closeEditedAt;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:30"));
+    expect(poll.closeEditedAt).toEqual(firstCloseAt);
+    expect(state.chats.get(Number(channelId))?.messages[0]?.text).toBe(closedText);
+    expect(state.chats.get(Number(channelId))?.messages[0]?.replyMarkup).toEqual(closedMarkup);
+    poll.closeEditedAt = null;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:01:00"));
+    expect(state.chats.get(Number(channelId))?.messages[0]?.text).toBe(closedText);
+    expect(state.chats.get(Number(channelId))?.messages[0]?.replyMarkup?.inline_keyboard).toEqual([]);
   });
 });
 
@@ -155,10 +260,12 @@ describe("engagement daily declaration", () => {
     const poll = runtime.polls.find((p) => p.slotKey === "2026-08-25T22:00")!;
     runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
-    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-25")).toBeTruthy();
+    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-25")).toBeUndefined();
     expect(runtime.ledger.filter((row) => row.chicagoDate === "2026-08-25" && row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T02:00:00"));
     expect(runtime.ledger.filter((row) => row.chicagoDate === "2026-08-26" && row.kind === "POLL_PARTICIPATION")).toHaveLength(1);
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T23:00:00"));
+    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-26")).toBeTruthy();
   });
 
   it("sums poll points plus independently aged referrals and declares Top 3 once", async () => {
@@ -210,6 +317,152 @@ describe("engagement daily declaration", () => {
     const snapshot = (next?.snapshot as Array<{ crmContactId: string; pollPoints: number }> | undefined) ?? [];
     expect(snapshot.find((row) => row.crmContactId === contactA)?.pollPoints ?? 0).toBe(0);
     expect(runtime.ledger.filter((row) => row.chicagoDate === "2026-08-25")).not.toHaveLength(0);
+  });
+});
+
+describe("engagement activation boundary", () => {
+  it("does not synthesize a historical daily result from old referrals on a fresh deploy", async () => {
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    runtime.referrals.push(
+      {
+        id: "ref-old-floor",
+        ownerCoadminUserId: owner,
+        referrerCrmContactId: contactA,
+        status: "ACTIVE",
+        awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00")
+      },
+      {
+        id: "ref-old-other",
+        ownerCoadminUserId: owner,
+        referrerCrmContactId: contactB,
+        status: "ACTIVE",
+        awardedAt: chicagoWallTimeToUtc("2026-02-01T12:00:00")
+      }
+    );
+    expect(runtime.polls).toHaveLength(0);
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:45"));
+    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-24")).toBeUndefined();
+    expect(runtime.results).toHaveLength(0);
+    expect(runtime.claims.filter((c) => c.idempotencyKey.includes(":2026-08-24:"))).toHaveLength(0);
+    expect(runtime.ledger.filter((row) => row.chicagoDate === "2026-08-24")).toHaveLength(0);
+    expect(runtime.polls.some((p) => p.slotKey === "2026-08-25T10:00" && p.status === "OPEN")).toBe(true);
+    expect(runtime.polls.some((p) => p.slotKey === "2026-08-25T14:00")).toBe(true);
+    expect(runtime.polls.some((p) => p.slotKey === "2026-08-25T22:00")).toBe(true);
+  });
+
+  it("can create the first legitimate daily result after polling has started", async () => {
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    runtime.referrals.push({
+      id: "ref-old-floor",
+      ownerCoadminUserId: owner,
+      referrerCrmContactId: contactA,
+      status: "ACTIVE",
+      awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00")
+    });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
+    const result = runtime.results.find((r) => r.chicagoDate === "2026-08-25");
+    expect(result).toBeTruthy();
+    expect(runtime.results.find((r) => r.chicagoDate === "2026-08-24")).toBeUndefined();
+    const emily = (result?.snapshot as Array<{ crmContactId: string; referralPoints: number; pollPoints: number }>).find(
+      (row) => row.crmContactId === contactA
+    );
+    expect(emily?.pollPoints).toBe(10);
+    expect(emily?.referralPoints).toBe(20);
+    expect(result?.firstCrmContactId).toBe(contactA);
+  });
+
+  it("recovers a missed legitimate declaration after engagement has been running", async () => {
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T08:00:00"));
+    expect(runtime.results.some((r) => r.chicagoDate === "2026-08-25")).toBe(true);
+    expect(runtime.results.some((r) => r.chicagoDate === "2026-08-24")).toBe(false);
+  });
+
+  it("lets historical referrals contribute a 20-point floor without creating historical days", async () => {
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    runtime.referrals.push({
+      id: "ref-old-floor",
+      ownerCoadminUserId: owner,
+      referrerCrmContactId: contactB,
+      status: "ACTIVE",
+      awardedAt: chicagoWallTimeToUtc("2026-03-15T12:00:00")
+    });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    expect(runtime.results).toHaveLength(0);
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 0, now: new Date() });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
+    const result = runtime.results.find((r) => r.chicagoDate === "2026-08-25")!;
+    const john = (result.snapshot as Array<{ crmContactId: string; referralPoints: number; totalPoints: number }>).find(
+      (row) => row.crmContactId === contactB
+    );
+    expect(john?.referralPoints).toBe(20);
+    expect(john?.totalPoints).toBe(30);
+    expect(runtime.results.map((r) => r.chicagoDate)).toEqual(["2026-08-25"]);
+  });
+
+  it("does not disturb current or future scheduled polls while skipping historical catch-up", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    runtime.referrals.push({
+      id: "ref-old-floor",
+      ownerCoadminUserId: owner,
+      referrerCrmContactId: contactA,
+      status: "ACTIVE",
+      awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00")
+    });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const tenAm = runtime.polls.find((p) => p.slotKey === "2026-08-25T10:00")!;
+    const twoPm = runtime.polls.find((p) => p.slotKey === "2026-08-25T14:00")!;
+    const tenPm = runtime.polls.find((p) => p.slotKey === "2026-08-25T22:00")!;
+    expect(tenAm.status).toBe("OPEN");
+    expect(tenAm.telegramMessageId).toBeTruthy();
+    expect(twoPm.status).toBe("SCHEDULED");
+    expect(tenPm.status).toBe("SCHEDULED");
+    expect(tenPm.chicagoDate).toBe("2026-08-26");
+    expect(pollChannelMessages(state)).toHaveLength(1);
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    expect(runtime.polls.find((p) => p.slotKey === "2026-08-25T10:00")?.status).toBe("SETTLED");
+    expect(runtime.polls.find((p) => p.slotKey === "2026-08-25T14:00")?.status).toBe("OPEN");
+    expect(runtime.results).toHaveLength(0);
+  });
+
+  it("keeps repeated startup sweeps idempotent around the activation boundary", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    runtime.referrals.push({
+      id: "ref-old-floor",
+      ownerCoadminUserId: owner,
+      referrerCrmContactId: contactA,
+      status: "ACTIVE",
+      awardedAt: chicagoWallTimeToUtc("2026-01-01T12:00:00")
+    });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const pollCount = runtime.polls.length;
+    const ledgerCount = runtime.ledger.length;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:20"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:01:00"));
+    expect(runtime.results).toHaveLength(0);
+    expect(runtime.polls).toHaveLength(pollCount);
+    expect(runtime.ledger).toHaveLength(ledgerCount);
+    expect(pollChannelMessages(state)).toHaveLength(1);
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
+    const afterDeclare = runtime.results.length;
+    const afterClaims = runtime.claims.length;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:30"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:01:00"));
+    expect(runtime.results).toHaveLength(afterDeclare);
+    expect(runtime.claims).toHaveLength(afterClaims);
+    expect(runtime.results.filter((r) => r.chicagoDate === "2026-08-25")).toHaveLength(1);
   });
 });
 

@@ -14,7 +14,8 @@ import {
 import {
   listSlotsInRange,
   latestDeclarationChicagoDate,
-  declarationInstantForChicagoDate
+  declarationInstantForChicagoDate,
+  isEligibleEngagementDeclarationDate
 } from "./engagement.schedule";
 import {
   announceOutboxKey,
@@ -26,7 +27,7 @@ import {
   rankEngagementPlayers,
   referralContributionAtDeclaration,
   referralContributionIdempotencyKey,
-  votePercentages,
+  countOptionVotes,
   winningOptionIndex,
   type EngagementScoreTotal
 } from "./engagement.scoring";
@@ -470,7 +471,9 @@ export class MemoryEngagementRuntime {
           string,
           string
         ];
-        const counts = poll.optionCounts ?? [0, 0, 0, 0];
+        const counts = countOptionVotes(
+          this.votes.filter((vote) => vote.pollId === poll.id).map((vote) => vote.optionIndex)
+        );
         await this.client.editMessageText(
           integration.botToken,
           poll.channelId,
@@ -478,9 +481,7 @@ export class MemoryEngagementRuntime {
           formatClosedPollMessage({
             question: poll.questionText ?? "",
             options,
-            counts,
-            percentages: votePercentages(counts),
-            winningOptionIndex: poll.winningOptionIndex ?? 0
+            counts
           }),
           undefined,
           EMPTY_INLINE_KEYBOARD
@@ -494,27 +495,26 @@ export class MemoryEngagementRuntime {
   private settlePoll(poll: MemoryPoll, now: Date): void {
     if (poll.status === "SETTLED") return;
     const votes = this.votes.filter((v) => v.pollId === poll.id);
-    const counts = [0, 0, 0, 0];
-    for (const vote of votes) {
-      const index = vote.optionIndex;
-      if (index >= 0 && index < counts.length) counts[index] = (counts[index] ?? 0) + 1;
-    }
-    const winner = winningOptionIndex(counts);
-    for (const vote of votes) {
-      const key = pollParticipationIdempotencyKey(poll.id, vote.crmContactId);
-      if (this.ledger.some((row) => row.idempotencyKey === key)) continue;
-      this.ledger.push({
-        id: randomUUID(),
-        ownerCoadminUserId: poll.ownerCoadminUserId,
-        crmContactId: vote.crmContactId,
-        chicagoDate: poll.chicagoDate,
-        kind: "POLL_PARTICIPATION",
-        points: pollPointsForVote(vote.optionIndex, winner),
-        pollId: poll.id,
-        referralId: null,
-        idempotencyKey: key,
-        createdAt: now
-      });
+    const counts = countOptionVotes(votes.map((vote) => vote.optionIndex));
+    const totalVotes = counts.reduce((sum, n) => sum + n, 0);
+    const winner = totalVotes > 0 ? winningOptionIndex(counts) : null;
+    if (winner != null) {
+      for (const vote of votes) {
+        const key = pollParticipationIdempotencyKey(poll.id, vote.crmContactId);
+        if (this.ledger.some((row) => row.idempotencyKey === key)) continue;
+        this.ledger.push({
+          id: randomUUID(),
+          ownerCoadminUserId: poll.ownerCoadminUserId,
+          crmContactId: vote.crmContactId,
+          chicagoDate: poll.chicagoDate,
+          kind: "POLL_PARTICIPATION",
+          points: pollPointsForVote(vote.optionIndex, winner),
+          pollId: poll.id,
+          referralId: null,
+          idempotencyKey: key,
+          createdAt: now
+        });
+      }
     }
     poll.optionCounts = counts;
     poll.winningOptionIndex = winner;
@@ -527,6 +527,10 @@ export class MemoryEngagementRuntime {
     const chicagoDate = latestDeclarationChicagoDate(now);
     const declareAt = declarationInstantForChicagoDate(chicagoDate);
     if (now.getTime() < declareAt.getTime()) return;
+    const pollDates = this.polls
+      .filter((p) => p.ownerCoadminUserId === integration.ownerCoadminUserId)
+      .map((p) => p.chicagoDate);
+    if (!isEligibleEngagementDeclarationDate(chicagoDate, pollDates)) return;
     if (this.results.some((r) => r.ownerCoadminUserId === integration.ownerCoadminUserId && r.chicagoDate === chicagoDate)) {
       const existing = this.results.find(
         (r) => r.ownerCoadminUserId === integration.ownerCoadminUserId && r.chicagoDate === chicagoDate

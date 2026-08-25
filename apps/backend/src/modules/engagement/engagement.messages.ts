@@ -1,4 +1,10 @@
 import { ENGAGEMENT_CALLBACK_PREFIX } from "./engagement.constants";
+import { votePercentages, winningOptionIndex } from "./engagement.scoring";
+
+export const OPEN_POLL_HEADING = "🤔 WHICH WOULD YOU CHOOSE?";
+export const OPEN_POLL_VOTE_HINT = "👇 Vote below — results in 4 hours";
+export const CLOSED_POLL_HEADING = "📊 POLL RESULTS";
+export const CLOSED_POLL_NO_VOTES = "No votes this round.";
 
 export function pollUuidToCallbackId(pollId: string): string {
   return pollId.replace(/-/g, "");
@@ -28,27 +34,33 @@ export function parseVoteCallbackData(
 }
 
 export function formatOpenPollMessage(question: string): string {
-  return `🤔 WHICH WOULD YOU CHOOSE?\n\n${question.trim()}`;
+  return `${OPEN_POLL_HEADING}\n\n${question.trim()}\n\n${OPEN_POLL_VOTE_HINT}`;
 }
 
 export function formatClosedPollMessage(input: {
   readonly question: string;
   readonly options: readonly [string, string, string, string];
   readonly counts: readonly number[];
-  readonly percentages: readonly number[];
-  readonly winningOptionIndex: number;
 }): string {
-  const lines = input.options.map(
-    (option, index) => `${option} — ${input.percentages[index] ?? 0}%`
-  );
+  const question = input.question.trim();
+  const total = input.counts.reduce((sum, n) => sum + n, 0);
+  if (total <= 0) {
+    return [CLOSED_POLL_HEADING, "", question, "", CLOSED_POLL_NO_VOTES].join("\n");
+  }
+  const percentages = votePercentages(input.counts);
+  const winner = winningOptionIndex(input.counts);
+  const lines = input.options.map((option, index) => {
+    const prefix = index === winner ? "🥇 " : "";
+    return `${prefix}${option} — ${percentages[index] ?? 0}%`;
+  });
   return [
-    "POLL CLOSED",
+    CLOSED_POLL_HEADING,
     "",
-    input.question.trim(),
+    question,
     "",
     ...lines,
     "",
-    `Winning choice: ${input.options[input.winningOptionIndex]}`
+    `🏆 Winning choice: ${input.options[winner]}`
   ].join("\n");
 }
 

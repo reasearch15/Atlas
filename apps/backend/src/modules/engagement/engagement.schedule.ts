@@ -65,6 +65,28 @@ export function scoringChicagoDateForInstant(instant: Date): string {
   return zoned.plus({ days: 1 }).toFormat("yyyy-MM-dd");
 }
 
+/**
+ * First Chicago date that may receive a daily engagement result.
+ * Derived from durable poll rows (scheduled or posted), not process uptime.
+ * yyyy-MM-dd strings compare lexicographically.
+ */
+export function firstEligibleDeclarationChicagoDate(pollChicagoDates: readonly string[]): string | null {
+  let first: string | null = null;
+  for (const date of pollChicagoDates) {
+    if (first == null || date < first) first = date;
+  }
+  return first;
+}
+
+/** True when `chicagoDate` is on/after the first poll scoring date. No polls → never eligible. */
+export function isEligibleEngagementDeclarationDate(
+  chicagoDate: string,
+  pollChicagoDates: readonly string[]
+): boolean {
+  const first = firstEligibleDeclarationChicagoDate(pollChicagoDates);
+  return first != null && chicagoDate >= first;
+}
+
 /** Most recently reached 11 PM Chicago date (inclusive). */
 export function latestDeclarationChicagoDate(now: Date): string {
   const zoned = DateTime.fromJSDate(now, { zone: "utc" }).setZone(ENGAGEMENT_TIMEZONE);

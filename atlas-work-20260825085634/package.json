@@ -1,0 +1,40 @@
+{
+  "name": "atlas-telegram-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-grade multi-tenant Telegram team workspace foundation.",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22.11.0",
+    "pnpm": ">=9.15.0"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm --parallel --filter @atlas/backend --filter @atlas/frontend --filter @atlas/telegram-worker dev",
+    "dev:infra": "docker compose up -d",
+    "start": "pnpm --parallel --filter @atlas/backend --filter @atlas/frontend --filter @atlas/telegram-worker start",
+    "status": "powershell -ExecutionPolicy Bypass -File scripts/status.ps1",
+    "healthcheck": "bash scripts/healthcheck.sh",
+    "verify:linux-build": "bash scripts/verify-linux-build.sh",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "format": "prettier --write .",
+    "db:generate": "pnpm --filter @atlas/backend db:generate",
+    "db:migrate": "pnpm db:migrate:dev",
+    "db:migrate:dev": "pnpm --filter @atlas/backend db:migrate:dev",
+    "db:migrate:deploy": "pnpm --filter @atlas/backend db:migrate:deploy",
+    "db:migrate:status": "pnpm --filter @atlas/backend db:migrate:status",
+    "db:seed": "pnpm --filter @atlas/backend db:seed",
+    "admin:create": "pnpm --filter @atlas/backend admin:create",
+    "admin:reset": "pnpm --filter @atlas/backend admin:reset",
+    "admin:show": "pnpm --filter @atlas/backend admin:show",
+    "admin:cleanup-orphans": "pnpm --filter @atlas/backend admin:cleanup-orphans",
+    "fixtures:clean": "pnpm --filter @atlas/backend fixtures:clean"
+  },
+  "devDependencies": {
+    "@atlas/config": "workspace:*",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3"
+  }
+}

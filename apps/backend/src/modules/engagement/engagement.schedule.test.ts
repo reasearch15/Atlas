@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { chicagoWallTimeToUtc } from "../leaderboard/competition-schedule";
 import {
   buildSlot,
+  firstEligibleDeclarationChicagoDate,
+  isEligibleEngagementDeclarationDate,
   isEngagementPostHour,
   isEngagementQuietHour,
   latestDeclarationChicagoDate,
@@ -61,5 +63,14 @@ describe("engagement schedule", () => {
     const closes = pollClosesAt(opens);
     expect(closes.getTime() - opens.getTime()).toBe(4 * 60 * 60 * 1000);
     expect(scoringChicagoDateForInstant(closes)).toBe("2026-11-01");
+  });
+
+  it("derives the first eligible declaration date from poll scoring dates", () => {
+    expect(firstEligibleDeclarationChicagoDate([])).toBeNull();
+    expect(isEligibleEngagementDeclarationDate("2026-08-24", [])).toBe(false);
+    expect(firstEligibleDeclarationChicagoDate(["2026-08-26", "2026-08-25"])).toBe("2026-08-25");
+    expect(isEligibleEngagementDeclarationDate("2026-08-24", ["2026-08-25"])).toBe(false);
+    expect(isEligibleEngagementDeclarationDate("2026-08-25", ["2026-08-25", "2026-08-26"])).toBe(true);
+    expect(isEligibleEngagementDeclarationDate("2026-08-26", ["2026-08-25"])).toBe(true);
   });
 });

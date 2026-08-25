@@ -1,0 +1,2 @@
+-- No-op placeholder for an interrupted local migration directory.
+-- The finalized tenant onboarding schema lives in 20260802000500_tenant_username_onboarding.

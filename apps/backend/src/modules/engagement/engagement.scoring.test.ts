@@ -6,6 +6,7 @@ import {
   referralDecaySteps,
   referralEngagementPoints,
   top3EngagementPlayers,
+  votePercentages,
   winningOptionIndex
 } from "./engagement.scoring";
 
@@ -16,10 +17,19 @@ describe("engagement scoring", () => {
     expect(pollPointsForVote(0, 0) + pollPointsForVote(0, 0)).not.toBe(15);
   });
 
-  it("breaks percentage ties with the lowest option index", () => {
+  it("breaks vote-count ties with the lowest option index", () => {
     expect(winningOptionIndex([20, 20, 15, 5])).toBe(0);
     expect(winningOptionIndex([10, 20, 20, 5])).toBe(1);
     expect(winningOptionIndex([0, 0, 0, 0])).toBe(0);
+    expect(winningOptionIndex([3, 2, 2, 2])).toBe(0);
+  });
+
+  it("does not let rounded percentages choose the winner", () => {
+    const counts = [3, 2, 2, 2];
+    const percentages = votePercentages(counts);
+    expect(percentages.reduce((sum, n) => sum + n, 0)).toBe(100);
+    expect(winningOptionIndex(counts)).toBe(0);
+    expect(percentages[0]).toBeGreaterThanOrEqual(percentages[1]!);
   });
 
   it("decays referral contribution 50 -> 40 -> 30 -> 20 and never below 20", () => {

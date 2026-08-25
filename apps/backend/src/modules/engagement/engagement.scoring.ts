@@ -12,6 +12,14 @@ export function pollPointsForVote(optionIndex: number, winningOptionIndex: numbe
   return optionIndex === winningOptionIndex ? WINNING_OPTION_POINTS : PARTICIPATION_POINTS;
 }
 
+export function countOptionVotes(optionIndexes: readonly number[]): [number, number, number, number] {
+  const counts: [number, number, number, number] = [0, 0, 0, 0];
+  for (const index of optionIndexes) {
+    if (index >= 0 && index < 4) counts[index] = (counts[index] ?? 0) + 1;
+  }
+  return counts;
+}
+
 export function winningOptionIndex(counts: readonly number[]): number {
   if (counts.length !== 4) {
     throw new Error("Engagement polls require exactly 4 option counts");
@@ -23,10 +31,29 @@ export function winningOptionIndex(counts: readonly number[]): number {
   return winner;
 }
 
+/**
+ * Largest-remainder percentages so displayed integers sum to 100.
+ * Remainder ties go to the lowest option index. Winner is still chosen from raw counts.
+ */
 export function votePercentages(counts: readonly number[]): number[] {
+  if (counts.length !== 4) {
+    throw new Error("Engagement polls require exactly 4 option counts");
+  }
   const total = counts.reduce((sum, n) => sum + n, 0);
   if (total <= 0) return [0, 0, 0, 0];
-  return counts.map((n) => Math.round((n / total) * 100));
+  const exact = counts.map((n) => (n / total) * 100);
+  const floors = exact.map((value) => Math.floor(value));
+  const remaining = 100 - floors.reduce((sum, n) => sum + n, 0);
+  const order = exact
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  const result = [...floors];
+  for (let i = 0; i < remaining && i < order.length; i += 1) {
+    const optionIndex = order[i]?.index;
+    if (optionIndex == null) continue;
+    result[optionIndex] = (result[optionIndex] ?? 0) + 1;
+  }
+  return result;
 }
 
 export function referralDecaySteps(qualifiedAt: Date, declarationAt: Date): number {

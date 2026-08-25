@@ -23,6 +23,7 @@ describe("engagement telegram callbacks", () => {
       chats: new Map()
     };
     const client = createFakeLeaderboardTelegramClient(state);
+    const editSpy = vi.spyOn(client, "editMessageText");
     const originalAnswer = client.answerCallbackQuery!;
     client.answerCallbackQuery = async (token, id, text) => {
       if (text) answers.push(text);
@@ -69,6 +70,7 @@ describe("engagement telegram callbacks", () => {
     await send(100, 2);
     await send(999, 3);
     expect(vote).toHaveBeenCalledTimes(3);
+    expect(editSpy).not.toHaveBeenCalled();
     expect(answers).toEqual(["Vote recorded", "You already voted.", "Send /start first to join this engagement poll."]);
   });
 });
