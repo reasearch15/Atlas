@@ -1,13 +1,19 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { FreeplayService } from "../freeplay/freeplay.service";
 import type { LeaderboardTelegramOutboxService } from "../leaderboard/telegram/leaderboard-telegram.outbox";
-import { DAILY_DRAW_PRIZE_CENTS, DRAW_BASE_WEIGHT, DRAW_WINNER_COOLDOWN_DRAWS } from "./engagement.constants";
+import {
+  DAILY_DRAW_PRIZE_CENTS,
+  DRAW_BASE_WEIGHT,
+  DRAW_WINNER_COOLDOWN_DRAWS,
+  POLL_DURATION_MS
+} from "./engagement.constants";
 import {
   addChicagoDays,
   listSlotsInRange,
   latestDeclarationChicagoDate,
   declarationInstantForChicagoDate,
-  isEligibleEngagementDeclarationDate
+  isEligibleEngagementDeclarationDate,
+  scoringChicagoDateForInstant
 } from "./engagement.schedule";
 import {
   closePollOutboxKey,
@@ -166,6 +172,131 @@ export class EngagementService {
       where: { telegramPollId: input.telegramPollId, closeEditedAt: null },
       data: { optionCountsJson: counts }
     });
+  }
+
+  /**
+   * Deletes a settled legacy callback poll from the channel and posts the next scheduled slot
+   * early as an anonymous native Telegram poll (used for one-time channel cleanup).
+   */
+  public async replaceLegacyVisiblePoll(input: {
+    readonly ownerCoadminUserId: string;
+    readonly client: LeaderboardTelegramClient;
+    readonly token: string;
+    readonly now?: Date;
+  }): Promise<{
+    readonly deletedLegacyMessageId: string | null;
+    readonly legacyPollId: string | null;
+    readonly pollId: string;
+    readonly telegramMessageId: string;
+    readonly telegramPollId: string;
+    readonly questionText: string;
+  }> {
+    const now = input.now ?? new Date();
+    const integration = await this.prisma.leaderboardBotIntegration.findUnique({
+      where: { ownerCoadminUserId: input.ownerCoadminUserId }
+    });
+    if (!integration?.channelId || integration.disconnectedAt || !integration.postingEnabled) {
+      throw new Error("Integration not ready for engagement polls");
+    }
+
+    const existingNative = await this.prisma.engagementPoll.findFirst({
+      where: {
+        ownerCoadminUserId: input.ownerCoadminUserId,
+        status: { in: ["OPEN", "POSTING"] },
+        closesAt: { gt: now },
+        telegramPollId: { not: null }
+      }
+    });
+    if (existingNative?.telegramMessageId && existingNative.telegramPollId) {
+      return {
+        deletedLegacyMessageId: null,
+        legacyPollId: null,
+        pollId: existingNative.id,
+        telegramMessageId: existingNative.telegramMessageId,
+        telegramPollId: existingNative.telegramPollId,
+        questionText: existingNative.questionText ?? ""
+      };
+    }
+
+    const legacy = await this.prisma.engagementPoll.findFirst({
+      where: {
+        ownerCoadminUserId: input.ownerCoadminUserId,
+        status: "SETTLED",
+        telegramPollId: null,
+        telegramMessageId: { not: null },
+        channelId: integration.channelId
+      },
+      orderBy: { settledAt: "desc" }
+    });
+
+    let deletedLegacyMessageId: string | null = null;
+    if (legacy?.telegramMessageId && legacy.channelId) {
+      try {
+        await input.client.deleteMessage(
+          input.token,
+          legacy.channelId,
+          Number(legacy.telegramMessageId)
+        );
+        deletedLegacyMessageId = legacy.telegramMessageId;
+      } catch (error) {
+        if (
+          !(
+            error instanceof LeaderboardTelegramApiError &&
+            /message to delete not found|message can't be deleted/i.test(error.description)
+          )
+        ) {
+          throw error;
+        }
+      }
+      await this.prisma.engagementPoll.update({
+        where: { id: legacy.id },
+        data: { telegramMessageId: null }
+      });
+    }
+
+    const scheduled = await this.prisma.engagementPoll.findFirst({
+      where: {
+        ownerCoadminUserId: input.ownerCoadminUserId,
+        botIntegrationId: integration.id,
+        status: "SCHEDULED",
+        closesAt: { gt: now },
+        telegramMessageId: null
+      },
+      orderBy: { opensAt: "asc" }
+    });
+    if (!scheduled) {
+      throw new Error("No scheduled poll slot available for immediate native replacement");
+    }
+
+    const closesAt = new Date(now.getTime() + POLL_DURATION_MS);
+    const chicagoDate = scoringChicagoDateForInstant(closesAt);
+    const claimed = await this.prisma.$transaction(async (tx) => {
+      const ok = await this.claimPostTx(tx, scheduled.id, now);
+      if (!ok) return false;
+      await tx.engagementPoll.update({
+        where: { id: scheduled.id },
+        data: { opensAt: now, closesAt, chicagoDate }
+      });
+      return true;
+    });
+    if (!claimed) {
+      throw new Error("Failed to claim scheduled poll for native replacement");
+    }
+
+    await this.completePost(scheduled.id, input.client, input.token);
+    const posted = await this.prisma.engagementPoll.findUniqueOrThrow({ where: { id: scheduled.id } });
+    if (!posted.telegramMessageId || !posted.telegramPollId) {
+      throw new Error("Replacement poll posted without native Telegram ids");
+    }
+
+    return {
+      deletedLegacyMessageId,
+      legacyPollId: legacy?.id ?? null,
+      pollId: posted.id,
+      telegramMessageId: posted.telegramMessageId,
+      telegramPollId: posted.telegramPollId,
+      questionText: posted.questionText ?? ""
+    };
   }
 
   public async completePost(

@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { chicagoWallTimeToUtc } from "../leaderboard/competition-schedule";
 import { createFakeLeaderboardTelegramClient, type FakeLeaderboardTelegramState } from "../leaderboard/telegram/leaderboard-telegram.client";
 import type { WheelRng } from "../leaderboard/wheel-rng";
 import { MemoryEngagementRuntime } from "./engagement.memory";
-import { buildVoteCallbackData } from "./engagement.messages";
+import { buildPollInlineKeyboard, buildVoteCallbackData } from "./engagement.messages";
 import type { EngagementQuestionInput } from "./question-bank";
 import { DAILY_DRAW_PRIZE_CENTS } from "./engagement.constants";
 import { dailyDrawFreeplayIdempotencyKey } from "./engagement.draw";
@@ -392,7 +393,7 @@ describe("native poll answers without scoring", () => {
     expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
   });
 
-  it("keeps old custom-button polls working without a Telegram poll id or points", async () => {
+  it("still closes historical custom-button polls without a Telegram poll id or points", async () => {
     const legacyState: FakeLeaderboardTelegramState = {
       bots: new Map([["token", { id: 1, isBot: true, firstName: "Bot", username: "sayubot" }]]),
       chats: new Map([
@@ -405,9 +406,10 @@ describe("native poll answers without scoring", () => {
     const fullClient = createFakeLeaderboardTelegramClient(legacyState);
     const legacyRuntime = new MemoryEngagementRuntime(undefined, {
       sendMessage: fullClient.sendMessage.bind(fullClient),
-      editMessageText: fullClient.editMessageText.bind(fullClient)
+      editMessageText: fullClient.editMessageText.bind(fullClient),
+      sendPoll: fullClient.sendPoll.bind(fullClient),
+      stopPoll: fullClient.stopPoll.bind(fullClient)
     });
-    legacyRuntime.importQuestions(tinyBank());
     legacyRuntime.integrations.push({
       id: integrationId,
       workspaceId: workspace,
@@ -417,6 +419,38 @@ describe("native poll answers without scoring", () => {
       disconnectedAt: null,
       botToken: "token"
     });
+    legacyRuntime.importQuestions(tinyBank());
+    const legacyPollId = randomUUID();
+    const opensAt = chicagoWallTimeToUtc("2026-08-25T06:00:00");
+    const closesAt = chicagoWallTimeToUtc("2026-08-25T10:00:00");
+    legacyRuntime.polls.push({
+      id: legacyPollId,
+      workspaceId: workspace,
+      ownerCoadminUserId: owner,
+      botIntegrationId: integrationId,
+      slotKey: "2026-08-25T06:00",
+      opensAt,
+      closesAt,
+      chicagoDate: "2026-08-25",
+      status: "OPEN",
+      channelId,
+      questionText: "Which sounds most valuable to you?",
+      option1: "A",
+      option2: "B",
+      option3: "C",
+      option4: "D",
+      telegramMessageId: "1",
+      telegramPollId: null,
+      postedAt: opensAt,
+      closedAt: null,
+      settledAt: null,
+      closeEditedAt: null,
+      optionCounts: null,
+      winningOptionIndex: null
+    });
+    await fullClient.sendMessage("token", channelId, "Legacy poll", {
+      replyMarkup: buildPollInlineKeyboard(legacyPollId, ["A", "B", "C", "D"])
+    });
     legacyRuntime.contacts.set(contactA, { displayName: "Emily" });
     legacyRuntime.playerLinks.push({
       botIntegrationId: integrationId,
@@ -424,13 +458,12 @@ describe("native poll answers without scoring", () => {
       crmContactId: contactA,
       ownerCoadminUserId: owner
     });
-    await legacyRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = legacyRuntime.polls.find((p) => p.status === "OPEN")!;
-    expect(poll.telegramPollId).toBeNull();
-    expect(legacyState.chats.get(Number(channelId))?.messages[0]?.replyMarkup?.inline_keyboard).toHaveLength(4);
-    expect(legacyRuntime.voteFromCallback(buildVoteCallbackData(poll.id, 0), "100", new Date())).toBe("recorded");
-    await legacyRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    expect(legacyState.chats.get(Number(channelId))?.messages[0]?.text).toContain("POLL RESULTS");
+    expect(legacyRuntime.voteFromCallback(buildVoteCallbackData(legacyPollId, 0), "100", new Date())).toBe("recorded");
+    await legacyRuntime.sweep(closesAt);
+    const legacyMessage = legacyState.chats
+      .get(Number(channelId))
+      ?.messages.find((message) => message.messageId === 1);
+    expect(legacyMessage?.text).toContain("POLL RESULTS");
     expect(legacyRuntime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
   });
 });
