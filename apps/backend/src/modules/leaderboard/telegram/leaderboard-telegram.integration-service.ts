@@ -186,6 +186,37 @@ export class LeaderboardTelegramIntegrationService {
     return toDto(updated, await this.disconnectWarning(workspaceId, ownerCoadminUserId));
   }
 
+  /**
+   * Re-register existing webhooks with the current allowed_updates list without
+   * rotating the secret token. Used on process start so poll/poll_answer reach Atlas.
+   */
+  public async refreshWebhookAllowedUpdates(): Promise<number> {
+    if (!this.webhookBaseUrl || !this.client.setWebhook) return 0;
+    const rows = await this.prisma.leaderboardBotIntegration.findMany({
+      where: { disconnectedAt: null, webhookRegisteredAt: { not: null } }
+    });
+    let refreshed = 0;
+    for (const row of rows) {
+      try {
+        const token = this.decryptToken(row.encryptedBotToken);
+        if (!row.encryptedWebhookSecret) continue;
+        const secret = decryptSecret(
+          row.encryptedWebhookSecret as unknown as EncryptedSecret,
+          this.encryptionKey
+        );
+        const url = `${this.webhookBaseUrl}/api/leaderboard/telegram/webhook/${row.id}`;
+        await this.client.setWebhook(token, url, secret);
+        if (this.client.getWebhookInfo) {
+          await this.client.getWebhookInfo(token);
+        }
+        refreshed += 1;
+      } catch {
+        // Keep other bots connected even if one webhook refresh fails.
+      }
+    }
+    return refreshed;
+  }
+
   public async rotateToken(
     workspaceId: string,
     ownerCoadminUserId: string,

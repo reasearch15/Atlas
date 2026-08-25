@@ -19,23 +19,28 @@ import {
   referralContributionAtDeclaration,
   referralContributionIdempotencyKey,
   countOptionVotes,
+  parseStoredOptionCounts,
+  nativeCountsFromPollOptions,
   winningOptionIndex,
   type EngagementScoreTotal
 } from "./engagement.scoring";
 import { shuffleIds, validateQuestionBank, type EngagementQuestionInput } from "./question-bank";
 import {
   parseVoteCallbackData,
-  formatOpenPollMessage,
   formatClosedPollMessage,
   formatDailyWinnersMessage,
-  buildPollInlineKeyboard,
   EMPTY_INLINE_KEYBOARD
 } from "./engagement.messages";
-import type { LeaderboardTelegramClient } from "../leaderboard/telegram/leaderboard-telegram.client";
+import {
+  LeaderboardTelegramApiError,
+  type LeaderboardTelegramClient
+} from "../leaderboard/telegram/leaderboard-telegram.client";
 
 export type EngagementVoteStatus =
   | "recorded"
   | "already_voted"
+  | "updated"
+  | "withdrawn"
   | "unregistered"
   | "closed"
   | "not_found"
@@ -113,6 +118,48 @@ export class EngagementService {
     }
   }
 
+  public async voteFromPollAnswer(input: {
+    readonly botIntegrationId: string;
+    readonly ownerCoadminUserId: string;
+    readonly workspaceId: string;
+    readonly telegramUserId: string;
+    readonly telegramPollId: string;
+    readonly optionIds: readonly number[];
+    readonly now?: Date;
+  }): Promise<EngagementVoteStatus> {
+    const now = input.now ?? new Date();
+    try {
+      return await this.prisma.$transaction((tx) =>
+        this.pollAnswerTx(tx, {
+          botIntegrationId: input.botIntegrationId,
+          ownerCoadminUserId: input.ownerCoadminUserId,
+          workspaceId: input.workspaceId,
+          telegramUserId: input.telegramUserId,
+          telegramPollId: input.telegramPollId,
+          optionIds: input.optionIds,
+          now
+        })
+      );
+    } catch (error) {
+      if (isUniqueViolation(error)) return "already_voted";
+      throw error;
+    }
+  }
+
+  public async persistNativePollCounts(input: {
+    readonly telegramPollId: string;
+    readonly options: readonly { readonly voterCount: number }[];
+    readonly isClosed: boolean;
+  }): Promise<void> {
+    if (!input.isClosed) return;
+    const counts = nativeCountsFromPollOptions(input.options);
+    if (!counts) return;
+    await this.prisma.engagementPoll.updateMany({
+      where: { telegramPollId: input.telegramPollId, closeEditedAt: null },
+      data: { optionCountsJson: counts }
+    });
+  }
+
   public async completePost(
     pollId: string,
     client: LeaderboardTelegramClient,
@@ -130,13 +177,26 @@ export class EngagementService {
       return;
     }
     if (!poll.channelId || !poll.questionText || !poll.option1) return;
-    const sent = await client.sendMessage(token, poll.channelId, formatOpenPollMessage(poll.questionText), {
-      replyMarkup: buildPollInlineKeyboard(poll.id, [poll.option1, poll.option2!, poll.option3!, poll.option4!])
+    if (!client.sendPoll) {
+      throw new Error("Telegram client does not support sendPoll");
+    }
+    const sent = await client.sendPoll(token, poll.channelId, {
+      question: poll.questionText,
+      options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
+      isAnonymous: false,
+      type: "regular",
+      allowsMultipleAnswers: false,
+      allowsRevoting: false
     });
+    const telegramPollId = sent.poll?.id;
+    if (!telegramPollId) {
+      throw new Error("Telegram sendPoll did not return a native poll id");
+    }
     await this.prisma.engagementPoll.updateMany({
       where: { id: pollId, telegramMessageId: null },
       data: {
         telegramMessageId: String(sent.messageId),
+        telegramPollId,
         status: "OPEN",
         postedAt: new Date()
       }
@@ -149,7 +209,14 @@ export class EngagementService {
     token: string
   ): Promise<void> {
     const poll = await this.prisma.engagementPoll.findUnique({ where: { id: pollId } });
-    if (!poll?.telegramMessageId || !poll.channelId || !poll.questionText || poll.closeEditedAt) return;
+    if (!poll?.telegramMessageId || !poll.channelId || !poll.questionText) return;
+
+    if (poll.telegramPollId) {
+      await this.completeNativeClose(poll, client, token);
+      return;
+    }
+
+    if (poll.closeEditedAt) return;
     const votes = await this.prisma.engagementVote.findMany({
       where: { pollId },
       select: { optionIndex: true }
@@ -175,6 +242,48 @@ export class EngagementService {
     );
     await this.prisma.engagementPoll.updateMany({
       where: { id: pollId, closeEditedAt: null },
+      data: { closeEditedAt: new Date() }
+    });
+  }
+
+  private async completeNativeClose(
+    poll: {
+      id: string;
+      channelId: string | null;
+      telegramMessageId: string | null;
+      telegramPollId: string | null;
+      closeEditedAt: Date | null;
+      status: string;
+      optionCountsJson: unknown;
+    },
+    client: LeaderboardTelegramClient,
+    token: string
+  ): Promise<void> {
+    if (!poll.channelId || !poll.telegramMessageId) return;
+    if (!client.stopPoll) {
+      throw new Error("Telegram client does not support stopPoll");
+    }
+    let counts = parseStoredOptionCounts(poll.optionCountsJson);
+    if (!poll.closeEditedAt) {
+      try {
+        const stopped = await client.stopPoll(token, poll.channelId, Number(poll.telegramMessageId));
+        counts = nativeCountsFromPollOptions(stopped.options) ?? counts;
+      } catch (error) {
+        if (!isPollAlreadyClosedError(error)) throw error;
+      }
+      if (counts) {
+        await this.prisma.engagementPoll.updateMany({
+          where: { id: poll.id, closeEditedAt: null },
+          data: { optionCountsJson: counts }
+        });
+      }
+    }
+    const latest = await this.prisma.engagementPoll.findUnique({ where: { id: poll.id } });
+    if (latest && latest.status !== "SETTLED") {
+      await this.prisma.$transaction((tx) => this.settleTx(tx, poll.id, new Date()));
+    }
+    await this.prisma.engagementPoll.updateMany({
+      where: { id: poll.id, closeEditedAt: null },
       data: { closeEditedAt: new Date() }
     });
   }
@@ -261,6 +370,87 @@ export class EngagementService {
         telegramUserId: input.telegramUserId,
         crmContactId: link.crmContactId,
         optionIndex: input.optionIndex,
+        votedAt: input.now
+      }
+    });
+    return "recorded";
+  }
+
+  private async pollAnswerTx(
+    tx: Prisma.TransactionClient,
+    input: {
+      botIntegrationId: string;
+      ownerCoadminUserId: string;
+      workspaceId: string;
+      telegramUserId: string;
+      telegramPollId: string;
+      optionIds: readonly number[];
+      now: Date;
+    }
+  ): Promise<EngagementVoteStatus> {
+    const locked = await tx.$queryRaw<
+      Array<{
+        id: string;
+        status: string;
+        closesAt: Date;
+        botIntegrationId: string;
+      }>
+    >`
+      SELECT id, status, closes_at AS "closesAt", bot_integration_id AS "botIntegrationId"
+      FROM engagement_polls
+      WHERE telegram_poll_id = ${input.telegramPollId}
+      FOR UPDATE
+    `;
+    const poll = locked[0];
+    if (!poll || poll.botIntegrationId !== input.botIntegrationId) return "not_found";
+    if (poll.status !== "OPEN" || input.now.getTime() >= poll.closesAt.getTime()) return "closed";
+
+    const existing = await tx.engagementVote.findUnique({
+      where: {
+        pollId_telegramUserId: {
+          pollId: poll.id,
+          telegramUserId: input.telegramUserId
+        }
+      }
+    });
+
+    if (input.optionIds.length === 0) {
+      if (existing) {
+        await tx.engagementVote.delete({ where: { id: existing.id } });
+      }
+      return "withdrawn";
+    }
+
+    const optionIndex = input.optionIds[0];
+    if (optionIndex == null || optionIndex < 0 || optionIndex > 3) return "invalid";
+
+    const link = await tx.leaderboardBotPlayerLink.findUnique({
+      where: {
+        botIntegrationId_telegramUserId: {
+          botIntegrationId: input.botIntegrationId,
+          telegramUserId: input.telegramUserId
+        }
+      }
+    });
+    if (!link || link.ownerCoadminUserId !== input.ownerCoadminUserId) return "unregistered";
+
+    if (existing) {
+      if (existing.optionIndex === optionIndex) return "recorded";
+      await tx.engagementVote.update({
+        where: { id: existing.id },
+        data: { optionIndex, votedAt: input.now }
+      });
+      return "updated";
+    }
+
+    await tx.engagementVote.create({
+      data: {
+        pollId: poll.id,
+        workspaceId: input.workspaceId,
+        ownerCoadminUserId: input.ownerCoadminUserId,
+        telegramUserId: input.telegramUserId,
+        crmContactId: link.crmContactId,
+        optionIndex,
         votedAt: input.now
       }
     });
@@ -492,7 +682,14 @@ export class EngagementService {
       }
     });
     for (const poll of due) {
-      if (poll.status !== "SETTLED") {
+      if (poll.telegramPollId) {
+        if (poll.status === "OPEN") {
+          await this.prisma.engagementPoll.updateMany({
+            where: { id: poll.id, status: "OPEN" },
+            data: { status: "CLOSING", closedAt: now }
+          });
+        }
+      } else if (poll.status !== "SETTLED") {
         await this.prisma.$transaction((tx) => this.settleTx(tx, poll.id, now));
       }
       if (!this.outbox) continue;
@@ -519,7 +716,11 @@ export class EngagementService {
     if (poll.status === "SETTLED") return;
     if (claimed.count !== 1 && poll.status !== "CLOSING" && poll.status !== "CLOSED") return;
     const votes = await tx.engagementVote.findMany({ where: { pollId } });
-    const counts = countOptionVotes(votes.map((vote) => vote.optionIndex));
+    const registeredCounts = countOptionVotes(votes.map((vote) => vote.optionIndex));
+    // Public winner uses native Telegram voter_count when present so unregistered
+    // channel votes count. Points still use only registered engagement_votes.
+    const nativeCounts = poll.telegramPollId ? parseStoredOptionCounts(poll.optionCountsJson) : null;
+    const counts = nativeCounts ?? registeredCounts;
     const totalVotes = counts.reduce((sum, n) => sum + n, 0);
     const winner = totalVotes > 0 ? winningOptionIndex(counts) : null;
     if (winner != null) {
@@ -766,4 +967,11 @@ export function dailyResultIdFromOutboxPayload(payload: unknown): string | null 
   if (!payload || typeof payload !== "object") return null;
   const id = (payload as { dailyResultId?: unknown }).dailyResultId;
   return typeof id === "string" ? id : null;
+}
+
+function isPollAlreadyClosedError(error: unknown): boolean {
+  return (
+    error instanceof LeaderboardTelegramApiError &&
+    /already been closed|POLL_CLOSED|poll_closed/i.test(error.description)
+  );
 }

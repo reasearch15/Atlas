@@ -20,6 +20,30 @@ export function countOptionVotes(optionIndexes: readonly number[]): [number, num
   return counts;
 }
 
+export function parseStoredOptionCounts(value: unknown): [number, number, number, number] | null {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  const counts: [number, number, number, number] = [0, 0, 0, 0];
+  for (let i = 0; i < 4; i += 1) {
+    const n = value[i];
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 0) return null;
+    counts[i] = n;
+  }
+  return counts;
+}
+
+export function nativeCountsFromPollOptions(
+  options: readonly { readonly voterCount: number }[]
+): [number, number, number, number] | null {
+  if (options.length < 4) return null;
+  const counts: [number, number, number, number] = [0, 0, 0, 0];
+  for (let i = 0; i < 4; i += 1) {
+    const n = options[i]?.voterCount;
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 0) return null;
+    counts[i] = n;
+  }
+  return counts;
+}
+
 export function winningOptionIndex(counts: readonly number[]): number {
   if (counts.length !== 4) {
     throw new Error("Engagement polls require exactly 4 option counts");

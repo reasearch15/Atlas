@@ -29,6 +29,7 @@ export interface TelegramMessage {
   readonly text?: string;
   readonly caption?: string;
   readonly date: number;
+  readonly poll?: TelegramPoll;
 }
 
 export type TelegramParseMode = "HTML" | "Markdown" | "MarkdownV2";
@@ -78,6 +79,47 @@ export interface TelegramWebhookInfo {
   readonly url: string;
   readonly hasCustomCertificate: boolean;
   readonly pendingUpdateCount: number;
+  readonly allowedUpdates?: readonly string[];
+}
+
+/** Update types the Atlas bot webhook must receive. Never drop message/callback_query. */
+export const LEADERBOARD_BOT_ALLOWED_UPDATES = [
+  "message",
+  "callback_query",
+  "poll",
+  "poll_answer"
+] as const;
+
+export type SendPollOptions = {
+  readonly question: string;
+  readonly options: readonly string[];
+  readonly isAnonymous?: boolean;
+  readonly type?: "regular" | "quiz";
+  readonly allowsMultipleAnswers?: boolean;
+  readonly allowsRevoting?: boolean;
+};
+
+export interface TelegramPollOption {
+  readonly text: string;
+  readonly voterCount: number;
+}
+
+export interface TelegramPoll {
+  readonly id: string;
+  readonly question: string;
+  readonly options: readonly TelegramPollOption[];
+  readonly totalVoterCount: number;
+  readonly isClosed: boolean;
+  readonly isAnonymous: boolean;
+  readonly type: string;
+  readonly allowsMultipleAnswers: boolean;
+  readonly allowsRevoting?: boolean;
+}
+
+export interface TelegramPollAnswer {
+  readonly pollId: string;
+  readonly user?: TelegramUser;
+  readonly optionIds: readonly number[];
 }
 
 export interface TelegramCallbackQuery {
@@ -98,8 +140,11 @@ export interface TelegramUpdate {
     readonly date: number;
     readonly chat: TelegramChat;
     readonly from?: TelegramUser;
+    readonly poll?: TelegramPoll;
   };
   readonly callbackQuery?: TelegramCallbackQuery;
+  readonly poll?: TelegramPoll;
+  readonly pollAnswer?: TelegramPollAnswer;
 }
 
 export interface LeaderboardTelegramClient {
@@ -116,6 +161,11 @@ export interface LeaderboardTelegramClient {
     chatId: string | number,
     text: string,
     parseModeOrOptions?: TelegramParseMode | SendMessageOptions
+  ): Promise<TelegramMessage>;
+  sendPoll?(
+    token: string,
+    chatId: string | number,
+    options: SendPollOptions
   ): Promise<TelegramMessage>;
   sendPhoto(
     token: string,
@@ -152,12 +202,14 @@ export interface LeaderboardTelegramClient {
     replyMarkup: TelegramInlineKeyboardMarkup
   ): Promise<TelegramMessage | true>;
   deleteMessage(token: string, chatId: string | number, messageId: number): Promise<boolean>;
+  stopPoll?(token: string, chatId: string | number, messageId: number): Promise<TelegramPoll>;
   setWebhook?(
     token: string,
     url: string,
     secretToken?: string
   ): Promise<boolean>;
   deleteWebhook?(token: string, dropPendingUpdates?: boolean): Promise<boolean>;
+  getWebhookInfo?(token: string): Promise<TelegramWebhookInfo>;
   getUpdates?(
     token: string,
     options?: { readonly offset?: number; readonly timeout?: number; readonly limit?: number }
@@ -269,6 +321,32 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
     if (options.replyMarkup) body.reply_markup = options.replyMarkup;
     const raw = await this.callTelegram<Record<string, unknown>>(token, "sendMessage", body);
     return mapMessage(raw);
+  }
+
+  async sendPoll(token: string, chatId: string | number, options: SendPollOptions): Promise<TelegramMessage> {
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      question: options.question,
+      options: options.options.map((text) => ({ text })),
+      is_anonymous: options.isAnonymous ?? false,
+      type: options.type ?? "regular",
+      allows_multiple_answers: options.allowsMultipleAnswers ?? false,
+      allows_revoting: options.allowsRevoting ?? false
+    };
+    try {
+      const raw = await this.callTelegram<Record<string, unknown>>(token, "sendPoll", body);
+      return mapMessage(raw);
+    } catch (error) {
+      if (
+        error instanceof LeaderboardTelegramApiError &&
+        /allows_revoting/i.test(error.description)
+      ) {
+        delete body.allows_revoting;
+        const raw = await this.callTelegram<Record<string, unknown>>(token, "sendPoll", body);
+        return mapMessage(raw);
+      }
+      throw error;
+    }
   }
 
   async sendPhoto(
@@ -387,10 +465,18 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
     });
   }
 
+  async stopPoll(token: string, chatId: string | number, messageId: number): Promise<TelegramPoll> {
+    const raw = await this.callTelegram<Record<string, unknown>>(token, "stopPoll", {
+      chat_id: chatId,
+      message_id: messageId
+    });
+    return mapPoll(raw);
+  }
+
   async setWebhook(token: string, url: string, secretToken?: string): Promise<boolean> {
     const body: Record<string, unknown> = {
       url,
-      allowed_updates: ["message", "callback_query"]
+      allowed_updates: [...LEADERBOARD_BOT_ALLOWED_UPDATES]
     };
     if (secretToken) body.secret_token = secretToken;
     return this.callTelegram<boolean>(token, "setWebhook", body);
@@ -402,11 +488,18 @@ export class HttpLeaderboardTelegramClient implements LeaderboardTelegramClient 
     });
   }
 
+  async getWebhookInfo(token: string): Promise<TelegramWebhookInfo> {
+    const raw = await this.callTelegram<Record<string, unknown>>(token, "getWebhookInfo", {});
+    return mapWebhookInfo(raw);
+  }
+
   async getUpdates(
     token: string,
     options?: { readonly offset?: number; readonly timeout?: number; readonly limit?: number }
   ): Promise<readonly TelegramUpdate[]> {
-    const body: Record<string, unknown> = {};
+    const body: Record<string, unknown> = {
+      allowed_updates: [...LEADERBOARD_BOT_ALLOWED_UPDATES]
+    };
     if (options?.offset != null) body.offset = options.offset;
     if (options?.timeout != null) body.timeout = options.timeout;
     if (options?.limit != null) body.limit = options.limit;
@@ -564,21 +657,74 @@ function mapChatMember(raw: Record<string, unknown>): TelegramChatMember {
 
 function mapMessage(raw: Record<string, unknown>): TelegramMessage {
   const chatRaw = (raw.chat ?? {}) as Record<string, unknown>;
+  const pollRaw = raw.poll as Record<string, unknown> | undefined;
   const message: TelegramMessage = {
     messageId: Number(raw.message_id),
     chat: mapChat(chatRaw),
     date: Number(raw.date ?? 0)
   };
+  const withPoll = pollRaw ? { ...message, poll: mapPoll(pollRaw) } : message;
   if (raw.text != null && raw.caption != null) {
-    return { ...message, text: String(raw.text), caption: String(raw.caption) };
+    return { ...withPoll, text: String(raw.text), caption: String(raw.caption) };
   }
   if (raw.text != null) {
-    return { ...message, text: String(raw.text) };
+    return { ...withPoll, text: String(raw.text) };
   }
   if (raw.caption != null) {
-    return { ...message, caption: String(raw.caption) };
+    return { ...withPoll, caption: String(raw.caption) };
   }
-  return message;
+  return withPoll;
+}
+
+function mapPoll(raw: Record<string, unknown>): TelegramPoll {
+  const optionsRaw = Array.isArray(raw.options) ? raw.options : [];
+  const poll: TelegramPoll = {
+    id: String(raw.id ?? ""),
+    question: String(raw.question ?? ""),
+    options: optionsRaw.map((option) => {
+      const row = (option ?? {}) as Record<string, unknown>;
+      return {
+        text: String(row.text ?? ""),
+        voterCount: Number(row.voter_count ?? 0)
+      };
+    }),
+    totalVoterCount: Number(raw.total_voter_count ?? 0),
+    isClosed: Boolean(raw.is_closed),
+    isAnonymous: Boolean(raw.is_anonymous),
+    type: String(raw.type ?? "regular"),
+    allowsMultipleAnswers: Boolean(raw.allows_multiple_answers)
+  };
+  if (raw.allows_revoting != null) {
+    return { ...poll, allowsRevoting: Boolean(raw.allows_revoting) };
+  }
+  return poll;
+}
+
+function mapPollAnswer(raw: Record<string, unknown>): TelegramPollAnswer {
+  const userRaw = raw.user as Record<string, unknown> | undefined;
+  const optionIds = Array.isArray(raw.option_ids)
+    ? raw.option_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id))
+    : [];
+  const mapped: TelegramPollAnswer = {
+    pollId: String(raw.poll_id ?? ""),
+    optionIds
+  };
+  if (userRaw) {
+    return { ...mapped, user: mapUser(userRaw) };
+  }
+  return mapped;
+}
+
+function mapWebhookInfo(raw: Record<string, unknown>): TelegramWebhookInfo {
+  const info: TelegramWebhookInfo = {
+    url: String(raw.url ?? ""),
+    hasCustomCertificate: Boolean(raw.has_custom_certificate),
+    pendingUpdateCount: Number(raw.pending_update_count ?? 0)
+  };
+  if (Array.isArray(raw.allowed_updates)) {
+    return { ...info, allowedUpdates: raw.allowed_updates.map((value) => String(value)) };
+  }
+  return info;
 }
 
 function sanitizeUploadFilename(name: string): string {
@@ -602,8 +748,22 @@ export interface FakeTelegramChatState {
     photoBytes?: number;
     deleted?: boolean;
     replyMarkup?: TelegramInlineKeyboardMarkup;
+    poll?: FakeTelegramPollState;
   }>;
   nextMessageId: number;
+}
+
+export interface FakeTelegramPollState {
+  id: string;
+  question: string;
+  options: Array<{ text: string; voterCount: number }>;
+  totalVoterCount: number;
+  isClosed: boolean;
+  isAnonymous: boolean;
+  type: string;
+  allowsMultipleAnswers: boolean;
+  allowsRevoting?: boolean;
+  voters: Map<string, number>;
 }
 
 export interface FakeLeaderboardTelegramState {
@@ -612,9 +772,11 @@ export interface FakeLeaderboardTelegramState {
   chats: Map<number, FakeTelegramChatState>;
   /** Forced failures keyed by `${token}:${method}` */
   failures?: Map<string, LeaderboardTelegramApiError>;
-  webhooks?: Map<string, { url: string; secretToken?: string }>;
+  webhooks?: Map<string, { url: string; secretToken?: string; allowedUpdates?: readonly string[] }>;
   pendingUpdates?: Map<string, TelegramUpdate[]>;
   callbackAnswers?: Array<{ callbackQueryId: string; text?: string }>;
+  nextPollId?: number;
+  webhookInfo?: Map<string, TelegramWebhookInfo>;
 }
 
 export function createFakeLeaderboardTelegramClient(
@@ -721,6 +883,52 @@ export function createFakeLeaderboardTelegramClient(
         chat: mapFakeChat(chat),
         text,
         date: Math.floor(Date.now() / 1000)
+      };
+    },
+    async sendPoll(token, chatId, options) {
+      fail(token, "sendPoll");
+      requireBot(token);
+      if (options.options.length !== 4) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: poll must have exactly 4 options in tests",
+          permanent: true
+        });
+      }
+      const id = Number(chatId);
+      let chat = state.chats.get(id);
+      if (!chat) {
+        chat = {
+          id,
+          type: "channel",
+          members: new Map(),
+          messages: [],
+          nextMessageId: 1
+        };
+        state.chats.set(id, chat);
+      }
+      const messageId = chat.nextMessageId++;
+      const pollId = `tg-poll-${state.nextPollId ?? 1}`;
+      state.nextPollId = (state.nextPollId ?? 1) + 1;
+      const poll: FakeTelegramPollState = {
+        id: pollId,
+        question: options.question,
+        options: options.options.map((text) => ({ text, voterCount: 0 })),
+        totalVoterCount: 0,
+        isClosed: false,
+        isAnonymous: options.isAnonymous ?? false,
+        type: options.type ?? "regular",
+        allowsMultipleAnswers: options.allowsMultipleAnswers ?? false,
+        allowsRevoting: options.allowsRevoting ?? false,
+        voters: new Map()
+      };
+      chat.messages.push({ messageId, poll });
+      return {
+        messageId,
+        chat: mapFakeChat(chat),
+        date: Math.floor(Date.now() / 1000),
+        poll: mapFakePoll(poll)
       };
     },
     async sendPhoto(token, chatId, photo, options) {
@@ -893,18 +1101,63 @@ export function createFakeLeaderboardTelegramClient(
       msg.deleted = true;
       return true;
     },
+    async stopPoll(token, chatId, messageId) {
+      fail(token, "stopPoll");
+      requireBot(token);
+      const chat = requireChat(chatId);
+      const msg = chat.messages.find((m) => m.messageId === messageId && !m.deleted);
+      if (!msg?.poll) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: message to stop poll not found",
+          permanent: true
+        });
+      }
+      if (msg.poll.isClosed) {
+        throw new LeaderboardTelegramApiError({
+          httpStatus: 400,
+          telegramErrorCode: 400,
+          description: "Bad Request: poll has already been closed",
+          permanent: true
+        });
+      }
+      msg.poll.isClosed = true;
+      return mapFakePoll(msg.poll);
+    },
     async setWebhook(token, url, secretToken) {
       fail(token, "setWebhook");
       requireBot(token);
       if (!state.webhooks) state.webhooks = new Map();
-      state.webhooks.set(token, secretToken ? { url, secretToken } : { url });
+      const allowedUpdates = [...LEADERBOARD_BOT_ALLOWED_UPDATES];
+      state.webhooks.set(token, secretToken ? { url, secretToken, allowedUpdates } : { url, allowedUpdates });
+      if (!state.webhookInfo) state.webhookInfo = new Map();
+      state.webhookInfo.set(token, {
+        url,
+        hasCustomCertificate: false,
+        pendingUpdateCount: 0,
+        allowedUpdates
+      });
       return true;
     },
     async deleteWebhook(token) {
       fail(token, "deleteWebhook");
       requireBot(token);
       state.webhooks?.delete(token);
+      state.webhookInfo?.delete(token);
       return true;
+    },
+    async getWebhookInfo(token) {
+      fail(token, "getWebhookInfo");
+      requireBot(token);
+      return (
+        state.webhookInfo?.get(token) ?? {
+          url: state.webhooks?.get(token)?.url ?? "",
+          hasCustomCertificate: false,
+          pendingUpdateCount: 0,
+          allowedUpdates: state.webhooks?.get(token)?.allowedUpdates ?? []
+        }
+      );
     },
     async getUpdates(token, options) {
       fail(token, "getUpdates");
@@ -941,11 +1194,14 @@ function normalizeSendMessageOptions(
 function mapUpdate(raw: Record<string, unknown>): TelegramUpdate {
   const messageRaw = raw.message as Record<string, unknown> | undefined;
   const callbackRaw = raw.callback_query as Record<string, unknown> | undefined;
+  const pollRaw = raw.poll as Record<string, unknown> | undefined;
+  const pollAnswerRaw = raw.poll_answer as Record<string, unknown> | undefined;
   const update: TelegramUpdate = { updateId: Number(raw.update_id) };
 
   if (messageRaw) {
     const fromRaw = messageRaw.from as Record<string, unknown> | undefined;
     const chatRaw = (messageRaw.chat ?? {}) as Record<string, unknown>;
+    const pollInMessage = messageRaw.poll as Record<string, unknown> | undefined;
     return {
       ...update,
       message: {
@@ -953,7 +1209,8 @@ function mapUpdate(raw: Record<string, unknown>): TelegramUpdate {
         date: Number(messageRaw.date ?? 0),
         chat: mapChat(chatRaw),
         ...(messageRaw.text != null ? { text: String(messageRaw.text) } : {}),
-        ...(fromRaw ? { from: mapUser(fromRaw) } : {})
+        ...(fromRaw ? { from: mapUser(fromRaw) } : {}),
+        ...(pollInMessage ? { poll: mapPoll(pollInMessage) } : {})
       },
       ...(callbackRaw ? { callbackQuery: mapCallbackQuery(callbackRaw) } : {})
     };
@@ -961,6 +1218,14 @@ function mapUpdate(raw: Record<string, unknown>): TelegramUpdate {
 
   if (callbackRaw) {
     return { ...update, callbackQuery: mapCallbackQuery(callbackRaw) };
+  }
+
+  if (pollAnswerRaw) {
+    return { ...update, pollAnswer: mapPollAnswer(pollAnswerRaw) };
+  }
+
+  if (pollRaw) {
+    return { ...update, poll: mapPoll(pollRaw) };
   }
 
   return update;
@@ -1008,4 +1273,51 @@ function mapFakeChat(chat: FakeTelegramChatState): TelegramChat {
     return { ...mapped, username: chat.username };
   }
   return mapped;
+}
+
+function mapFakePoll(poll: FakeTelegramPollState): TelegramPoll {
+  const mapped: TelegramPoll = {
+    id: poll.id,
+    question: poll.question,
+    options: poll.options.map((option) => ({ text: option.text, voterCount: option.voterCount })),
+    totalVoterCount: poll.totalVoterCount,
+    isClosed: poll.isClosed,
+    isAnonymous: poll.isAnonymous,
+    type: poll.type,
+    allowsMultipleAnswers: poll.allowsMultipleAnswers
+  };
+  if (poll.allowsRevoting != null) {
+    return { ...mapped, allowsRevoting: poll.allowsRevoting };
+  }
+  return mapped;
+}
+
+export function applyFakePollAnswer(
+  state: FakeLeaderboardTelegramState,
+  pollId: string,
+  userId: string,
+  optionIds: readonly number[]
+): void {
+  for (const chat of state.chats.values()) {
+    const msg = chat.messages.find((m) => m.poll?.id === pollId && !m.deleted);
+    if (!msg?.poll) continue;
+    if (msg.poll.isClosed) return;
+    if (optionIds.length === 0) {
+      msg.poll.voters.delete(userId);
+    } else {
+      const optionIndex = optionIds[0];
+      if (optionIndex == null || optionIndex < 0 || optionIndex > 3) return;
+      msg.poll.voters.set(userId, optionIndex);
+    }
+    const counts = [0, 0, 0, 0];
+    for (const index of msg.poll.voters.values()) {
+      if (index >= 0 && index < 4) counts[index] = (counts[index] ?? 0) + 1;
+    }
+    msg.poll.options = msg.poll.options.map((option, index) => ({
+      ...option,
+      voterCount: counts[index] ?? 0
+    }));
+    msg.poll.totalVoterCount = msg.poll.voters.size;
+    return;
+  }
 }

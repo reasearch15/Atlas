@@ -1946,6 +1946,7 @@ model EngagementPoll {
   category             String?               @db.VarChar(80)
   channelId            String?               @map("channel_id") @db.VarChar(64)
   telegramMessageId    String?               @map("telegram_message_id") @db.VarChar(64)
+  telegramPollId       String?               @unique @map("telegram_poll_id") @db.VarChar(64)
   postedAt             DateTime?             @map("posted_at")
   closedAt             DateTime?             @map("closed_at")
   closeEditedAt        DateTime?             @map("close_edited_at")

@@ -4,7 +4,7 @@ import {
   type EncryptedSecret
 } from "@atlas/shared/session-encryption";
 import { LeaderboardBotUpdateHandler } from "./bot-update-handler";
-import { HttpLeaderboardTelegramClient } from "./leaderboard-telegram.client";
+import { HttpLeaderboardTelegramClient, type TelegramUpdate } from "./leaderboard-telegram.client";
 import { LeaderboardTelegramIntegrationService } from "./leaderboard-telegram.integration-service";
 import { LeaderboardTelegramOutboxService, resumeLeaderboardTelegramOutboxSafely } from "./leaderboard-telegram.outbox";
 import { LeaderboardTelegramProcessor } from "./leaderboard-telegram.processor";
@@ -64,7 +64,8 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     encryptionKey: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY,
     startTokenSecret: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY || app.env.JWT_ACCESS_SECRET,
     outbox,
-    engagement
+    engagement,
+    log: app.log
   });
 
   app.decorate("leaderboardTelegramOutbox", outbox);
@@ -78,6 +79,7 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     void resumeLeaderboardTelegramOutboxSafely(outbox, app.log);
     void completeExpiredCompetitionsSafely(lifecycleDomain, app.log);
     void runEngagementSweepSafely(engagement, app.log);
+    void refreshWebhookAllowedUpdatesSafely(integration, app.log);
   }, 2_500);
 
   const maintenance = setInterval(() => {
@@ -155,40 +157,60 @@ async function completeExpiredCompetitionsSafely(
   }
 }
 
-function mapPollingUpdate(update: {
-  readonly updateId: number;
-  readonly message?: {
-    readonly messageId: number;
-    readonly text?: string;
-    readonly date: number;
-    readonly chat: { readonly id: number; readonly type: string };
-    readonly from?: {
-      readonly id: number;
-      readonly isBot: boolean;
-      readonly firstName: string;
-      readonly lastName?: string;
-      readonly username?: string;
-    };
-  };
-  readonly callbackQuery?: {
-    readonly id: string;
-    readonly from: {
-      readonly id: number;
-      readonly isBot: boolean;
-      readonly firstName: string;
-      readonly lastName?: string;
-      readonly username?: string;
-    };
-    readonly data?: string;
-    readonly message?: {
-      readonly messageId: number;
-      readonly chat: { readonly id: number; readonly type: string };
-    };
-  };
-}): import("./bot-update-handler").InboundTelegramUpdate {
+async function refreshWebhookAllowedUpdatesSafely(
+  integration: Pick<LeaderboardTelegramIntegrationService, "refreshWebhookAllowedUpdates">,
+  log: { info: (obj: unknown, msg?: string) => void; warn: (obj: unknown, msg?: string) => void }
+): Promise<void> {
+  try {
+    const refreshed = await integration.refreshWebhookAllowedUpdates();
+    if (refreshed > 0) {
+      log.info({ refreshed }, "Refreshed Telegram webhook allowed_updates");
+    }
+  } catch (error) {
+    log.warn({ err: error }, "Failed to refresh Telegram webhook allowed_updates");
+  }
+}
+
+function mapPollingUpdate(update: TelegramUpdate): import("./bot-update-handler").InboundTelegramUpdate {
   const mapped: import("./bot-update-handler").InboundTelegramUpdate = {
     update_id: update.updateId
   };
+
+  if (update.pollAnswer) {
+    return {
+      ...mapped,
+      poll_answer: {
+        poll_id: update.pollAnswer.pollId,
+        option_ids: update.pollAnswer.optionIds,
+        ...(update.pollAnswer.user
+          ? {
+              user: {
+                id: update.pollAnswer.user.id,
+                is_bot: update.pollAnswer.user.isBot,
+                first_name: update.pollAnswer.user.firstName,
+                ...(update.pollAnswer.user.lastName !== undefined
+                  ? { last_name: update.pollAnswer.user.lastName }
+                  : {}),
+                ...(update.pollAnswer.user.username !== undefined
+                  ? { username: update.pollAnswer.user.username }
+                  : {})
+              }
+            }
+          : {})
+      }
+    };
+  }
+
+  if (update.poll) {
+    return {
+      ...mapped,
+      poll: {
+        id: update.poll.id,
+        is_closed: update.poll.isClosed,
+        options: update.poll.options.map((option) => ({ voter_count: option.voterCount }))
+      }
+    };
+  }
 
   if (update.message) {
     const msg = update.message;

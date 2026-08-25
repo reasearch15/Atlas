@@ -100,9 +100,13 @@ export interface BotUpdateHandlerDeps {
   readonly wheel?: BotWheelServicePort;
   readonly freeplay?: BotFreeplayServicePort;
   readonly outbox?: BotTelegramOutboxPort;
-  readonly engagement?: Pick<EngagementService, "voteFromCallback">;
+  readonly engagement?: Pick<EngagementService, "voteFromCallback" | "voteFromPollAnswer" | "persistNativePollCounts">;
   /** Test-only RNG injection for Telegram spins. */
   readonly createWheelRng?: () => WheelRng;
+  readonly log?: {
+    info: (obj: unknown, msg?: string) => void;
+    warn: (obj: unknown, msg?: string) => void;
+  };
 }
 
 export interface InboundTelegramUpdate {
@@ -135,6 +139,22 @@ export interface InboundTelegramUpdate {
       readonly chat?: { readonly id?: number; readonly type?: string };
     };
   };
+  readonly poll?: {
+    readonly id?: string;
+    readonly is_closed?: boolean;
+    readonly options?: ReadonlyArray<{ readonly voter_count?: number }>;
+  };
+  readonly poll_answer?: {
+    readonly poll_id?: string;
+    readonly user?: {
+      readonly id?: number;
+      readonly is_bot?: boolean;
+      readonly first_name?: string;
+      readonly last_name?: string;
+      readonly username?: string;
+    };
+    readonly option_ids?: readonly number[];
+  };
 }
 
 const WELCOME =
@@ -152,8 +172,12 @@ export class LeaderboardBotUpdateHandler {
   private readonly wheel: BotWheelServicePort;
   private readonly freeplay: BotFreeplayServicePort;
   private readonly outbox: BotTelegramOutboxPort | null;
-  private readonly engagement: Pick<EngagementService, "voteFromCallback">;
+  private readonly engagement: Pick<
+    EngagementService,
+    "voteFromCallback" | "voteFromPollAnswer" | "persistNativePollCounts"
+  >;
   private readonly createWheelRng: () => WheelRng;
+  private readonly log?: BotUpdateHandlerDeps["log"];
 
   public constructor(deps: BotUpdateHandlerDeps) {
     this.prisma = deps.prisma;
@@ -166,6 +190,7 @@ export class LeaderboardBotUpdateHandler {
     this.outbox = deps.outbox ?? null;
     this.engagement = deps.engagement ?? new EngagementService(deps.prisma);
     this.createWheelRng = deps.createWheelRng ?? createCryptoWheelRng;
+    this.log = deps.log;
   }
 
   public async handleWebhook(input: {
@@ -225,6 +250,16 @@ export class LeaderboardBotUpdateHandler {
       this.encryptionKey
     );
 
+    if (update.poll_answer) {
+      await this.handlePollAnswer({ integration, update });
+      return;
+    }
+
+    if (update.poll) {
+      await this.handlePollUpdate(update.poll);
+      return;
+    }
+
     if (update.callback_query) {
       await this.handleCallbackQuery({ integration, token, update });
       return;
@@ -258,6 +293,48 @@ export class LeaderboardBotUpdateHandler {
         telegramUserId
       });
     }
+  }
+
+  private async handlePollAnswer(input: {
+    integration: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+    };
+    update: InboundTelegramUpdate;
+  }): Promise<void> {
+    const answer = input.update.poll_answer;
+    const telegramPollId = answer?.poll_id?.trim() ?? "";
+    const telegramUserId = answer?.user?.id;
+    const optionIds = answer?.option_ids ?? [];
+    this.log?.info(
+      {
+        telegramPollId,
+        telegramUserId: telegramUserId ?? null,
+        optionIds,
+        hasUser: telegramUserId != null
+      },
+      "engagement.poll_answer"
+    );
+    if (!telegramPollId || telegramUserId == null || answer?.user?.is_bot) return;
+    await this.engagement.voteFromPollAnswer({
+      botIntegrationId: input.integration.id,
+      ownerCoadminUserId: input.integration.ownerCoadminUserId,
+      workspaceId: input.integration.workspaceId,
+      telegramUserId: String(telegramUserId),
+      telegramPollId,
+      optionIds
+    });
+  }
+
+  private async handlePollUpdate(poll: NonNullable<InboundTelegramUpdate["poll"]>): Promise<void> {
+    const telegramPollId = poll.id?.trim() ?? "";
+    if (!telegramPollId || !poll.is_closed) return;
+    await this.engagement.persistNativePollCounts({
+      telegramPollId,
+      isClosed: true,
+      options: (poll.options ?? []).map((option) => ({ voterCount: Number(option.voter_count ?? 0) }))
+    });
   }
 
   private async handleCallbackQuery(input: {

@@ -17,7 +17,8 @@ function pollChannelMessages(state: FakeLeaderboardTelegramState) {
   return (state.chats.get(Number(channelId))?.messages ?? []).filter(
     (m) =>
       !m.deleted &&
-      (m.text?.includes("WHICH WOULD YOU CHOOSE") ||
+      (Boolean(m.poll) ||
+        m.text?.includes("WHICH WOULD YOU CHOOSE") ||
         m.text?.includes("POLL RESULTS") ||
         m.text?.includes("POLL CLOSED"))
   );
@@ -44,7 +45,7 @@ function setup(now = chicagoWallTimeToUtc("2026-08-25T10:00:00"), questions = ti
     ])
   };
   const client = createFakeLeaderboardTelegramClient(state);
-  const runtime = new MemoryEngagementRuntime(undefined, client);
+  const runtime = new MemoryEngagementRuntime(undefined, client, state);
   runtime.importQuestions(questions);
   runtime.integrations.push({
     id: integrationId,
@@ -138,7 +139,7 @@ describe("engagement voting and settlement", () => {
     expect(pollChannelMessages(state)).toHaveLength(1);
   });
 
-  it("closes with percentages and removes voting controls", async () => {
+  it("closes with native stopPoll on the same message", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
@@ -147,75 +148,98 @@ describe("engagement voting and settlement", () => {
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
     const message = state.chats.get(Number(channelId))?.messages[0];
     expect(String(message?.messageId)).toBe(openMessageId);
-    expect(message?.text).toContain("POLL RESULTS");
-    expect(message?.text).toContain("🏆 Winning choice:");
-    expect(message?.text).toMatch(/— 100%/);
-    expect(message?.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(message?.poll?.isClosed).toBe(true);
+    expect(message?.poll?.options.map((option) => option.voterCount)).toEqual([1, 0, 0, 0]);
+    expect(message?.replyMarkup).toBeUndefined();
     expect(poll.closeEditedAt).not.toBeNull();
   });
 });
 
 describe("engagement poll presentation", () => {
-  it("posts an open poll with a timed-vote hint and four buttons, without percentages", async () => {
+  it("posts a native Telegram poll with four approved options and no callback buttons", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     const message = state.chats.get(Number(channelId))?.messages.find(
       (m) => String(m.messageId) === poll.telegramMessageId
     );
-    expect(message?.text).toContain("WHICH WOULD YOU CHOOSE");
-    expect(message?.text).toContain(poll.questionText ?? "");
-    expect(message?.text).toContain("👇 Vote below — results in 4 hours");
-    expect(message?.text).not.toMatch(/\d+%/);
-    expect(message?.replyMarkup?.inline_keyboard).toHaveLength(4);
-    expect(message?.replyMarkup?.inline_keyboard?.map((row) => row[0]?.text)).toEqual([
+    expect(poll.telegramPollId).toBeTruthy();
+    expect(message?.poll?.id).toBe(poll.telegramPollId);
+    expect(message?.poll?.question).toBe(poll.questionText);
+    expect(message?.poll?.isAnonymous).toBe(false);
+    expect(message?.poll?.type).toBe("regular");
+    expect(message?.poll?.allowsMultipleAnswers).toBe(false);
+    expect(message?.poll?.allowsRevoting).toBe(false);
+    expect(message?.poll?.options.map((option) => option.text)).toEqual([
       poll.option1,
       poll.option2,
       poll.option3,
       poll.option4
     ]);
+    expect(message?.replyMarkup).toBeUndefined();
+    expect(message?.text).toBeUndefined();
   });
 
-  it("does not edit the public message after individual votes", async () => {
+  it("does not edit the public native poll after individual votes", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const before = state.chats.get(Number(channelId))?.messages[0]?.text;
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
-    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 1, now: new Date() });
+    const before = state.chats.get(Number(channelId))?.messages[0];
+    runtime.voteFromPollAnswer({
+      telegramPollId: poll.telegramPollId!,
+      telegramUserId: "100",
+      optionIds: [0],
+      now: new Date()
+    });
+    runtime.voteFromPollAnswer({
+      telegramPollId: poll.telegramPollId!,
+      telegramUserId: "200",
+      optionIds: [1],
+      now: new Date()
+    });
     const after = state.chats.get(Number(channelId))?.messages[0];
-    expect(after?.text).toBe(before);
-    expect(after?.text).not.toMatch(/\d+%/);
-    expect(after?.replyMarkup?.inline_keyboard).toHaveLength(4);
+    expect(after?.messageId).toBe(before?.messageId);
+    expect(after?.poll?.isClosed).toBe(false);
+    expect(after?.replyMarkup).toBeUndefined();
     expect(pollChannelMessages(state)).toHaveLength(1);
   });
 
-  it("edits the same message on close using percentages from stored votes", async () => {
+  it("closes the same native poll message with Telegram voter counts", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     const openMessageId = poll.telegramMessageId;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: new Date() });
-    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 0, now: new Date() });
-    runtime.vote({ pollId: poll.id, telegramUserId: "300", optionIndex: 1, now: new Date() });
+    runtime.voteFromPollAnswer({
+      telegramPollId: poll.telegramPollId!,
+      telegramUserId: "100",
+      optionIds: [0],
+      now: new Date()
+    });
+    runtime.voteFromPollAnswer({
+      telegramPollId: poll.telegramPollId!,
+      telegramUserId: "200",
+      optionIds: [0],
+      now: new Date()
+    });
+    runtime.voteFromPollAnswer({
+      telegramPollId: poll.telegramPollId!,
+      telegramUserId: "300",
+      optionIds: [1],
+      now: new Date()
+    });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
     const message = state.chats.get(Number(channelId))?.messages.find(
       (m) => String(m.messageId) === openMessageId
     );
     expect(runtime.votes).toHaveLength(3);
     expect(poll.optionCounts).toEqual([2, 1, 0, 0]);
-    expect(message?.text).toContain("POLL RESULTS");
-    expect(message?.text).toContain(`${poll.option1} — 67%`);
-    expect(message?.text).toContain(`${poll.option2} — 33%`);
-    expect(message?.text).toContain(`${poll.option3} — 0%`);
-    expect(message?.text).toContain(`${poll.option4} — 0%`);
-    expect(message?.text).toContain(`🥇 ${poll.option1} — 67%`);
-    expect(message?.text).toContain(`🏆 Winning choice: ${poll.option1}`);
-    expect(message?.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(message?.poll?.isClosed).toBe(true);
+    expect(message?.poll?.options.map((option) => option.voterCount)).toEqual([2, 1, 0, 0]);
+    expect(poll.winningOptionIndex).toBe(0);
     expect(pollChannelMessages(state).filter((m) => String(m.messageId) === openMessageId)).toHaveLength(1);
   });
 
-  it("handles a zero-vote close without awarding points", async () => {
+  it("handles a zero-vote native close without awarding points", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
@@ -224,32 +248,27 @@ describe("engagement poll presentation", () => {
     expect(poll.status).toBe("SETTLED");
     expect(poll.winningOptionIndex).toBeNull();
     expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
-    expect(message?.text).toContain("POLL RESULTS");
-    expect(message?.text).toContain(poll.questionText ?? "");
-    expect(message?.text).toContain("No votes this round.");
-    expect(message?.text).not.toMatch(/\d+%/);
-    expect(message?.text).not.toContain("Winning choice");
-    expect(message?.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(message?.poll?.isClosed).toBe(true);
+    expect(message?.poll?.totalVoterCount).toBe(0);
   });
 
-  it("does not re-edit a closed poll inconsistently on retry", async () => {
+  it("does not re-stop a closed native poll inconsistently on retry", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 2, now: new Date() });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
     const closed = state.chats.get(Number(channelId))?.messages[0];
-    const closedText = closed?.text;
-    const closedMarkup = closed?.replyMarkup;
     const firstCloseAt = poll.closeEditedAt;
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:30"));
     expect(poll.closeEditedAt).toEqual(firstCloseAt);
-    expect(state.chats.get(Number(channelId))?.messages[0]?.text).toBe(closedText);
-    expect(state.chats.get(Number(channelId))?.messages[0]?.replyMarkup).toEqual(closedMarkup);
+    expect(state.chats.get(Number(channelId))?.messages[0]?.poll?.isClosed).toBe(true);
+    expect(state.chats.get(Number(channelId))?.messages[0]?.messageId).toBe(closed?.messageId);
     poll.closeEditedAt = null;
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:01:00"));
-    expect(state.chats.get(Number(channelId))?.messages[0]?.text).toBe(closedText);
-    expect(state.chats.get(Number(channelId))?.messages[0]?.replyMarkup?.inline_keyboard).toEqual([]);
+    const original = state.chats.get(Number(channelId))?.messages.find((m) => m.messageId === closed?.messageId);
+    expect(original?.poll?.isClosed).toBe(true);
+    expect(original?.poll?.options.map((option) => option.voterCount)).toEqual(closed?.poll?.options.map((option) => option.voterCount));
   });
 });
 
@@ -539,3 +558,185 @@ describe("engagement freeplay grants", () => {
     expect(runtime.claims.find((c) => c.source === "WHEEL")?.spinId).toBe("spin-1");
   });
 });
+
+describe("native poll answers and scoring", () => {
+  it("routes poll_answer by Telegram poll id and ignores username", async () => {
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: poll.telegramPollId!,
+        telegramUserId: "100",
+        optionIds: [2],
+        now: new Date(),
+        username: "spoofed"
+      })
+    ).toBe("recorded");
+    expect(runtime.votes[0]?.crmContactId).toBe(contactA);
+    expect(runtime.votes[0]?.optionIndex).toBe(2);
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: "missing-poll",
+        telegramUserId: "100",
+        optionIds: [0],
+        now: new Date()
+      })
+    ).toBe("not_found");
+  });
+
+  it("updates a changed answer, handles empty option_ids, and is duplicate-safe", async () => {
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: poll.telegramPollId!,
+        telegramUserId: "100",
+        optionIds: [0],
+        now: new Date()
+      })
+    ).toBe("recorded");
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: poll.telegramPollId!,
+        telegramUserId: "100",
+        optionIds: [0],
+        now: new Date()
+      })
+    ).toBe("recorded");
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: poll.telegramPollId!,
+        telegramUserId: "100",
+        optionIds: [3],
+        now: new Date()
+      })
+    ).toBe("updated");
+    expect(runtime.votes).toHaveLength(1);
+    expect(runtime.votes[0]?.optionIndex).toBe(3);
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: poll.telegramPollId!,
+        telegramUserId: "100",
+        optionIds: [],
+        now: new Date()
+      })
+    ).toBe("withdrawn");
+    expect(runtime.votes).toHaveLength(0);
+  });
+
+  it("gives unregistered voters no points while still counting them in the public winner", async () => {
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: poll.telegramPollId!,
+        telegramUserId: "999",
+        optionIds: [1],
+        now: new Date()
+      })
+    ).toBe("unregistered");
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: poll.telegramPollId!,
+        telegramUserId: "888",
+        optionIds: [1],
+        now: new Date()
+      })
+    ).toBe("unregistered");
+    expect(
+      runtime.voteFromPollAnswer({
+        telegramPollId: poll.telegramPollId!,
+        telegramUserId: "100",
+        optionIds: [0],
+        now: new Date()
+      })
+    ).toBe("recorded");
+    expect(runtime.votes).toHaveLength(1);
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    const message = state.chats.get(Number(channelId))?.messages[0];
+    expect(message?.poll?.options.map((option) => option.voterCount)).toEqual([1, 2, 0, 0]);
+    expect(poll.winningOptionIndex).toBe(1);
+    const awards = runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION");
+    expect(awards).toHaveLength(1);
+    expect(awards[0]?.crmContactId).toBe(contactA);
+    expect(awards[0]?.points).toBe(5);
+  });
+
+  it("uses the lowest option index on a native-count tie and awards 10 vs 5 without doubling", async () => {
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = runtime.polls.find((p) => p.status === "OPEN")!;
+    runtime.voteFromPollAnswer({
+      telegramPollId: poll.telegramPollId!,
+      telegramUserId: "100",
+      optionIds: [1],
+      now: new Date()
+    });
+    runtime.voteFromPollAnswer({
+      telegramPollId: poll.telegramPollId!,
+      telegramUserId: "200",
+      optionIds: [2],
+      now: new Date()
+    });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:30"));
+    expect(poll.winningOptionIndex).toBe(1);
+    const awards = runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION");
+    expect(awards).toHaveLength(2);
+    expect(awards.find((row) => row.crmContactId === contactA)?.points).toBe(10);
+    expect(awards.find((row) => row.crmContactId === contactB)?.points).toBe(5);
+    expect(awards.some((row) => row.points === 15)).toBe(false);
+  });
+
+  it("keeps old custom-button polls working without a Telegram poll id", async () => {
+    const legacyState: FakeLeaderboardTelegramState = {
+      bots: new Map([["token", { id: 1, isBot: true, firstName: "Bot", username: "sayubot" }]]),
+      chats: new Map([
+        [
+          Number(channelId),
+          { id: Number(channelId), type: "channel", members: new Map(), messages: [], nextMessageId: 1 }
+        ]
+      ])
+    };
+    const fullClient = createFakeLeaderboardTelegramClient(legacyState);
+    const legacyRuntime = new MemoryEngagementRuntime(undefined, {
+      sendMessage: fullClient.sendMessage.bind(fullClient),
+      editMessageText: fullClient.editMessageText.bind(fullClient)
+    });
+    legacyRuntime.importQuestions(tinyBank());
+    legacyRuntime.integrations.push({
+      id: integrationId,
+      workspaceId: workspace,
+      ownerCoadminUserId: owner,
+      channelId,
+      postingEnabled: true,
+      disconnectedAt: null,
+      botToken: "token"
+    });
+    legacyRuntime.contacts.set(contactA, { displayName: "Emily" });
+    legacyRuntime.playerLinks.push({
+      botIntegrationId: integrationId,
+      telegramUserId: "100",
+      crmContactId: contactA,
+      ownerCoadminUserId: owner
+    });
+    await legacyRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const poll = legacyRuntime.polls.find((p) => p.status === "OPEN")!;
+    expect(poll.telegramPollId).toBeNull();
+    const open = legacyState.chats.get(Number(channelId))?.messages[0];
+    expect(open?.replyMarkup?.inline_keyboard).toHaveLength(4);
+    expect(
+      legacyRuntime.voteFromCallback(buildVoteCallbackData(poll.id, 0), "100", new Date())
+    ).toBe("recorded");
+    await legacyRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    const closed = legacyState.chats.get(Number(channelId))?.messages[0];
+    expect(String(closed?.messageId)).toBe(poll.telegramMessageId);
+    expect(closed?.text).toContain("POLL RESULTS");
+    expect(closed?.replyMarkup?.inline_keyboard).toEqual([]);
+    expect(legacyRuntime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")[0]?.points).toBe(10);
+  });
+});
+

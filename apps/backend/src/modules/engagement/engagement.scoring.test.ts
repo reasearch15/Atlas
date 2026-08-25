@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { chicagoWallTimeToUtc } from "../leaderboard/competition-schedule";
 import {
+  nativeCountsFromPollOptions,
+  parseStoredOptionCounts,
   pollPointsForVote,
   referralContributionAtDeclaration,
   referralDecaySteps,
@@ -22,6 +24,25 @@ describe("engagement scoring", () => {
     expect(winningOptionIndex([10, 20, 20, 5])).toBe(1);
     expect(winningOptionIndex([0, 0, 0, 0])).toBe(0);
     expect(winningOptionIndex([3, 2, 2, 2])).toBe(0);
+  });
+
+  it("parses native Telegram option voter counts for the public winner", () => {
+    expect(parseStoredOptionCounts([4, 1, 0, 0])).toEqual([4, 1, 0, 0]);
+    expect(parseStoredOptionCounts([1, 2])).toBeNull();
+    expect(
+      nativeCountsFromPollOptions([
+        { voterCount: 4 },
+        { voterCount: 1 },
+        { voterCount: 0 },
+        { voterCount: 0 }
+      ])
+    ).toEqual([4, 1, 0, 0]);
+    expect(winningOptionIndex(nativeCountsFromPollOptions([
+      { voterCount: 1 },
+      { voterCount: 3 },
+      { voterCount: 3 },
+      { voterCount: 0 }
+    ])!)).toBe(1);
   });
 
   it("does not let rounded percentages choose the winner", () => {

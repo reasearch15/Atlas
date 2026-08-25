@@ -28,12 +28,27 @@ import {
   referralContributionAtDeclaration,
   referralContributionIdempotencyKey,
   countOptionVotes,
+  parseStoredOptionCounts,
+  nativeCountsFromPollOptions,
   winningOptionIndex,
   type EngagementScoreTotal
 } from "./engagement.scoring";
 import { shuffleIds, validateQuestionBank, type EngagementQuestionInput } from "./question-bank";
+import {
+  applyFakePollAnswer,
+  type FakeLeaderboardTelegramState,
+  type LeaderboardTelegramClient
+} from "../leaderboard/telegram/leaderboard-telegram.client";
 
-export type VoteStatus = "recorded" | "already_voted" | "unregistered" | "closed" | "not_found" | "invalid";
+export type VoteStatus =
+  | "recorded"
+  | "already_voted"
+  | "updated"
+  | "withdrawn"
+  | "unregistered"
+  | "closed"
+  | "not_found"
+  | "invalid";
 
 export interface MemoryQuestion {
   id: string;
@@ -67,6 +82,7 @@ export interface MemoryPoll {
   category: string | null;
   channelId: string | null;
   telegramMessageId: string | null;
+  telegramPollId: string | null;
   postedAt: Date | null;
   closedAt: Date | null;
   closeEditedAt: Date | null;
@@ -128,21 +144,9 @@ export interface MemoryFreeplayClaim {
   rewardAmountCents: number;
 }
 
-type ChannelClient = {
-  sendMessage(
-    token: string,
-    chatId: string | number,
-    text: string,
-    options?: { readonly replyMarkup?: ReturnType<typeof buildPollInlineKeyboard> | typeof EMPTY_INLINE_KEYBOARD }
-  ): Promise<{ readonly messageId: number }>;
-  editMessageText(
-    token: string,
-    chatId: string | number,
-    messageId: number,
-    text: string,
-    parseMode?: string,
-    replyMarkup?: typeof EMPTY_INLINE_KEYBOARD
-  ): Promise<unknown>;
+type ChannelClient = Pick<LeaderboardTelegramClient, "sendMessage" | "editMessageText"> & {
+  sendPoll?: LeaderboardTelegramClient["sendPoll"];
+  stopPoll?: LeaderboardTelegramClient["stopPoll"];
 };
 
 export class MemoryEngagementRuntime {
@@ -190,7 +194,8 @@ export class MemoryEngagementRuntime {
 
   public constructor(
     private readonly random = Math.random,
-    private readonly client?: ChannelClient
+    private readonly client?: ChannelClient,
+    private readonly telegramState?: FakeLeaderboardTelegramState
   ) {}
 
   private lock<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -272,7 +277,55 @@ export class MemoryEngagementRuntime {
       optionIndex: input.optionIndex,
       votedAt: input.now
     });
+    this.syncNativePollVote(poll, input.telegramUserId, [input.optionIndex]);
     return "recorded";
+  }
+
+  public voteFromPollAnswer(input: {
+    readonly telegramPollId: string;
+    readonly telegramUserId: string;
+    readonly optionIds: readonly number[];
+    readonly now: Date;
+    readonly username?: string;
+  }): VoteStatus {
+    const poll = this.polls.find((p) => p.telegramPollId === input.telegramPollId);
+    if (!poll) return "not_found";
+    if (poll.status !== "OPEN" || input.now.getTime() >= poll.closesAt.getTime()) return "closed";
+    this.syncNativePollVote(poll, input.telegramUserId, input.optionIds);
+    const existing = this.votes.find(
+      (v) => v.pollId === poll.id && v.telegramUserId === input.telegramUserId
+    );
+    if (input.optionIds.length === 0) {
+      if (existing) {
+        this.votes.splice(this.votes.indexOf(existing), 1);
+      }
+      return "withdrawn";
+    }
+    const optionIndex = input.optionIds[0];
+    if (optionIndex == null || optionIndex < 0 || optionIndex > 3) return "invalid";
+    const link = this.playerLinks.find(
+      (l) => l.botIntegrationId === poll.botIntegrationId && l.telegramUserId === input.telegramUserId
+    );
+    if (!link || link.ownerCoadminUserId !== poll.ownerCoadminUserId) return "unregistered";
+    if (existing) {
+      if (existing.optionIndex === optionIndex) return "recorded";
+      existing.optionIndex = optionIndex;
+      existing.votedAt = input.now;
+      return "updated";
+    }
+    this.votes.push({
+      pollId: poll.id,
+      telegramUserId: input.telegramUserId,
+      crmContactId: link.crmContactId,
+      optionIndex,
+      votedAt: input.now
+    });
+    return "recorded";
+  }
+
+  private syncNativePollVote(poll: MemoryPoll, telegramUserId: string, optionIds: readonly number[]): void {
+    if (!poll.telegramPollId || !this.telegramState) return;
+    applyFakePollAnswer(this.telegramState, poll.telegramPollId, telegramUserId, optionIds);
   }
 
   public voteFromCallback(data: string, telegramUserId: string, now: Date, username?: string): VoteStatus {
@@ -396,6 +449,7 @@ export class MemoryEngagementRuntime {
         category: null,
         channelId: integration.channelId,
         telegramMessageId: null,
+        telegramPollId: null,
         postedAt: null,
         closedAt: null,
         closeEditedAt: null,
@@ -430,20 +484,33 @@ export class MemoryEngagementRuntime {
       this.enqueue("POST_ENGAGEMENT_POLL", postPollOutboxKey(poll.id), { pollId: poll.id });
       if (this.client && integration.channelId && poll.questionText && poll.option1) {
         if (!poll.telegramMessageId) {
-          const sent = await this.client.sendMessage(
-            integration.botToken,
-            integration.channelId,
-            formatOpenPollMessage(poll.questionText),
-            {
-              replyMarkup: buildPollInlineKeyboard(poll.id, [
-                poll.option1,
-                poll.option2!,
-                poll.option3!,
-                poll.option4!
-              ])
-            }
-          );
-          poll.telegramMessageId = String(sent.messageId);
+          if (this.client.sendPoll) {
+            const sent = await this.client.sendPoll(integration.botToken, integration.channelId, {
+              question: poll.questionText,
+              options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
+              isAnonymous: false,
+              type: "regular",
+              allowsMultipleAnswers: false,
+              allowsRevoting: false
+            });
+            poll.telegramMessageId = String(sent.messageId);
+            poll.telegramPollId = sent.poll?.id ?? null;
+          } else {
+            const sent = await this.client.sendMessage(
+              integration.botToken,
+              integration.channelId,
+              formatOpenPollMessage(poll.questionText),
+              {
+                replyMarkup: buildPollInlineKeyboard(poll.id, [
+                  poll.option1,
+                  poll.option2!,
+                  poll.option3!,
+                  poll.option4!
+                ])
+              }
+            );
+            poll.telegramMessageId = String(sent.messageId);
+          }
         }
         poll.status = "OPEN";
         poll.postedAt = now;
@@ -461,6 +528,30 @@ export class MemoryEngagementRuntime {
           (p.status === "SETTLED" && !p.closeEditedAt && p.telegramMessageId))
     );
     for (const poll of due) {
+      if (poll.telegramPollId) {
+        if (poll.status === "OPEN") poll.status = "CLOSING";
+        this.enqueue("CLOSE_ENGAGEMENT_POLL", closePollOutboxKey(poll.id), { pollId: poll.id });
+        if (this.client?.stopPoll && poll.channelId && poll.telegramMessageId && !poll.closeEditedAt) {
+          let counts = parseStoredOptionCounts(poll.optionCounts);
+          try {
+            const stopped = await this.client.stopPoll(
+              integration.botToken,
+              poll.channelId,
+              Number(poll.telegramMessageId)
+            );
+            counts = nativeCountsFromPollOptions(stopped.options) ?? counts;
+          } catch {
+            // Fake/retry: already-closed polls keep previously stored native counts.
+          }
+          if (counts) poll.optionCounts = counts;
+          if (poll.status !== "SETTLED") this.settlePoll(poll, now);
+          poll.closeEditedAt = now;
+          this.completeOutbox(closePollOutboxKey(poll.id));
+        } else if (poll.status !== "SETTLED") {
+          this.settlePoll(poll, now);
+        }
+        continue;
+      }
       if (poll.status === "OPEN") poll.status = "CLOSING";
       if (poll.status !== "SETTLED") this.settlePoll(poll, now);
       this.enqueue("CLOSE_ENGAGEMENT_POLL", closePollOutboxKey(poll.id), { pollId: poll.id });
@@ -495,7 +586,9 @@ export class MemoryEngagementRuntime {
   private settlePoll(poll: MemoryPoll, now: Date): void {
     if (poll.status === "SETTLED") return;
     const votes = this.votes.filter((v) => v.pollId === poll.id);
-    const counts = countOptionVotes(votes.map((vote) => vote.optionIndex));
+    const registeredCounts = countOptionVotes(votes.map((vote) => vote.optionIndex));
+    const nativeCounts = poll.telegramPollId ? parseStoredOptionCounts(poll.optionCounts) : null;
+    const counts = nativeCounts ?? registeredCounts;
     const totalVotes = counts.reduce((sum, n) => sum + n, 0);
     const winner = totalVotes > 0 ? winningOptionIndex(counts) : null;
     if (winner != null) {
