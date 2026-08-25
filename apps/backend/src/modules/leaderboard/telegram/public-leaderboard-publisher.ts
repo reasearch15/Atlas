@@ -30,7 +30,7 @@ export type PublicLeaderboardDeliveryAction = "SENT_NEW" | "UPDATED_EXISTING";
  * Never editMessageMedia / editMessageText / editMessageCaption for the living board.
  * Mode aliases (`replace` / `send_new` / `edit_or_create`) all use this same lifecycle.
  */
-export type PublicLeaderboardPublishMode = "replace" | "send_new" | "edit_or_create";
+export type PublicLeaderboardPublishMode = "replace" | "send_new" | "edit_or_create" | "archive";
 
 export interface PublicLeaderboardTop10Row {
   readonly crmContactId: string;
@@ -262,7 +262,8 @@ export async function publishPublicLeaderboardSnapshot(
       text: textFallback,
       keyboard,
       competitionId: competition.id,
-      nextTop10
+      nextTop10,
+      preservePrevious: input.mode === "archive"
     });
     return {
       ...delivered,
@@ -281,7 +282,8 @@ export async function publishPublicLeaderboardSnapshot(
       caption,
       keyboard,
       competitionId: competition.id,
-      nextTop10
+      nextTop10,
+      preservePrevious: input.mode === "archive"
     });
     return {
       ...delivered,
@@ -334,6 +336,7 @@ async function deliverPhotoBoard(input: {
   readonly caption: string;
   readonly keyboard: ReturnType<typeof buildPublicLeaderboardKeyboard>;
   readonly nextTop10: readonly PublicLeaderboardTop10Row[];
+  readonly preservePrevious?: boolean;
   readonly logger?: PublishPublicLeaderboardInput["logger"];
 }): Promise<{
   messageId: string;
@@ -378,6 +381,7 @@ async function deliverPhotoBoard(input: {
     if (
       previousMessageId &&
       previousMessageId !== newMessageId &&
+      !input.preservePrevious &&
       (await stillCanonical(input.prisma, input.integrationId, newMessageId, publishChannelId))
     ) {
       deletedPreviousMessageId = await deletePreviousBoardSafely({
@@ -427,6 +431,7 @@ async function deliverTextBoard(input: {
   readonly text: string;
   readonly keyboard: ReturnType<typeof buildPublicLeaderboardKeyboard>;
   readonly nextTop10: readonly PublicLeaderboardTop10Row[];
+  readonly preservePrevious?: boolean;
   readonly logger?: PublishPublicLeaderboardInput["logger"];
 }): Promise<{
   messageId: string;
@@ -460,6 +465,7 @@ async function deliverTextBoard(input: {
     if (
       previousMessageId &&
       previousMessageId !== newMessageId &&
+      !input.preservePrevious &&
       (await stillCanonical(input.prisma, input.integrationId, newMessageId, publishChannelId))
     ) {
       deletedPreviousMessageId = await deletePreviousBoardSafely({

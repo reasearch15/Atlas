@@ -306,6 +306,9 @@ enum LeaderboardTelegramJobType {
   POST_RANK_ANNOUNCEMENT
   VERIFY_MEMBERSHIP
   POST_PUBLIC_RESULTS
+  PUBLISH_FINAL_LEADERBOARD
+  PUBLISH_WINNERS_PICTURE
+  REMOVE_FINAL_LEADERBOARD_BUTTONS
   SEND_PLAYER_DM
   SEND_FINAL_RESULT_DM
   PROCESS_BOT_UPDATE
@@ -318,6 +321,17 @@ enum LeaderboardTelegramJobStatus {
   RETRY_SCHEDULED
   FAILED
   CANCELLED
+}
+
+enum LeaderboardTelegramArtifactType {
+  FINAL_LEADERBOARD
+  WINNERS_PICTURE
+}
+
+enum LeaderboardTelegramArtifactStatus {
+  RESERVED
+  SENT
+  BUTTONS_REMOVED
 }
 
 enum FreeplayClaimStatus {
@@ -373,6 +387,7 @@ model Workspace {
   giveawayEligibilityCandidates GiveawayEligibilityCandidate[]
   leaderboardBotIntegrations LeaderboardBotIntegration[]
   leaderboardTelegramOutbox LeaderboardTelegramOutbox[]
+  leaderboardTelegramArtifacts LeaderboardTelegramArtifact[]
   leaderboardBotPlayerLinks LeaderboardBotPlayerLink[]
   leaderboardWheelConfigs LeaderboardWheelConfig[]
   leaderboardWheelConfigVersions LeaderboardWheelConfigVersion[]
@@ -449,6 +464,7 @@ model User {
   ownedGiveawayEligibilityCandidates GiveawayEligibilityCandidate[] @relation("GiveawayEligibilityOwner")
   ownedLeaderboardBotIntegrations LeaderboardBotIntegration[] @relation("LeaderboardBotIntegrationOwner")
   ownedLeaderboardTelegramOutbox LeaderboardTelegramOutbox[] @relation("LeaderboardTelegramOutboxOwner")
+  ownedLeaderboardTelegramArtifacts LeaderboardTelegramArtifact[] @relation("LeaderboardTelegramArtifactOwner")
   ownedLeaderboardBotPlayerLinks LeaderboardBotPlayerLink[] @relation("LeaderboardBotPlayerLinkOwner")
   ownedLeaderboardWheelConfigs LeaderboardWheelConfig[] @relation("LeaderboardWheelConfigOwner")
   ownedLeaderboardWheelConfigVersions LeaderboardWheelConfigVersion[] @relation("LeaderboardWheelConfigVersionOwner")
@@ -1179,6 +1195,7 @@ model LeaderboardCompetition {
   snapshot                   CompetitionSnapshot?
   payouts                    GiveawayPayout[]
   eligibilityCandidates      GiveawayEligibilityCandidate[]
+  telegramArtifacts          LeaderboardTelegramArtifact[]
   referralMilestoneAwards    ReferralMilestoneAward[]
   telegramOutbox             LeaderboardTelegramOutbox[]
   wheelCycles                LeaderboardWheelCycle[]
@@ -1509,12 +1526,38 @@ model LeaderboardBotIntegration {
   workspace                     Workspace                      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   ownerCoadmin                  User                           @relation("LeaderboardBotIntegrationOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
   outboxJobs                    LeaderboardTelegramOutbox[]
+  artifacts                     LeaderboardTelegramArtifact[]
   eligibilityCandidates         GiveawayEligibilityCandidate[]
   playerLinks                   LeaderboardBotPlayerLink[]
   telegramUpdates               LeaderboardTelegramUpdate[]
 
   @@index([workspaceId])
   @@map("leaderboard_bot_integrations")
+}
+
+model LeaderboardTelegramArtifact {
+  id                 String                            @id @default(uuid()) @db.Uuid
+  workspaceId        String                            @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String                            @map("owner_coadmin_user_id") @db.Uuid
+  competitionId      String                            @map("competition_id") @db.Uuid
+  botIntegrationId   String                            @map("bot_integration_id") @db.Uuid
+  artifactType       LeaderboardTelegramArtifactType   @map("artifact_type")
+  status             LeaderboardTelegramArtifactStatus @default(RESERVED)
+  chatId             String?                           @map("chat_id") @db.VarChar(64)
+  messageId          String?                           @map("message_id") @db.VarChar(64)
+  buttonsRemovedAt   DateTime?                         @map("buttons_removed_at")
+  sentAt             DateTime?                         @map("sent_at")
+  createdAt          DateTime                          @default(now()) @map("created_at")
+  updatedAt          DateTime                          @updatedAt @map("updated_at")
+  workspace          Workspace                         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User                              @relation("LeaderboardTelegramArtifactOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition        LeaderboardCompetition            @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  botIntegration     LeaderboardBotIntegration         @relation(fields: [botIntegrationId], references: [id], onDelete: Cascade)
+
+  @@unique([competitionId, artifactType])
+  @@index([ownerCoadminUserId, artifactType, status])
+  @@index([botIntegrationId])
+  @@map("leaderboard_telegram_artifacts")
 }
 
 /// Links a Telegram Bot API user to a CRM contact for personal /rank DMs (per Coadmin bot).

@@ -9,6 +9,7 @@ import { LeaderboardTelegramIntegrationService } from "./leaderboard-telegram.in
 import { LeaderboardTelegramOutboxService, resumeLeaderboardTelegramOutboxSafely } from "./leaderboard-telegram.outbox";
 import { LeaderboardTelegramProcessor } from "./leaderboard-telegram.processor";
 import { startLeaderboardTelegramWorker } from "./leaderboard-telegram.worker";
+import { PrismaLeaderboardService } from "../leaderboard.prisma-service";
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -42,6 +43,18 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     client,
     logger: app.log
   });
+  const lifecycleDomain = new PrismaLeaderboardService(app.prisma, {
+    projectionHooks: {
+      onCompleted: async (info) => {
+        const outboxId = await outbox.enqueueFinalLeaderboard(
+          info.workspaceId,
+          info.ownerCoadminUserId,
+          info.competitionId
+        );
+        await processor.processJob(outboxId);
+      }
+    }
+  });
   const botUpdateHandler = new LeaderboardBotUpdateHandler({
     prisma: app.prisma,
     client,
@@ -59,10 +72,12 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
 
   setTimeout(() => {
     void resumeLeaderboardTelegramOutboxSafely(outbox, app.log);
+    void completeExpiredCompetitionsSafely(lifecycleDomain, app.log);
   }, 2_500);
 
   const maintenance = setInterval(() => {
     void resumeLeaderboardTelegramOutboxSafely(outbox, app.log);
+    void completeExpiredCompetitionsSafely(lifecycleDomain, app.log);
   }, 60_000);
   maintenance.unref?.();
 
@@ -119,6 +134,20 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     if (pollTimer) clearInterval(pollTimer);
   });
 });
+
+async function completeExpiredCompetitionsSafely(
+  domain: Pick<PrismaLeaderboardService, "completeExpiredCompetitions">,
+  log: { info: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void }
+): Promise<void> {
+  try {
+    const count = await domain.completeExpiredCompetitions();
+    if (count > 0) {
+      log.info({ count }, "Completed expired leaderboard competitions");
+    }
+  } catch (error) {
+    log.error({ err: error }, "Failed to complete expired leaderboard competitions");
+  }
+}
 
 function mapPollingUpdate(update: {
   readonly updateId: number;

@@ -36,7 +36,6 @@ import {
   participantTransferUnsupported,
   payoutAlreadySettled,
   payoutNotFound,
-  pendingReviewBlocksFinalize,
   referralAlreadyExists,
   referralNotFound,
   selfReferralForbidden,
@@ -45,7 +44,6 @@ import {
 import { milestonesToAward, milestonesToReverse } from "./milestones";
 import { assertAllowedPoolRate, depositPointsFromCumulativeCents, poolContributionCents, splitPrizePool } from "./points-math";
 import { createCryptoRandomSource, resolvePromotionPoints, type RandomSource } from "./promotion-points";
-import { selectPrizeWinnersFromEligibility } from "./prize-eligibility";
 import { sortStandings } from "./ranking";
 import type {
   BindParticipantInput,
@@ -191,7 +189,7 @@ export class PrismaLeaderboardService {
     actorUserId: string,
     now = new Date()
   ) {
-    const newlyFrozen: string[] = [];
+    const newlyCompleted: string[] = [];
     const result = await this.prisma.$transaction(async (tx) => {
       const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.ensureSettingsTx(tx, workspaceId, ownerCoadminUserId, actorUserId);
@@ -209,7 +207,7 @@ export class PrismaLeaderboardService {
           ownerCoadminUserId,
           now,
           false,
-          newlyFrozen,
+          newlyCompleted,
           pendingAudits
         );
         await this.ensureZeroPointStandingsForOwnerTx(
@@ -238,7 +236,7 @@ export class PrismaLeaderboardService {
         { workspaceId, ownerCoadminUserId, error }
       );
     }
-    await this.emitFrozen(workspaceId, ownerCoadminUserId, newlyFrozen);
+    await this.emitCompleted(workspaceId, ownerCoadminUserId, newlyCompleted);
     return result.settings;
   }
 
@@ -303,7 +301,7 @@ export class PrismaLeaderboardService {
     ownerCoadminUserId: string,
     now = new Date()
   ) {
-    const newlyFrozen: string[] = [];
+    const newlyCompleted: string[] = [];
     const result = await this.prisma.$transaction(async (tx) => {
       const pendingAudits: PendingLeaderboardAudit[] = [];
       const competition = await this.ensureCurrentCompetitionTx(
@@ -312,14 +310,49 @@ export class PrismaLeaderboardService {
         ownerCoadminUserId,
         now,
         false,
-        newlyFrozen,
+        newlyCompleted,
         pendingAudits
       );
       return { competition, pendingAudits };
     });
     await this.flushPendingAudits(result.pendingAudits);
-    await this.emitFrozen(workspaceId, ownerCoadminUserId, newlyFrozen);
+    await this.emitCompleted(workspaceId, ownerCoadminUserId, newlyCompleted);
     return result.competition;
+  }
+
+  public async completeExpiredCompetitions(now = new Date(), limit = 50): Promise<number> {
+    const rows = await this.prisma.leaderboardCompetition.findMany({
+      where: {
+        status: "ACTIVE",
+        endsAt: { lte: now }
+      },
+      orderBy: { endsAt: "asc" },
+      take: limit,
+      select: { workspaceId: true, ownerCoadminUserId: true }
+    });
+
+    let completed = 0;
+    for (const row of rows) {
+      const before = await this.prisma.leaderboardCompetition.count({
+        where: {
+          workspaceId: row.workspaceId,
+          ownerCoadminUserId: row.ownerCoadminUserId,
+          status: "ACTIVE",
+          endsAt: { lte: now }
+        }
+      });
+      await this.ensureCurrentCompetition(row.workspaceId, row.ownerCoadminUserId, now);
+      const after = await this.prisma.leaderboardCompetition.count({
+        where: {
+          workspaceId: row.workspaceId,
+          ownerCoadminUserId: row.ownerCoadminUserId,
+          status: "ACTIVE",
+          endsAt: { lte: now }
+        }
+      });
+      completed += Math.max(0, before - after);
+    }
+    return completed;
   }
 
   public async recordDeposit(input: DepositInput) {
@@ -890,24 +923,7 @@ export class PrismaLeaderboardService {
       const snapshot = await tx.competitionSnapshot.findUnique({ where: { competitionId: competition.id } });
       if (!snapshot) throw eventNotFound();
 
-      const candidates = await tx.giveawayEligibilityCandidate.findMany({
-        where: { competitionId: competition.id },
-        orderBy: { leaderboardRank: "asc" }
-      });
-      const selection = selectPrizeWinnersFromEligibility(candidates);
-      if (!selection.ok) throw pendingReviewBlocksFinalize(selection.pendingCrmContactIds);
-
-      const splits = splitPrizePool(snapshot.prizePoolCents);
-      const winnersPayload = selection.winners.map((winner) => {
-        const split = splits.find((s) => s.rank === winner.prizeRank)!;
-        return {
-          prizeRank: winner.prizeRank,
-          leaderboardRank: winner.leaderboardRank,
-          crmContactId: winner.crmContactId,
-          totalPoints: winner.totalPoints,
-          payoutCents: split.payoutCents
-        };
-      });
+      const winnersPayload = await this.buildAutomaticWinnersPayloadTx(tx, competition.id, snapshot.prizePoolCents);
 
       if (!snapshot.winnersJson) {
         await tx.competitionSnapshot.update({
@@ -961,6 +977,39 @@ export class PrismaLeaderboardService {
       return { competition: finalized, pendingAudits };
     });
     await this.flushPendingAudits(result.pendingAudits);
+    return result.competition;
+  }
+
+  public async completeCompetition(input: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly competitionId: string;
+    readonly now?: Date;
+  }) {
+    const now = input.now ?? new Date();
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
+      const completed = await this.completeCompetitionTx(
+        tx,
+        input.workspaceId,
+        input.ownerCoadminUserId,
+        input.competitionId,
+        now,
+        pendingAudits
+      );
+      await this.ensureCurrentCompetitionTx(
+        tx,
+        input.workspaceId,
+        input.ownerCoadminUserId,
+        now,
+        true,
+        undefined,
+        pendingAudits
+      );
+      return { competition: completed, pendingAudits };
+    });
+    await this.flushPendingAudits(result.pendingAudits);
+    await this.emitCompleted(input.workspaceId, input.ownerCoadminUserId, [result.competition.id]);
     return result.competition;
   }
 
@@ -1378,13 +1427,28 @@ export class PrismaLeaderboardService {
     }
   }
 
+  private async emitCompleted(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionIds: readonly string[]
+  ): Promise<void> {
+    if (!this.projectionHooks?.onCompleted || competitionIds.length === 0) return;
+    for (const competitionId of competitionIds) {
+      try {
+        await this.projectionHooks.onCompleted({ workspaceId, ownerCoadminUserId, competitionId });
+      } catch {
+        // Projection failures must never roll back domain commits.
+      }
+    }
+  }
+
   private async ensureCurrentCompetitionTx(
     tx: Tx,
     workspaceId: string,
     ownerCoadminUserId: string,
     now: Date,
     skipEnabledCheck: boolean,
-    newlyFrozen?: string[],
+    newlyCompleted?: string[],
     pendingAudits?: PendingLeaderboardAudit[]
   ) {
     await this.lockWorkspace(tx, workspaceId);
@@ -1400,8 +1464,15 @@ export class PrismaLeaderboardService {
       }
     });
     for (const competition of expired) {
-      const frozen = await this.freezeCompetitionTx(tx, competition.id, now, pendingAudits);
-      if (frozen.status === "FROZEN") newlyFrozen?.push(frozen.id);
+      const completed = await this.completeCompetitionTx(
+        tx,
+        workspaceId,
+        ownerCoadminUserId,
+        competition.id,
+        now,
+        pendingAudits
+      );
+      if (completed.status === "FINALIZED") newlyCompleted?.push(completed.id);
     }
 
     const window = competitionWindowContaining(now);
@@ -1559,6 +1630,125 @@ export class PrismaLeaderboardService {
       }
     });
     return tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
+  }
+
+  private async completeCompetitionTx(
+    tx: Tx,
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string,
+    now: Date,
+    pendingAudits?: PendingLeaderboardAudit[]
+  ) {
+    await this.lockCompetition(tx, competitionId);
+    const competition = await this.requireCompetitionTx(tx, competitionId, ownerCoadminUserId);
+    if (competition.workspaceId !== workspaceId) throw ownerMismatch();
+    if (competition.status === "FINALIZED") return competition;
+    if (competition.status !== "FROZEN" && competition.status !== "ACTIVE") {
+      return competition;
+    }
+
+    const frozen =
+      competition.status === "ACTIVE"
+        ? await this.freezeCompetitionTx(tx, competitionId, now, pendingAudits)
+        : competition;
+    if (frozen.status === "FINALIZED") return frozen;
+    if (frozen.status !== "FROZEN") return frozen;
+
+    const snapshot = await tx.competitionSnapshot.findUnique({ where: { competitionId } });
+    if (!snapshot) throw eventNotFound();
+    const winnersPayload = await this.buildAutomaticWinnersPayloadTx(
+      tx,
+      competitionId,
+      snapshot.prizePoolCents
+    );
+
+    if (!snapshot.winnersJson) {
+      await tx.competitionSnapshot.update({
+        where: { competitionId },
+        data: { winnersJson: winnersPayload, winnersLockedAt: now }
+      });
+      for (const winner of winnersPayload) {
+        await tx.giveawayPayout.upsert({
+          where: {
+            competitionId_prizeRank: {
+              competitionId,
+              prizeRank: winner.prizeRank
+            }
+          },
+          create: {
+            workspaceId,
+            ownerCoadminUserId,
+            competitionId,
+            prizeRank: winner.prizeRank,
+            leaderboardRank: winner.leaderboardRank,
+            crmContactId: winner.crmContactId,
+            points: winner.totalPoints,
+            payoutCents: winner.payoutCents,
+            status: "UNPAID"
+          },
+          update: {}
+        });
+      }
+    }
+
+    const updated = await tx.leaderboardCompetition.updateMany({
+      where: { id: competitionId, status: "FROZEN" },
+      data: {
+        status: "FINALIZED",
+        finalizedAt: now,
+        finalizedByUserId: null,
+        finalizationIdempotencyKey: `auto:${competitionId}`
+      }
+    });
+    if (updated.count === 0) {
+      return tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
+    }
+    pendingAudits?.push({
+      workspaceId,
+      actorId: null,
+      action: "leaderboard.competition_completed",
+      metadata: {
+        competitionId,
+        ownerCoadminUserId,
+        winners: winnersPayload
+      }
+    });
+    return tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
+  }
+
+  private async buildAutomaticWinnersPayloadTx(
+    tx: Tx,
+    competitionId: string,
+    prizePoolCents: number
+  ): Promise<
+    Array<{
+      prizeRank: 1 | 2 | 3;
+      leaderboardRank: number;
+      crmContactId: string;
+      totalPoints: number;
+      payoutCents: number;
+    }>
+  > {
+    const candidates = await tx.giveawayEligibilityCandidate.findMany({
+      where: { competitionId },
+      orderBy: { leaderboardRank: "asc" },
+      take: 3
+    });
+    const winnerCount = Math.min(candidates.length, 3) as 0 | 1 | 2 | 3;
+    if (winnerCount === 0) return [];
+    const splits = splitPrizePool(prizePoolCents, winnerCount);
+    return candidates.map((candidate, index) => {
+      const prizeRank = (index + 1) as 1 | 2 | 3;
+      const split = splits.find((s) => s.rank === prizeRank)!;
+      return {
+        prizeRank,
+        leaderboardRank: candidate.leaderboardRank,
+        crmContactId: candidate.crmContactId,
+        totalPoints: candidate.totalPoints,
+        payoutCents: split.payoutCents
+      };
+    });
   }
 
   private async syncReferralMilestonesTx(

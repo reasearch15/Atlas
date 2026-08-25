@@ -184,6 +184,81 @@ export class LeaderboardTelegramOutboxService {
     });
   }
 
+  public async enqueueFinalLeaderboard(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string
+  ): Promise<string> {
+    return this.upsertJob({
+      workspaceId,
+      ownerCoadminUserId,
+      competitionId,
+      jobType: "PUBLISH_FINAL_LEADERBOARD",
+      idempotencyKey: `lb:final-board:${ownerCoadminUserId}:${competitionId}`,
+      payloadJson: { competitionId },
+      resetTerminal: false
+    });
+  }
+
+  public async enqueueWinnersPicture(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string
+  ): Promise<string> {
+    return this.upsertJob({
+      workspaceId,
+      ownerCoadminUserId,
+      competitionId,
+      jobType: "PUBLISH_WINNERS_PICTURE",
+      idempotencyKey: `lb:winners-picture:${ownerCoadminUserId}:${competitionId}`,
+      payloadJson: { competitionId },
+      resetTerminal: false
+    });
+  }
+
+  public async enqueueFirstDepositTransition(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string
+  ): Promise<string | null> {
+    const current = await this.prisma.leaderboardCompetition.findFirst({
+      where: { id: competitionId, workspaceId, ownerCoadminUserId, status: "ACTIVE" },
+      select: { sequence: true }
+    });
+    if (!current) return null;
+    const previous = await this.prisma.leaderboardTelegramArtifact.findFirst({
+      where: {
+        workspaceId,
+        ownerCoadminUserId,
+        artifactType: "FINAL_LEADERBOARD",
+        status: "SENT",
+        buttonsRemovedAt: null,
+        competition: {
+          sequence: { lt: current.sequence },
+          status: "FINALIZED"
+        },
+        messageId: { not: null },
+        chatId: { not: null }
+      },
+      orderBy: { competition: { sequence: "desc" } },
+      select: { competitionId: true }
+    });
+    if (!previous) return null;
+
+    return this.upsertJob({
+      workspaceId,
+      ownerCoadminUserId,
+      competitionId,
+      jobType: "REMOVE_FINAL_LEADERBOARD_BUTTONS",
+      idempotencyKey: `lb:first-deposit:${ownerCoadminUserId}:${competitionId}`,
+      payloadJson: {
+        competitionId,
+        previousCompetitionId: previous.competitionId
+      },
+      resetTerminal: false
+    });
+  }
+
   public async enqueueRankAnnouncement(input: RankAnnouncementEnqueueInput): Promise<string> {
     const coalesceKey = `lb:announce:${input.ownerCoadminUserId}:${input.competitionId}:${input.crmContactId}`;
     const payloadJson = {
@@ -339,6 +414,7 @@ export class LeaderboardTelegramOutboxService {
     readonly jobType: LeaderboardTelegramJobType;
     readonly idempotencyKey: string;
     readonly payloadJson: Record<string, unknown>;
+    readonly resetTerminal?: boolean;
   }): Promise<string> {
     const integration = await this.prisma.leaderboardBotIntegration.findUnique({
       where: { ownerCoadminUserId: input.ownerCoadminUserId },
@@ -371,6 +447,14 @@ export class LeaderboardTelegramOutboxService {
         }
       });
       await this.wakeBestEffort(existing.id, 0);
+      return existing.id;
+    }
+
+    if (
+      existing &&
+      (TERMINAL_STATUSES as readonly string[]).includes(existing.status) &&
+      input.resetTerminal === false
+    ) {
       return existing.id;
     }
 
@@ -419,6 +503,12 @@ export class LeaderboardTelegramOutboxService {
         where: { idempotencyKey: input.idempotencyKey }
       });
       if (!raced) throw error;
+      if (
+        (TERMINAL_STATUSES as readonly string[]).includes(raced.status) &&
+        input.resetTerminal === false
+      ) {
+        return raced.id;
+      }
       if ((TERMINAL_STATUSES as readonly string[]).includes(raced.status)) {
         const reset = await this.prisma.leaderboardTelegramOutbox.update({
           where: { id: raced.id },

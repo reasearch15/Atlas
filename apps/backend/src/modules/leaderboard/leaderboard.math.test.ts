@@ -71,6 +71,24 @@ describe("payout split", () => {
     expect(splits[1]?.payoutCents).toBe(30);
     expect(splits[2]?.payoutCents).toBe(21);
   });
+
+  it("redistributes the full pool for exactly two winners", () => {
+    expect(splitPrizePool(16544, 2)).toEqual([
+      { rank: 1, payoutCents: 10340 },
+      { rank: 2, payoutCents: 6204 }
+    ]);
+    const awkward = splitPrizePool(101, 2);
+    expect(awkward).toEqual([
+      { rank: 1, payoutCents: 63 },
+      { rank: 2, payoutCents: 38 }
+    ]);
+    expect(awkward.reduce((sum, s) => sum + s.payoutCents, 0)).toBe(101);
+  });
+
+  it("awards the full pool to a single winner", () => {
+    expect(splitPrizePool(16544, 1)).toEqual([{ rank: 1, payoutCents: 16544 }]);
+    expect(splitPrizePool(1, 1)).toEqual([{ rank: 1, payoutCents: 1 }]);
+  });
 });
 
 describe("competition windows America/Chicago DST", () => {

@@ -565,7 +565,8 @@ describe("LeaderboardService freeze / ties / finalize", () => {
     expect(payouts).toHaveLength(2);
     expect(payouts[0]?.prizeRank).toBe(1);
     expect(payouts[0]?.leaderboardRank).toBe(1);
-    expect(payouts.reduce((sum, p) => sum + p.payoutCents, 0)).toBe(100 + 60);
+    expect(payouts.map((p) => p.payoutCents)).toEqual([125, 75]);
+    expect(payouts.reduce((sum, p) => sum + p.payoutCents, 0)).toBe(200);
     const again = await service.finalizeCompetition({
       workspaceId,
       ownerCoadminUserId: ownerA,

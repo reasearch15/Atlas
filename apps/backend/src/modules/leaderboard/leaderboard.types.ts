@@ -355,6 +355,17 @@ export interface LeaderboardProjectionHooks {
     readonly ownerCoadminUserId: string;
     readonly competitionId: string;
   }): Promise<void>;
+  onCompleted?(info: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly competitionId: string;
+  }): Promise<void>;
+  onFirstDeposit?(info: {
+    readonly workspaceId: string;
+    readonly ownerCoadminUserId: string;
+    readonly competitionId: string;
+    readonly previousCompetitionId: string | null;
+  }): Promise<void>;
 }
 
 /** Explicit one-time ACTIVE deposit-scoring reconciliation ($5=1 → $1=1). */

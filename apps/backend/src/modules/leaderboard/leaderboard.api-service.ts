@@ -166,6 +166,16 @@ export class LeaderboardApiService {
             info.ownerCoadminUserId,
             info.competitionId
           );
+        },
+        onCompleted: async (info) => {
+          const outboxId = await this.outbox?.enqueueFinalLeaderboard(
+            info.workspaceId,
+            info.ownerCoadminUserId,
+            info.competitionId
+          );
+          if (outboxId && this.telegramProcessor) {
+            await this.telegramProcessor.processJob(outboxId);
+          }
         }
       }
     });
@@ -705,7 +715,23 @@ export class LeaderboardApiService {
       throw new AppError(500, "STANDING_MISSING", "Standing was not found after deposit.");
     }
 
-    await this.projectAfterMutation(workspaceId, owner, competition.id);
+    const firstDepositTransitionId = await this.outbox?.enqueueFirstDepositTransition(
+      workspaceId,
+      owner,
+      competition.id
+    );
+    if (firstDepositTransitionId && this.telegramProcessor) {
+      try {
+        await this.telegramProcessor.processJob(firstDepositTransitionId);
+      } catch (error) {
+        this.app.log.warn(
+          { err: error, workspaceId, ownerCoadminUserId: owner, competitionId: competition.id },
+          "leaderboard.first_deposit_transition.immediate_process_failed"
+        );
+      }
+    } else {
+      await this.projectAfterMutation(workspaceId, owner, competition.id);
+    }
     await this.enqueueRecentReferralMilestoneDms(workspaceId, owner, competition.id);
     await new FreeplayService(this.app).applyLeaderboardDepositEvent({
       eventId: event.id,
@@ -1539,8 +1565,10 @@ export class LeaderboardApiService {
       idempotencyKey
     });
     try {
-      await this.outbox?.enqueuePostResults(workspaceId, user.id, competitionId);
-      await this.outbox?.enqueueRefresh(workspaceId, user.id, competitionId);
+      const outboxId = await this.outbox?.enqueueFinalLeaderboard(workspaceId, user.id, competitionId);
+      if (outboxId && this.telegramProcessor) {
+        await this.telegramProcessor.processJob(outboxId);
+      }
       await this.enqueueFinalResultDms(workspaceId, user.id, competitionId);
     } catch {
       // ignore projection errors

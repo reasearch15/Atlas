@@ -839,7 +839,8 @@ export class LeaderboardService {
         throw pendingReviewBlocksFinalize(selection.pendingCrmContactIds);
       }
 
-      const splits = splitPrizePool(snapshot.prizePoolCents);
+      const winnerCount = Math.min(selection.winners.length, 3) as 0 | 1 | 2 | 3;
+      const splits = winnerCount === 0 ? [] : splitPrizePool(snapshot.prizePoolCents, winnerCount);
       const winnersPayload = selection.winners.map((winner) => {
         const split = splits.find((s) => s.rank === winner.prizeRank)!;
         return {

@@ -43,14 +43,30 @@ export interface RankedPayout {
 }
 
 /**
- * Deterministic 50/30/20 split with no lost cents:
- * first = floor(pool * 50%), second = floor(pool * 30%), third = remainder.
- * Payouts are assigned only to selected prize winners at finalize time.
- * Missing prize slots are left unallocated (no redistribution).
+ * Deterministic prize split with no lost cents when at least one winner exists.
+ * Three winners use the normal 50/30/remainder split.
+ * Two winners redistribute the full pool using the relative 50:30 weighting.
+ * One winner receives the full prize pool.
  */
-export function splitPrizePool(prizePoolCents: number): readonly RankedPayout[] {
+export function splitPrizePool(
+  prizePoolCents: number,
+  winnerCount: 1 | 2 | 3 = 3
+): readonly RankedPayout[] {
   if (!Number.isInteger(prizePoolCents) || prizePoolCents < 0) {
     throw new Error("prizePoolCents must be a non-negative integer");
+  }
+  if (winnerCount === 1) {
+    return [{ rank: 1, payoutCents: prizePoolCents }];
+  }
+  if (winnerCount === 2) {
+    const first = Math.floor(
+      (prizePoolCents * FIRST_PLACE_PAYOUT_BPS) /
+        (FIRST_PLACE_PAYOUT_BPS + SECOND_PLACE_PAYOUT_BPS)
+    );
+    return [
+      { rank: 1, payoutCents: first },
+      { rank: 2, payoutCents: prizePoolCents - first }
+    ];
   }
   const first = Math.floor((prizePoolCents * FIRST_PLACE_PAYOUT_BPS) / 10000);
   const second = Math.floor((prizePoolCents * SECOND_PLACE_PAYOUT_BPS) / 10000);

@@ -25,6 +25,7 @@ import {
 } from "./public-message";
 import { publishPublicLeaderboardSnapshot } from "./public-leaderboard-publisher";
 import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
+import { renderWinnersPictureCard } from "./winners-picture-card";
 import {
   formatPersonalAnnouncementDm,
   formatPersonalFinalResultMessage
@@ -161,6 +162,15 @@ export class LeaderboardTelegramProcessor {
           break;
         case "POST_PUBLIC_RESULTS":
           await this.processPostResults(row, integration, token);
+          break;
+        case "PUBLISH_FINAL_LEADERBOARD":
+          await this.processPublishFinalLeaderboard(row, integration, token);
+          break;
+        case "PUBLISH_WINNERS_PICTURE":
+          await this.processPublishWinnersPicture(row, integration, token);
+          break;
+        case "REMOVE_FINAL_LEADERBOARD_BUTTONS":
+          await this.processRemoveFinalLeaderboardButtons(row, integration, token);
           break;
         case "POST_RANK_ANNOUNCEMENT":
           await this.processRankAnnouncement(row, integration, token);
@@ -582,6 +592,255 @@ export class LeaderboardTelegramProcessor {
       where: { id: integration.id },
       data: { lastSuccessfulPostAt: new Date(), lastError: null }
     });
+  }
+
+  private async processPublishFinalLeaderboard(
+    row: { id: string; workspaceId: string; ownerCoadminUserId: string; competitionId: string | null },
+    integration: {
+      id: string;
+      postingEnabled: boolean;
+      channelId: string | null;
+      channelTitle?: string | null;
+      persistentMessageId: string | null;
+      persistentMessageCompetitionId: string | null;
+      lastPublicTop10Json: unknown;
+      botUsername: string | null;
+      playTelegramUsername?: string | null;
+    },
+    token: string
+  ): Promise<void> {
+    if (!integration.postingEnabled) return;
+    if (!integration.channelId || !row.competitionId) {
+      throw permanentError("CHANNEL_OR_COMPETITION_MISSING", "Channel or competition missing for final leaderboard");
+    }
+    const existing = await this.prisma.leaderboardTelegramArtifact.findUnique({
+      where: {
+        competitionId_artifactType: {
+          competitionId: row.competitionId,
+          artifactType: "FINAL_LEADERBOARD"
+        }
+      }
+    });
+    if (existing?.messageId && existing.chatId) {
+      await this.outbox.enqueueWinnersPicture(row.workspaceId, row.ownerCoadminUserId, row.competitionId);
+      return;
+    }
+
+    const published = await publishPublicLeaderboardSnapshot({
+      prisma: this.prisma,
+      client: this.client,
+      token,
+      workspaceId: row.workspaceId,
+      ownerCoadminUserId: row.ownerCoadminUserId,
+      competitionId: row.competitionId,
+      integrationId: integration.id,
+      channelId: integration.channelId,
+      botUsername: integration.botUsername,
+      playTelegramUsername: integration.playTelegramUsername ?? null,
+      brandName: integration.channelTitle ?? null,
+      persistentMessageId: integration.persistentMessageId,
+      persistentMessageCompetitionId: integration.persistentMessageCompetitionId,
+      lastPublicTop10Json: integration.lastPublicTop10Json,
+      mode: "archive",
+      skipRankAnnouncements: true,
+      ...(this.logger ? { logger: this.logger } : {})
+    });
+
+    await this.prisma.leaderboardTelegramArtifact.upsert({
+      where: {
+        competitionId_artifactType: {
+          competitionId: row.competitionId,
+          artifactType: "FINAL_LEADERBOARD"
+        }
+      },
+      create: {
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        competitionId: row.competitionId,
+        botIntegrationId: integration.id,
+        artifactType: "FINAL_LEADERBOARD",
+        status: "SENT",
+        chatId: published.channelId,
+        messageId: published.messageId,
+        sentAt: new Date()
+      },
+      update: {
+        botIntegrationId: integration.id,
+        status: "SENT",
+        chatId: published.channelId,
+        messageId: published.messageId,
+        sentAt: new Date()
+      }
+    });
+    await this.outbox.enqueueWinnersPicture(row.workspaceId, row.ownerCoadminUserId, row.competitionId);
+  }
+
+  private async processPublishWinnersPicture(
+    row: { id: string; workspaceId: string; ownerCoadminUserId: string; competitionId: string | null },
+    integration: { id: string; postingEnabled: boolean; channelId: string | null; channelTitle?: string | null },
+    token: string
+  ): Promise<void> {
+    if (!integration.postingEnabled) return;
+    if (!integration.channelId || !row.competitionId) {
+      throw permanentError("CHANNEL_OR_COMPETITION_MISSING", "Channel or competition missing for winners picture");
+    }
+    const existing = await this.prisma.leaderboardTelegramArtifact.findUnique({
+      where: {
+        competitionId_artifactType: {
+          competitionId: row.competitionId,
+          artifactType: "WINNERS_PICTURE"
+        }
+      }
+    });
+    if (existing?.messageId && existing.chatId) return;
+
+    const finalBoard = await this.prisma.leaderboardTelegramArtifact.findUnique({
+      where: {
+        competitionId_artifactType: {
+          competitionId: row.competitionId,
+          artifactType: "FINAL_LEADERBOARD"
+        }
+      }
+    });
+    if (!finalBoard?.messageId) {
+      await this.outbox.enqueueFinalLeaderboard(row.workspaceId, row.ownerCoadminUserId, row.competitionId);
+      throw new Error("FINAL_LEADERBOARD_NOT_SENT");
+    }
+
+    const competition = await this.prisma.leaderboardCompetition.findFirst({
+      where: {
+        id: row.competitionId,
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        status: "FINALIZED"
+      }
+    });
+    if (!competition) throw permanentError("COMPETITION_NOT_FINALIZED", "Winners picture requires finalized competition");
+    const settings = await this.prisma.leaderboardSettings.findUnique({
+      where: { ownerCoadminUserId: row.ownerCoadminUserId }
+    });
+    const payouts = await this.prisma.giveawayPayout.findMany({
+      where: { competitionId: row.competitionId, ownerCoadminUserId: row.ownerCoadminUserId },
+      orderBy: { prizeRank: "asc" },
+      include: {
+        crmContact: {
+          select: {
+            displayName: true,
+            username: true,
+            chats: {
+              select: { firstName: true, lastName: true, username: true, updatedAt: true },
+              orderBy: { updatedAt: "desc" },
+              take: 1
+            }
+          }
+        }
+      }
+    });
+    const png = await renderWinnersPictureCard({
+      brandName: integration.channelTitle ?? "SAYU GAMING HUB",
+      startsAt: competition.startsAt,
+      endsAt: competition.endsAt,
+      timezone: settings?.timezone ?? "America/Chicago",
+      prizePoolCents: competition.prizePoolCents,
+      winners: payouts.map((p) => {
+        const chat = Array.isArray(p.crmContact.chats) ? p.crmContact.chats[0] : undefined;
+        return {
+          prizeRank: p.prizeRank as 1 | 2 | 3,
+          displayName: resolvePublicLeaderboardDisplayName({
+            displayName: p.crmContact.displayName,
+            firstName: chat?.firstName ?? null,
+            lastName: chat?.lastName ?? null,
+            username: p.crmContact.username ?? chat?.username ?? null
+          }),
+          payoutCents: p.payoutCents
+        };
+      })
+    });
+    const sent = await this.client.sendPhoto(token, integration.channelId, png, {
+      filename: "competition-winners.png"
+    });
+    await this.prisma.leaderboardTelegramArtifact.upsert({
+      where: {
+        competitionId_artifactType: {
+          competitionId: row.competitionId,
+          artifactType: "WINNERS_PICTURE"
+        }
+      },
+      create: {
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        competitionId: row.competitionId,
+        botIntegrationId: integration.id,
+        artifactType: "WINNERS_PICTURE",
+        status: "SENT",
+        chatId: integration.channelId,
+        messageId: String(sent.messageId),
+        sentAt: new Date()
+      },
+      update: {
+        botIntegrationId: integration.id,
+        status: "SENT",
+        chatId: integration.channelId,
+        messageId: String(sent.messageId),
+        sentAt: new Date()
+      }
+    });
+    await this.prisma.leaderboardBotIntegration.update({
+      where: { id: integration.id },
+      data: { lastSuccessfulPostAt: new Date(), lastError: null }
+    });
+  }
+
+  private async processRemoveFinalLeaderboardButtons(
+    row: {
+      id: string;
+      workspaceId: string;
+      ownerCoadminUserId: string;
+      competitionId: string | null;
+      payloadJson?: unknown;
+    },
+    integration: { id: string; postingEnabled: boolean; channelId: string | null; persistentMessageId?: string | null },
+    token: string
+  ): Promise<void> {
+    if (!integration.postingEnabled) return;
+    if (!row.competitionId) throw permanentError("COMPETITION_MISSING", "Competition missing for first deposit transition");
+    const payload = (row.payloadJson ?? {}) as { previousCompetitionId?: string };
+    if (!payload.previousCompetitionId) {
+      throw permanentError("PREVIOUS_COMPETITION_MISSING", "Previous competition missing for first deposit transition");
+    }
+    const artifact = await this.prisma.leaderboardTelegramArtifact.findUnique({
+      where: {
+        competitionId_artifactType: {
+          competitionId: payload.previousCompetitionId,
+          artifactType: "FINAL_LEADERBOARD"
+        }
+      }
+    });
+    if (!artifact?.chatId || !artifact.messageId) {
+      throw permanentError("FINAL_LEADERBOARD_ARTIFACT_MISSING", "Final leaderboard artifact missing");
+    }
+    if (!artifact.buttonsRemovedAt) {
+      if (!this.client.editMessageReplyMarkup) {
+        throw permanentError("EDIT_REPLY_MARKUP_UNAVAILABLE", "Telegram client cannot remove final leaderboard buttons");
+      }
+      await this.client.editMessageReplyMarkup(token, artifact.chatId, Number(artifact.messageId), {
+        inline_keyboard: []
+      });
+      await this.prisma.leaderboardTelegramArtifact.update({
+        where: { id: artifact.id },
+        data: { status: "BUTTONS_REMOVED", buttonsRemovedAt: new Date() }
+      });
+    }
+    await this.prisma.leaderboardBotIntegration.updateMany({
+      where: { id: integration.id, persistentMessageId: artifact.messageId },
+      data: { persistentMessageId: null, persistentMessageCompetitionId: null }
+    });
+    const refreshId = await this.outbox.enqueueRefresh(
+      row.workspaceId,
+      row.ownerCoadminUserId,
+      row.competitionId
+    );
+    await this.processJob(refreshId);
   }
 
   private async processRankAnnouncement(
