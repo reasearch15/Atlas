@@ -131,6 +131,57 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     ]);
   });
 
+  it("publishes digit-containing CRM display names on the public snapshot", async () => {
+    const { prisma, integrationId } = seedOwner({
+      workspaceId: workspaceA,
+      ownerId: ownerA,
+      competitionId: competitionA,
+      channelId: channelA,
+      token: "tokA",
+      playerId: playerA,
+      displayName: "Kapnocap85",
+      points: 10,
+      poolCents: 25000,
+      messageId: null
+    });
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tokA", { id: 1, isBot: true, firstName: "Bot", username: "tokA_bot" }]]),
+      chats: new Map([
+        [
+          Number(channelA),
+          {
+            id: Number(channelA),
+            type: "channel",
+            members: new Map([[1, "administrator"]]),
+            messages: [],
+            nextMessageId: 7
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    const published = await publishPublicLeaderboardSnapshot({
+      prisma: prisma as never,
+      client,
+      token: "tokA",
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      integrationId,
+      channelId: channelA,
+      botUsername: "tokA_bot",
+      persistentMessageId: null,
+      persistentMessageCompetitionId: null,
+      lastPublicTop10Json: [],
+      mode: "replace",
+      skipRankAnnouncements: true
+    });
+    expect(published.nextTop10[0]?.displayName).toBe("Kapnocap85");
+    expect((prisma._state.integrations[0].lastPublicTop10Json as Array<{ displayName: string }>)[0]?.displayName).toBe(
+      "Kapnocap85"
+    );
+  });
+
   it("existing board is replaced via sendPhoto then delete (never edit)", async () => {
     const { prisma, integrationId } = seedOwner({
       workspaceId: workspaceA,

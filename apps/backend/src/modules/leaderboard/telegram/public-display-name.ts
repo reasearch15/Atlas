@@ -2,7 +2,8 @@
  * Phase 4 public player naming for channel posts.
  *
  * Product rule: never publish Telegram username, peer id, phone, or "Telegram user <id>".
- * Prefer a safe human-readable CRM/Telegram display label (including initials).
+ * Prefer a safe human-readable CRM/Telegram display label (including initials and
+ * gamer-style names that contain digits, e.g. Kapnocap85).
  * Staff privacy caps are separate — public posts use this stricter allowlist.
  */
 
@@ -24,7 +25,8 @@ export interface PublicLeaderboardNameSources {
 
 /**
  * Sanitizes a single candidate label for public leaderboard posts.
- * Preserves multi-word names and initials (e.g. "L. J.", "S F").
+ * Preserves multi-word names, initials (e.g. "L. J.", "S F"), and
+ * letter-led names that contain digits (e.g. "Kapnocap85").
  */
 export function toPublicLeaderboardDisplayName(displayName: string | null | undefined): string {
   return sanitizePublicDisplayLabel(displayName) ?? "Player";
@@ -64,12 +66,11 @@ function sanitizePublicDisplayLabel(value: string | null | undefined): string | 
   if (/https?:\/\//i.test(collapsed) || /www\./i.test(collapsed)) return null;
   if (/[\u0000-\u001F\u007F]/.test(collapsed)) return null;
   if (/^unknown(\s|$)/i.test(collapsed)) return null;
-  // Reject digit-bearing labels (peer-ish / coded handles masquerading as names).
-  if (/\d/.test(collapsed)) return null;
 
-  // Letters, marks, spaces, apostrophe, hyphen, periods (initials).
-  const cleaned = collapsed.replace(/[^\p{L}\p{M}\s'.-]/gu, "").replace(/\s+/g, " ").trim();
+  // Letters, marks, digits (Kapnocap85 / Player2), spaces, apostrophe, hyphen, periods.
+  const cleaned = collapsed.replace(/[^\p{L}\p{M}\p{Nd}\s'.-]/gu, "").replace(/\s+/g, " ").trim();
   if (!cleaned) return null;
+  if (looksLikeCodedPublicIdentifier(cleaned)) return null;
 
   const letterCount = (cleaned.match(/\p{L}/gu) ?? []).length;
   if (letterCount < 1) return null;
@@ -91,5 +92,19 @@ function sanitizePublicUsername(username: string | null | undefined): string | n
 function looksLikeExternalIdentifier(value: string): boolean {
   if (/@/.test(value)) return true;
   if (/^\+?\d+$/.test(value.replace(/[\s()-]/g, ""))) return true;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return true;
   return false;
+}
+
+/**
+ * Rejects digit-dominant / coded tokens (peer-ish handles like "580.1a") while
+ * allowing human-readable CRM names that merely contain digits (Kapnocap85).
+ */
+function looksLikeCodedPublicIdentifier(value: string): boolean {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+    return true;
+  }
+  const letterCount = (value.match(/\p{L}/gu) ?? []).length;
+  const digitCount = (value.match(/\p{Nd}/gu) ?? []).length;
+  return digitCount > 0 && digitCount >= letterCount;
 }

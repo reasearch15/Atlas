@@ -110,6 +110,39 @@ describe("formatPublicLeaderboardMessage", () => {
     expect(text).toContain("🥈 2. S F — 0 pts");
   });
 
+  it("preserves CRM display names that contain digits", () => {
+    const text = formatPublicLeaderboardMessage({
+      title: "BIWEEKLY LEADERBOARD",
+      top10: [{ rank: 1, displayName: "Kapnocap85", points: 50 }],
+      prizePoolCents: 100,
+      endsAt,
+      timezone: "America/Chicago"
+    });
+    expect(text).toContain("🥇 1. Kapnocap85 — 50 pts");
+  });
+
+  it("does not leak peer ids, phones, telegram-user labels, @usernames, or URLs", () => {
+    const unsafe = [
+      "8687540231",
+      "+1 555 123 4567",
+      "Telegram user 8687540231",
+      "@privateusername",
+      "https://example.com"
+    ];
+    for (const displayName of unsafe) {
+      const text = formatPublicLeaderboardMessage({
+        title: "BIWEEKLY LEADERBOARD",
+        top10: [{ rank: 1, displayName, points: 1 }],
+        prizePoolCents: 100,
+        endsAt,
+        timezone: "America/Chicago"
+      });
+      expect(text).toContain("🥇 1. Player — 1 pts");
+      expect(text).not.toContain(displayName);
+    }
+  });
+
+
   it("renders intentional zero-point board copy", () => {
     const text = formatPublicLeaderboardMessage({
       title: "BIWEEKLY LEADERBOARD",

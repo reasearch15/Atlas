@@ -14,6 +14,13 @@ describe("toPublicLeaderboardDisplayName", () => {
     expect(toPublicLeaderboardDisplayName("Mary-Jane")).toBe("Mary-Jane");
     expect(toPublicLeaderboardDisplayName("Sarah Connor")).toBe("Sarah Connor");
     expect(toPublicLeaderboardDisplayName("John")).toBe("John");
+    expect(toPublicLeaderboardDisplayName("Redface")).toBe("Redface");
+  });
+
+  it("preserves human-readable CRM names that contain digits", () => {
+    expect(toPublicLeaderboardDisplayName("Kapnocap85")).toBe("Kapnocap85");
+    expect(toPublicLeaderboardDisplayName("Player2")).toBe("Player2");
+    expect(toPublicLeaderboardDisplayName("John23")).toBe("John23");
   });
 
   it("collapses whitespace", () => {
@@ -32,6 +39,14 @@ describe("toPublicLeaderboardDisplayName", () => {
     expect(toPublicLeaderboardDisplayName("Telegram user 42")).toBe("Player");
     expect(toPublicLeaderboardDisplayName("Telegram user -99")).toBe("Player");
     expect(toPublicLeaderboardDisplayName("580.1a")).toBe("Player");
+  });
+
+  it("does not leak the production peer id, phone, telegram-user label, @username, or URL", () => {
+    expect(toPublicLeaderboardDisplayName("8687540231")).toBe("Player");
+    expect(toPublicLeaderboardDisplayName("+1 555 123 4567")).toBe("Player");
+    expect(toPublicLeaderboardDisplayName("Telegram user 8687540231")).toBe("Player");
+    expect(toPublicLeaderboardDisplayName("@privateusername")).toBe("Player");
+    expect(toPublicLeaderboardDisplayName("https://example.com")).toBe("Player");
   });
 
   it("falls back to Player for empty or unsafe values", () => {
@@ -55,6 +70,23 @@ describe("resolvePublicLeaderboardDisplayName", () => {
     ).toBe("L. J.");
   });
 
+  it("publishes digit-containing CRM names consistently with toPublicLeaderboardDisplayName", () => {
+    expect(toPublicLeaderboardDisplayName("Kapnocap85")).toBe("Kapnocap85");
+    expect(
+      resolvePublicLeaderboardDisplayName({
+        displayName: "Kapnocap85",
+        firstName: "Other",
+        lastName: "Name",
+        username: "privateusername"
+      })
+    ).toBe("Kapnocap85");
+    expect(resolvePublicLeaderboardDisplayName({ displayName: "Player2" })).toBe("Player2");
+    expect(resolvePublicLeaderboardDisplayName({ displayName: "John23" })).toBe("John23");
+    expect(resolvePublicLeaderboardDisplayName({ displayName: "Redface" })).toBe("Redface");
+    expect(resolvePublicLeaderboardDisplayName({ displayName: "L. J." })).toBe("L. J.");
+    expect(resolvePublicLeaderboardDisplayName({ displayName: "S F" })).toBe("S F");
+  });
+
   it("falls back to first + last when display name is unusable", () => {
     expect(
       resolvePublicLeaderboardDisplayName({
@@ -63,6 +95,20 @@ describe("resolvePublicLeaderboardDisplayName", () => {
         lastName: "F"
       })
     ).toBe("S F");
+  });
+
+  it("does not leak unsafe identifiers when no safe first/last fallback exists", () => {
+    const unsafe = [
+      "8687540231",
+      "+1 555 123 4567",
+      "Telegram user 8687540231",
+      "@privateusername",
+      "https://example.com"
+    ];
+    for (const displayName of unsafe) {
+      expect(toPublicLeaderboardDisplayName(displayName)).toBe("Player");
+      expect(resolvePublicLeaderboardDisplayName({ displayName })).toBe("Player");
+    }
   });
 
   it("does not use username while public username fallback is blocked", () => {

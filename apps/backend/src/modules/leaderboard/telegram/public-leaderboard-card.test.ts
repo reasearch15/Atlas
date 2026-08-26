@@ -85,6 +85,7 @@ describe("public-leaderboard-card helpers", () => {
 
   it("truncates unicode names safely", () => {
     expect(truncateLeaderboardName("Picasso", 14)).toBe("Picasso");
+    expect(truncateLeaderboardName("Kapnocap85", 14)).toBe("Kapnocap85");
     expect(truncateLeaderboardName("AlexanderTheGreat123", 14).endsWith("…")).toBe(true);
     expect(truncateLeaderboardName("🔥PLAYER🔥EXTRA", 8).includes("…")).toBe(true);
     expect(truncateLeaderboardName("José", 14)).toBe("José");
@@ -227,6 +228,19 @@ describe("renderPublicLeaderboardCard", () => {
     expect(svg).toContain("HOW TO CLIMB");
     expect(svg).toContain("$1 = 1 PT");
     expect(svg).toContain("48H WHEEL");
+  });
+
+  it("renders digit-containing CRM names without rewriting them to Player", () => {
+    const svg = buildPublicLeaderboardCardSvg({
+      brandName: "SAYU GAMING HUB",
+      prizePoolCents: 25000,
+      endsAt: ENDS,
+      timezone: "America/Chicago",
+      competitionStatus: "ACTIVE",
+      standings: [standing(1, "Kapnocap85", 50)],
+      now: NOW
+    });
+    expect(svg).toContain("Kapnocap85");
   });
 
   it("writes visual inspection sample PNGs", async () => {
