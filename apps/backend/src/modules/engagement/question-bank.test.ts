@@ -8,7 +8,7 @@ import {
   validateQuestionBank,
   type EngagementQuestionInput
 } from "./question-bank";
-import { defaultApprovedQuestionBankPath, parseJsonQuestionBank, parseXlsxBuffer } from "./question-bank-file";
+import { defaultApprovedQuestionBankPath, emojiQuestionBankPath, parseJsonQuestionBank, parseXlsxBuffer, plainQuestionBankPath } from "./question-bank-file";
 
 function sample(overrides: Partial<EngagementQuestionInput> = {}): EngagementQuestionInput {
   return {
@@ -78,7 +78,7 @@ describe("question bank validation", () => {
 describe("xlsx and json question-bank import", () => {
   it("parses a valid xlsx workbook and preserves category plus option order", () => {
     const buffer = xlsxFromRows([
-      [7, "Travel", "Where would you go?", "Paris", "Tokyo", "Rome", "Cairo"]
+      [7, "Travel", "🧳🔥 Where would you go?", "🗼 Paris", "🗼 Tokyo", "🍝 Rome", "🌴 Cairo"]
     ]);
     const parsed = parseXlsxBuffer(buffer);
     expect(parsed.sheetName).toBe("Poll Questions");
@@ -86,16 +86,16 @@ describe("xlsx and json question-bank import", () => {
       {
         externalId: "7",
         category: "Travel",
-        question: "Where would you go?",
-        options: ["Paris", "Tokyo", "Rome", "Cairo"]
+        question: "🧳🔥 Where would you go?",
+        options: ["🗼 Paris", "🗼 Tokyo", "🍝 Rome", "🌴 Cairo"]
       }
     ]);
     const validated = validateQuestionBank(parsed.rows);
     expect(validated[0]).toMatchObject({
-      option1: "Paris",
-      option2: "Tokyo",
-      option3: "Rome",
-      option4: "Cairo",
+      option1: "🗼 Paris",
+      option2: "🗼 Tokyo",
+      option3: "🍝 Rome",
+      option4: "🌴 Cairo",
       category: "Travel"
     });
   });
@@ -133,6 +133,32 @@ describe("xlsx and json question-bank import", () => {
     expect(() => parseXlsxBuffer(buffer)).toThrow(/Unsupported question-bank structure/);
   });
 
+  it("does not strip or replace emojis from questions or options", () => {
+    const buffer = xlsxFromRows([
+      [
+        42,
+        "Sports & Games",
+        "🏆🔥 Which would you choose for a challenge?",
+        "🛶 Kayaking",
+        "🎳 Bowling",
+        "🏊 Swimming",
+        "🏈 Football"
+      ]
+    ]);
+    const parsed = parseXlsxBuffer(buffer);
+    expect(parsed.rows[0]?.question).toBe("🏆🔥 Which would you choose for a challenge?");
+    expect(parsed.rows[0]?.options).toEqual(["🛶 Kayaking", "🎳 Bowling", "🏊 Swimming", "🏈 Football"]);
+    const validated = validateQuestionBank(parsed.rows);
+    expect(validated[0]?.question).toBe("🏆🔥 Which would you choose for a challenge?");
+    expect(validated[0]?.option1).toBe("🛶 Kayaking");
+    expect(validated[0]?.option4).toBe("🏈 Football");
+  });
+
+  it("prefers the emoji workbook as the approved source of truth", () => {
+    expect(defaultApprovedQuestionBankPath()).toBe(emojiQuestionBankPath());
+    expect(defaultApprovedQuestionBankPath()).not.toBe(plainQuestionBankPath());
+  });
+
   it("still accepts the documented JSON shape", () => {
     const parsed = parseJsonQuestionBank(
       JSON.stringify([
@@ -159,21 +185,22 @@ describe("xlsx and json question-bank import", () => {
     expect(assessment.validated[0]).toMatchObject({
       externalId: "1",
       category: "Food & Drinks",
-      question: "Which would you pick right now?",
-      option1: "Coffee",
-      option2: "Wings",
-      option3: "Pizza",
-      option4: "Smoothies"
+      question: "🍕🔥 Which would you pick right now?",
+      option1: "☕ Coffee",
+      option2: "🍗 Wings",
+      option3: "🍕 Pizza",
+      option4: "🥤 Smoothies"
     });
     expect(assessment.validated[999]).toMatchObject({
       externalId: "1000",
       category: "Would You Rather",
-      question: "Which option wins for you?",
-      option1: "Meet your favorite celebrity",
-      option2: "Have a personal trainer",
-      option3: "Own an RV",
-      option4: "Be an amazing dancer"
+      question: "🚨🎯 Which option wins for you?",
+      option1: "🔥 Meet your favorite celebrity",
+      option2: "🚆 Have a personal trainer",
+      option3: "🔥 Own an RV",
+      option4: "💃 Be an amazing dancer"
     });
+    expect(assessment.validated.every((row) => /[\p{Extended_Pictographic}]/u.test(row.question))).toBe(true);
     const shuffled = shuffleIds(
       assessment.validated.map((row) => row.externalId),
       () => 0.73

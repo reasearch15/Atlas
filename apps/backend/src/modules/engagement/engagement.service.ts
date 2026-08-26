@@ -1,7 +1,14 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { FreeplayService } from "../freeplay/freeplay.service";
 import type { LeaderboardTelegramOutboxService } from "../leaderboard/telegram/leaderboard-telegram.outbox";
-import { DAILY_DRAW_PRIZE_CENTS, DRAW_BASE_WEIGHT, DRAW_WINNER_COOLDOWN_DRAWS, POLL_DURATION_MS } from "./engagement.constants";
+import {
+  DAILY_DRAW_PRIZE_CENTS,
+  DRAW_BASE_WEIGHT,
+  DRAW_WINNER_COOLDOWN_DRAWS,
+  POLL_DURATION_MS,
+  POLL_HEADER_RECENT_THEME_LIMIT
+} from "./engagement.constants";
+import { formatPollHeaderMessage, selectPollHeaderTheme } from "./engagement.poll-header";
 import { selectNativePollMessagesToPrune } from "./engagement.poll-visibility";
 import {
   addChicagoDays,
@@ -304,6 +311,35 @@ export class EngagementService {
     if (!poll) return;
     if (!poll.telegramMessageId) {
       if (!poll.channelId || !poll.questionText || !poll.option1 || !client.sendPoll) return;
+      if (!poll.telegramHeaderMessageId) {
+        const recent = await this.prisma.engagementPoll.findMany({
+          where: {
+            ownerCoadminUserId: poll.ownerCoadminUserId,
+            channelId: poll.channelId,
+            headerThemeId: { not: null },
+            id: { not: pollId }
+          },
+          select: { headerThemeId: true, postedAt: true },
+          orderBy: [{ postedAt: "desc" }, { id: "desc" }],
+          take: POLL_HEADER_RECENT_THEME_LIMIT
+        });
+        const theme = selectPollHeaderTheme(
+          poll.id,
+          recent.map((row) => row.headerThemeId).filter((id): id is string => Boolean(id)).reverse()
+        );
+        const header = await client.sendMessage(
+          token,
+          poll.channelId,
+          formatPollHeaderMessage(theme)
+        );
+        await this.prisma.engagementPoll.updateMany({
+          where: { id: pollId, telegramHeaderMessageId: null },
+          data: {
+            telegramHeaderMessageId: String(header.messageId),
+            headerThemeId: theme.id
+          }
+        });
+      }
       const sent = await client.sendPoll(token, poll.channelId, {
         question: poll.questionText,
         options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
@@ -343,8 +379,10 @@ export class EngagementService {
   }
 
   /**
-   * Keeps only the newest VISIBLE_NATIVE_POLL_LIMIT native poll messages in the channel.
-   * Candidates come solely from durable engagement_polls rows with telegram_poll_id set.
+   * Keeps only the newest VISIBLE_NATIVE_POLL_LIMIT native poll sets in the channel.
+   * A set is the decorative header plus the native poll. Candidates come solely
+   * from durable engagement_polls rows with telegram_poll_id set.
+   * Telegram deletion errors never block a newly posted poll.
    */
   private async pruneExcessVisibleNativePollMessages(input: {
     readonly ownerCoadminUserId: string;
@@ -364,6 +402,7 @@ export class EngagementService {
         channelId: true,
         telegramMessageId: true,
         telegramPollId: true,
+        telegramHeaderMessageId: true,
         postedAt: true
       },
       orderBy: [{ postedAt: "asc" }, { id: "asc" }]
@@ -376,32 +415,56 @@ export class EngagementService {
           channelId: row.channelId,
           telegramMessageId: row.telegramMessageId,
           telegramPollId: row.telegramPollId,
+          telegramHeaderMessageId: row.telegramHeaderMessageId,
           postedAt: row.postedAt
         }
       ];
     });
     const toPrune = selectNativePollMessagesToPrune(candidates);
     for (const old of toPrune) {
-      try {
-        await input.client.deleteMessage(
-          input.token,
-          old.channelId,
-          Number(old.telegramMessageId)
-        );
-      } catch (error) {
-        if (!isTelegramMessageMissingError(error)) throw error;
-      }
-      // Clear only this poll's durable message ref so retries cannot re-delete it
-      // and unrelated channel messages are never targeted.
+      const headerDeleted = old.telegramHeaderMessageId
+        ? await this.deleteChannelMessageBestEffort(
+            input.client,
+            input.token,
+            old.channelId,
+            Number(old.telegramHeaderMessageId)
+          )
+        : true;
+      const pollDeleted = await this.deleteChannelMessageBestEffort(
+        input.client,
+        input.token,
+        old.channelId,
+        Number(old.telegramMessageId)
+      );
+      // Clear only this poll set's durable message refs so retries cannot re-delete
+      // unrelated channel messages. Keep IDs when Telegram deletion failed for a
+      // reason other than "already gone" so the next post can retry.
+      const data: { telegramMessageId?: null; telegramHeaderMessageId?: null } = {};
+      if (pollDeleted) data.telegramMessageId = null;
+      if (headerDeleted) data.telegramHeaderMessageId = null;
+      if (Object.keys(data).length === 0) continue;
       await this.prisma.engagementPoll.updateMany({
         where: {
           id: old.id,
           channelId: old.channelId,
-          telegramMessageId: old.telegramMessageId,
           telegramPollId: old.telegramPollId
         },
-        data: { telegramMessageId: null }
+        data
       });
+    }
+  }
+
+  private async deleteChannelMessageBestEffort(
+    client: LeaderboardTelegramClient,
+    token: string,
+    channelId: string,
+    messageId: number
+  ): Promise<boolean> {
+    try {
+      await client.deleteMessage(token, channelId, messageId);
+      return true;
+    } catch (error) {
+      return isTelegramMessageMissingError(error);
     }
   }
 

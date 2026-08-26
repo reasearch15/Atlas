@@ -2,16 +2,16 @@
  * Import the approved engagement question bank.
  *
  * Validate only (no database write):
- *   pnpm --filter @atlas/backend engagement:import-questions -- --file path/to/atlas_poll_question_bank_1000.xlsx --validate-only
+ *   pnpm --filter @atlas/backend engagement:import-questions -- --file path/to/atlas_poll_question_bank_1000_emoji.xlsx --validate-only
  *
  * Import into the local/target database:
- *   pnpm --filter @atlas/backend engagement:import-questions -- --file path/to/atlas_poll_question_bank_1000.xlsx
+ *   pnpm --filter @atlas/backend engagement:import-questions -- --file path/to/atlas_poll_question_bank_1000_emoji.xlsx
  *
  * JSON remains supported:
  *   { externalId, category, question, options: [a,b,c,d], active? }
  *
- * If --file is omitted, the bundled approved workbook is used:
- *   apps/backend/src/modules/engagement/data/atlas_poll_question_bank_1000.xlsx
+ * If --file is omitted, the bundled approved emoji workbook is used:
+ *   apps/backend/src/modules/engagement/data/atlas_poll_question_bank_1000_emoji.xlsx
  *
  * Runtime cycle/use state lives in Postgres, not in the spreadsheet.
  * Never run at app startup. Import writes require DATABASE_URL.

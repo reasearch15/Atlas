@@ -1959,6 +1959,8 @@ model EngagementPoll {
   option4              String?               @db.VarChar(64)
   category             String?               @db.VarChar(80)
   channelId            String?               @map("channel_id") @db.VarChar(64)
+  telegramHeaderMessageId String?            @map("telegram_header_message_id") @db.VarChar(64)
+  headerThemeId        String?               @map("header_theme_id") @db.VarChar(32)
   telegramMessageId    String?               @map("telegram_message_id") @db.VarChar(64)
   telegramPollId       String?               @unique @map("telegram_poll_id") @db.VarChar(64)
   postedAt             DateTime?             @map("posted_at")

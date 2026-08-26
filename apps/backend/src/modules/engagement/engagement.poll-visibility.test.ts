@@ -16,6 +16,7 @@ function ref(
     channelId: "-100123",
     telegramMessageId: messageId,
     telegramPollId: `tg-${id}`,
+    telegramHeaderMessageId: `h-${messageId}`,
     postedAt: new Date(postedAt),
     ...overrides
   };
@@ -70,6 +71,19 @@ describe("selectNativePollMessagesToPrune", () => {
       .map((p) => p.telegramMessageId);
     expect(remaining).toEqual(["40", "50", "60"]);
     expect(VISIBLE_NATIVE_POLL_LIMIT).toBe(3);
+  });
+
+  it("keeps header message ids on prune refs so both messages can be deleted", () => {
+    const polls = [
+      ref("1", "10", "2026-08-25T06:00:00Z"),
+      ref("2", "20", "2026-08-25T10:00:00Z"),
+      ref("3", "30", "2026-08-25T14:00:00Z"),
+      ref("4", "40", "2026-08-25T18:00:00Z")
+    ];
+    const pruned = selectNativePollMessagesToPrune(polls);
+    expect(pruned).toHaveLength(1);
+    expect(pruned[0]?.telegramMessageId).toBe("10");
+    expect(pruned[0]?.telegramHeaderMessageId).toBe("h-10");
   });
 
   it("never selects rows that lack native poll identity or message ids", () => {

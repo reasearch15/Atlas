@@ -3,8 +3,10 @@ import {
   DAILY_DRAW_PRIZE_CENTS,
   DRAW_BASE_WEIGHT,
   DRAW_WINNER_COOLDOWN_DRAWS,
-  POLL_DURATION_MS
+  POLL_DURATION_MS,
+  POLL_HEADER_RECENT_THEME_LIMIT
 } from "./engagement.constants";
+import { formatPollHeaderMessage, selectPollHeaderTheme } from "./engagement.poll-header";
 import { selectNativePollMessagesToPrune } from "./engagement.poll-visibility";
 import {
   EMPTY_INLINE_KEYBOARD,
@@ -43,6 +45,7 @@ import { renderDailyDrawWinnerCard } from "./engagement.draw-card";
 import { shuffleIds, validateQuestionBank, type EngagementQuestionInput } from "./question-bank";
 import {
   applyFakePollAnswer,
+  LeaderboardTelegramApiError,
   type FakeLeaderboardTelegramState,
   type LeaderboardTelegramClient
 } from "../leaderboard/telegram/leaderboard-telegram.client";
@@ -89,6 +92,8 @@ export interface MemoryPoll {
   option4: string | null;
   category: string | null;
   channelId: string | null;
+  telegramHeaderMessageId: string | null;
+  headerThemeId: string | null;
   telegramMessageId: string | null;
   telegramPollId: string | null;
   postedAt: Date | null;
@@ -483,6 +488,8 @@ export class MemoryEngagementRuntime {
         option4: null,
         category: null,
         channelId: integration.channelId,
+        telegramHeaderMessageId: null,
+        headerThemeId: null,
         telegramMessageId: null,
         telegramPollId: null,
         postedAt: null,
@@ -522,6 +529,28 @@ export class MemoryEngagementRuntime {
           if (!this.client.sendPoll) {
             throw new Error("sendPoll is required for engagement channel polls");
           }
+          if (!poll.telegramHeaderMessageId) {
+            const recent = this.polls
+              .filter(
+                (row) =>
+                  row.id !== poll.id &&
+                  row.ownerCoadminUserId === poll.ownerCoadminUserId &&
+                  row.channelId === integration.channelId &&
+                  Boolean(row.headerThemeId)
+              )
+              .sort((a, b) => (a.postedAt?.getTime() ?? 0) - (b.postedAt?.getTime() ?? 0))
+              .slice(-POLL_HEADER_RECENT_THEME_LIMIT)
+              .map((row) => row.headerThemeId)
+              .filter((id): id is string => Boolean(id));
+            const theme = selectPollHeaderTheme(poll.id, recent);
+            const header = await this.client.sendMessage(
+              integration.botToken,
+              integration.channelId,
+              formatPollHeaderMessage(theme)
+            );
+            poll.telegramHeaderMessageId = String(header.messageId);
+            poll.headerThemeId = theme.id;
+          }
           const sent = await this.client.sendPoll(integration.botToken, integration.channelId, {
             question: poll.questionText,
             options: [poll.option1, poll.option2!, poll.option3!, poll.option4!],
@@ -560,6 +589,7 @@ export class MemoryEngagementRuntime {
           channelId: p.channelId,
           telegramMessageId: p.telegramMessageId,
           telegramPollId: p.telegramPollId,
+          telegramHeaderMessageId: p.telegramHeaderMessageId,
           postedAt: p.postedAt
         }
       ];
@@ -568,22 +598,42 @@ export class MemoryEngagementRuntime {
     for (const old of toPrune) {
       const poll = this.polls.find((p) => p.id === old.id);
       if (!poll || poll.telegramMessageId !== old.telegramMessageId) continue;
-      try {
-        await this.client.deleteMessage(
-          integration.botToken,
-          old.channelId,
-          Number(old.telegramMessageId)
-        );
-      } catch {
-        // Missing/already-deleted Telegram messages must not block posting.
-      }
-      if (
-        poll.telegramMessageId === old.telegramMessageId &&
-        poll.telegramPollId === old.telegramPollId &&
-        poll.channelId === old.channelId
-      ) {
+      const headerDeleted = old.telegramHeaderMessageId
+        ? await this.deleteChannelMessageBestEffort(
+            integration.botToken,
+            old.channelId,
+            Number(old.telegramHeaderMessageId)
+          )
+        : true;
+      const pollDeleted = await this.deleteChannelMessageBestEffort(
+        integration.botToken,
+        old.channelId,
+        Number(old.telegramMessageId)
+      );
+      if (poll.telegramPollId !== old.telegramPollId || poll.channelId !== old.channelId) continue;
+      if (pollDeleted && poll.telegramMessageId === old.telegramMessageId) {
         poll.telegramMessageId = null;
       }
+      if (headerDeleted) {
+        poll.telegramHeaderMessageId = null;
+      }
+    }
+  }
+
+  private async deleteChannelMessageBestEffort(
+    token: string,
+    channelId: string,
+    messageId: number
+  ): Promise<boolean> {
+    if (!this.client?.deleteMessage) return true;
+    try {
+      await this.client.deleteMessage(token, channelId, messageId);
+      return true;
+    } catch (error) {
+      return (
+        error instanceof LeaderboardTelegramApiError &&
+        /message to delete not found|message can't be deleted|MESSAGE_ID_INVALID/i.test(error.description)
+      );
     }
   }
 

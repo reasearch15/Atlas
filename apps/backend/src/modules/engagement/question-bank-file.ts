@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
@@ -8,6 +8,9 @@ import {
   isBlankQuestionInput,
   type EngagementQuestionInput
 } from "./question-bank";
+
+export const APPROVED_QUESTION_BANK_EMOJI_FILE = "atlas_poll_question_bank_1000_emoji.xlsx";
+export const APPROVED_QUESTION_BANK_PLAIN_FILE = "atlas_poll_question_bank_1000.xlsx";
 
 export interface QuestionBankFileParse {
   readonly filePath: string;
@@ -43,12 +46,27 @@ const HEADER_ALIASES: Record<string, HeaderField> = {
   option4: "option3"
 };
 
+function dataDir(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "data");
+}
+
+export function emojiQuestionBankPath(): string {
+  return resolve(dataDir(), APPROVED_QUESTION_BANK_EMOJI_FILE);
+}
+
+export function plainQuestionBankPath(): string {
+  return resolve(dataDir(), APPROVED_QUESTION_BANK_PLAIN_FILE);
+}
+
+/** Prefer the emoji workbook whenever it is present. Never fall back to the plain bank in that case. */
 export function defaultApprovedQuestionBankPath(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "data/atlas_poll_question_bank_1000.xlsx");
+  const emojiPath = emojiQuestionBankPath();
+  if (existsSync(emojiPath)) return emojiPath;
+  return plainQuestionBankPath();
 }
 
 export function isApprovedQuestionBankPath(filePath: string): boolean {
-  return /atlas_poll_question_bank_1000\.xlsx$/i.test(filePath.replace(/\\/g, "/"));
+  return /atlas_poll_question_bank_1000(_emoji)?\.xlsx$/i.test(filePath.replace(/\\/g, "/"));
 }
 
 export function expectedCountForFile(filePath: string, explicit?: number): number | undefined {
