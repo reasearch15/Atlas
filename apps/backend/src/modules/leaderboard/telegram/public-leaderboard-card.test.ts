@@ -243,6 +243,22 @@ describe("renderPublicLeaderboardCard", () => {
     expect(svg).toContain("Kapnocap85");
   });
 
+  it("renders the production rank-9 alphanumeric nickname instead of Player", () => {
+    const svg = buildPublicLeaderboardCardSvg({
+      brandName: "SAYU GAMING HUB",
+      prizePoolCents: 25000,
+      endsAt: ENDS,
+      timezone: "America/Chicago",
+      competitionStatus: "ACTIVE",
+      standings: [standing(9, "580.1a", 45)],
+      now: NOW
+    });
+    expect(svg).toContain("580.1a");
+    expect(svg).toContain("45 PTS");
+    expect(svg).not.toMatch(/>Player</);
+    expect(svg).not.toContain("@Zombie24");
+  });
+
   it("writes visual inspection sample PNGs", async () => {
     mkdirSync(SAMPLE_DIR, { recursive: true });
 

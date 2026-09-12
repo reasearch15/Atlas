@@ -24,6 +24,8 @@ describe("toPublicLeaderboardDisplayName", () => {
     expect(toPublicLeaderboardDisplayName("Kapnocap85")).toBe("Kapnocap85");
     expect(toPublicLeaderboardDisplayName("Player2")).toBe("Player2");
     expect(toPublicLeaderboardDisplayName("John23")).toBe("John23");
+    expect(toPublicLeaderboardDisplayName("580.1a")).toBe("580.1a");
+    expect(toPublicLeaderboardDisplayName("Johnny AintNoWay")).toBe("Johnny AintNoWay");
   });
 
   it("collapses whitespace", () => {
@@ -41,7 +43,6 @@ describe("toPublicLeaderboardDisplayName", () => {
     expect(toPublicLeaderboardDisplayName("-1001234567890")).toBe("Player");
     expect(toPublicLeaderboardDisplayName("Telegram user 42")).toBe("Player");
     expect(toPublicLeaderboardDisplayName("Telegram user -99")).toBe("Player");
-    expect(toPublicLeaderboardDisplayName("580.1a")).toBe("Player");
   });
 
   it("does not leak the production peer id, phone, telegram-user label, @username, or URL", () => {
@@ -89,6 +90,7 @@ describe("resolvePublicLeaderboardDisplayName", () => {
     expect(resolvePublicLeaderboardDisplayName({ displayName: "Redface" })).toBe("Redface");
     expect(resolvePublicLeaderboardDisplayName({ displayName: "L. J." })).toBe("L. J.");
     expect(resolvePublicLeaderboardDisplayName({ displayName: "S F" })).toBe("S F");
+    expect(resolvePublicLeaderboardDisplayName({ displayName: "580.1a" })).toBe("580.1a");
   });
 
   it("falls back to first + last when display name is unusable", () => {
@@ -119,10 +121,10 @@ describe("resolvePublicLeaderboardDisplayName", () => {
     expect(PUBLIC_LEADERBOARD_USERNAME_FALLBACK_ALLOWED).toBe(false);
     expect(
       resolvePublicLeaderboardDisplayName({
-        displayName: "580.1a",
-        firstName: "580.1a",
+        displayName: "8687540231",
+        firstName: null,
         lastName: null,
-        username: "Zombiez4"
+        username: "Zombie24"
       })
     ).toBe("Player");
     expect(
@@ -132,6 +134,23 @@ describe("resolvePublicLeaderboardDisplayName", () => {
         username: "AdyXen"
       })
     ).toBe("A.");
+  });
+
+  it("publishes the production alphanumeric nickname and never the Telegram username", () => {
+    expect(
+      resolvePublicLeaderboardDisplayName({
+        displayName: "580.1a",
+        username: "Zombie24"
+      })
+    ).toBe("580.1a");
+    expect(
+      resolvePublicLeaderboardDisplayName({
+        displayName: "580.1a",
+        firstName: "580.1a",
+        lastName: null,
+        username: "Zombie24"
+      })
+    ).toBe("580.1a");
   });
 
   it("recovers Telegram first/last/title when CRM would publish as Player", () => {

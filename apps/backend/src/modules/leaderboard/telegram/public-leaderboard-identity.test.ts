@@ -97,6 +97,17 @@ describe("resolvePublicLeaderboardNameFromContact", () => {
     expect(shouldHealCrmPublicDisplayName("Custom Player Name", "Joe Mashburn")).toBe(false);
   });
 
+  it("uses the production alphanumeric CRM nickname and never the Telegram username", () => {
+    expect(
+      resolvePublicLeaderboardNameFromContact({
+        displayName: "580.1a",
+        username: "Zombie24",
+        chats: [{ chatType: "PRIVATE", username: "Zombie24", title: "@Zombie24" }]
+      })
+    ).toBe("580.1a");
+    expect(shouldHealCrmPublicDisplayName("580.1a", "Some Other Name")).toBe(false);
+  });
+
   it("uses a private chat title when first/last are blank", () => {
     expect(
       resolvePublicLeaderboardNameFromContact({

@@ -121,6 +121,20 @@ describe("formatPublicLeaderboardMessage", () => {
     expect(text).toContain("🥇 1. Kapnocap85 — 50 pts");
   });
 
+  it("publishes the production alphanumeric nickname at rank 9 with 45 points", () => {
+    const text = formatPublicLeaderboardMessage({
+      title: "BIWEEKLY LEADERBOARD",
+      top10: [{ rank: 9, displayName: "580.1a", points: 45 }],
+      prizePoolCents: 100,
+      endsAt,
+      timezone: "America/Chicago"
+    });
+    expect(text).toContain("9. 580.1a — 45 pts");
+    expect(text).not.toContain("Player");
+    expect(text).not.toContain("@Zombie24");
+    expect(text).not.toContain("Zombie24");
+  });
+
   it("does not leak peer ids, phones, telegram-user labels, @usernames, or URLs", () => {
     const unsafe = [
       "8687540231",

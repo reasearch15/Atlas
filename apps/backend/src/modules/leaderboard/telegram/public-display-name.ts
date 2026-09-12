@@ -34,7 +34,7 @@ export interface PublicLeaderboardNameSources {
 /**
  * Sanitizes a single candidate label for public leaderboard posts.
  * Preserves multi-word names, initials (e.g. "L. J.", "A.J.", "J R"), and
- * letter-led names that contain digits (e.g. "Kapnocap85").
+ * letter-led names that contain digits (e.g. "Kapnocap85", "580.1a").
  */
 export function toPublicLeaderboardDisplayName(displayName: string | null | undefined): string {
   return tryPublicLeaderboardDisplayName(displayName) ?? PUBLIC_LEADERBOARD_FALLBACK_NAME;
@@ -107,8 +107,10 @@ function sanitizePublicDisplayLabel(value: string | null | undefined): string | 
 
   const letterCount = (cleaned.match(/\p{L}/gu) ?? []).length;
   if (letterCount < 1) return null;
-  // Single bare letter with no initial punctuation/space is too thin to publish.
-  if (letterCount === 1 && !/[.\s]/.test(cleaned)) return null;
+  // Bare single letter ("A") is too thin. Initials ("A.") and alphanumeric
+  // nicknames that include a letter ("580.1a") are publishable.
+  const digitCount = (cleaned.match(/\p{Nd}/gu) ?? []).length;
+  if (letterCount === 1 && digitCount === 0 && !/[.\s]/.test(cleaned)) return null;
 
   if (/^unknown/i.test(cleaned)) return null;
 
@@ -130,14 +132,15 @@ function looksLikeExternalIdentifier(value: string): boolean {
 }
 
 /**
- * Rejects digit-dominant / coded tokens (peer-ish handles like "580.1a") while
- * allowing human-readable CRM names that merely contain digits (Kapnocap85).
+ * Rejects UUIDs and digit-only tokens (after nickname punctuation is stripped).
+ * Alphanumeric nicknames such as "580.1a" or "Kapnocap85" are not coded IDs
+ * merely because they contain more digits than letters.
  */
 function looksLikeCodedPublicIdentifier(value: string): boolean {
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
     return true;
   }
-  const letterCount = (value.match(/\p{L}/gu) ?? []).length;
-  const digitCount = (value.match(/\p{Nd}/gu) ?? []).length;
-  return digitCount > 0 && digitCount >= letterCount;
+  const compact = value.replace(/[\s'.-]/g, "");
+  if (!compact) return true;
+  return /^\+?\d+$/.test(compact);
 }

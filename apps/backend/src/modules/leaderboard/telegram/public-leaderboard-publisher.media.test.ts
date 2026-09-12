@@ -182,6 +182,68 @@ describe("publishPublicLeaderboardSnapshot media publisher", () => {
     );
   });
 
+  it("publishes the production 45-point alphanumeric nickname instead of Player", async () => {
+    const { prisma, integrationId } = seedOwner({
+      workspaceId: workspaceA,
+      ownerId: ownerA,
+      competitionId: competitionA,
+      channelId: channelA,
+      token: "tokA",
+      playerId: playerA,
+      displayName: "580.1a",
+      points: 45,
+      poolCents: 25000,
+      messageId: null
+    });
+    prisma._state.standings[0].crmContact = {
+      displayName: "580.1a",
+      username: "Zombie24",
+      chats: []
+    };
+    const tgState: FakeLeaderboardTelegramState = {
+      bots: new Map([["tokA", { id: 1, isBot: true, firstName: "Bot", username: "tokA_bot" }]]),
+      chats: new Map([
+        [
+          Number(channelA),
+          {
+            id: Number(channelA),
+            type: "channel",
+            members: new Map([[1, "administrator"]]),
+            messages: [],
+            nextMessageId: 7
+          }
+        ]
+      ])
+    };
+    const client = createFakeLeaderboardTelegramClient(tgState);
+    const published = await publishPublicLeaderboardSnapshot({
+      prisma: prisma as never,
+      client,
+      token: "tokA",
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      integrationId,
+      channelId: channelA,
+      botUsername: "tokA_bot",
+      persistentMessageId: null,
+      persistentMessageCompetitionId: null,
+      lastPublicTop10Json: [],
+      mode: "replace",
+      skipRankAnnouncements: true
+    });
+    expect(published.nextTop10[0]).toMatchObject({ displayName: "580.1a", totalPoints: 45 });
+    expect(published.nextTop10[0]?.displayName).not.toBe("Player");
+    expect(
+      (prisma._state.integrations[0].lastPublicTop10Json as Array<{ displayName: string }>)[0]?.displayName
+    ).toBe("580.1a");
+    const photo = tgState.chats.get(Number(channelA))!.messages[0];
+    expect(photo?.photo).toBe(true);
+    if (typeof photo?.caption === "string") {
+      expect(photo.caption).not.toContain("@Zombie24");
+    }
+  });
+
   it("recovers a Telegram name when CRM would publish as Player and heals CRM", async () => {
     const { prisma, integrationId } = seedOwner({
       workspaceId: workspaceA,
