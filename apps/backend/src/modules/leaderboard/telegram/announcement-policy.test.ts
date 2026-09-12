@@ -277,7 +277,7 @@ describe("previousTop10ForAnnouncements", () => {
   });
 
   it("keeps snapshot when competition matches", () => {
-    const snapshot = [{ crmContactId: "a", rank: 1, displayName: "A", totalPoints: 50 }];
+    const snapshot = [{ crmContactId: "a", rank: 1, displayName: "Alice", totalPoints: 50 }];
     expect(previousTop10ForAnnouncements("comp-1", "comp-1", snapshot)).toEqual(snapshot);
   });
 

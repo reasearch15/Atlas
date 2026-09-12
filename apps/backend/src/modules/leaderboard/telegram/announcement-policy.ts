@@ -8,6 +8,8 @@
  * - players still at 0 total points (seeded standings, bind-while-active)
  */
 
+import { toPublicLeaderboardDisplayName } from "./public-display-name";
+
 export type AnnouncementKind =
   | "ENTER_TOP_10"
   | "ENTER_TOP_3"
@@ -226,7 +228,9 @@ export function parsePostedTop10Snapshot(value: unknown): AnnouncementStandingRo
     const parsed: AnnouncementStandingRow = {
       crmContactId: row.crmContactId,
       rank: row.rank,
-      displayName: typeof row.displayName === "string" ? row.displayName : "Player",
+      displayName: toPublicLeaderboardDisplayName(
+        typeof row.displayName === "string" ? row.displayName : null
+      ),
       ...(typeof row.totalPoints === "number" ? { totalPoints: row.totalPoints } : {})
     };
     rows.push(parsed);

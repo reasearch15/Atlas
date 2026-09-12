@@ -372,11 +372,28 @@ describe("planLinkedCrmContactIdentityRepair", () => {
     ).toEqual({ displayName: "waylon_rivers85", username: "waylon_rivers85" });
   });
 
+  it("repairs a privacy-sensitive CRM placeholder from Telegram first/last", () => {
+    expect(
+      planLinkedCrmContactIdentityRepair({
+        contact: contact({ displayName: "@privateusername" }),
+        chat: privateChat({
+          firstName: "Amanda",
+          lastName: "Mauricio",
+          username: "privateusername",
+          title: "Amanda Mauricio"
+        })
+      })
+    ).toEqual({ displayName: "Amanda Mauricio", username: "privateusername" });
+  });
+
   it("treats Unknown / Unknown User / empty / Telegram user fallback as placeholders", () => {
     expect(isPlaceholderCrmDisplayName("Unknown")).toBe(true);
     expect(isPlaceholderCrmDisplayName("Unknown User")).toBe(true);
     expect(isPlaceholderCrmDisplayName("  ")).toBe(true);
     expect(isPlaceholderCrmDisplayName("Telegram user 8771801870", "8771801870")).toBe(true);
+    expect(isPlaceholderCrmDisplayName("Player")).toBe(true);
+    expect(isPlaceholderCrmDisplayName("@privateusername")).toBe(true);
     expect(isPlaceholderCrmDisplayName("Joe Mashburn")).toBe(false);
+    expect(isPlaceholderCrmDisplayName("Custom Player Name")).toBe(false);
   });
 });

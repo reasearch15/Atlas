@@ -20,6 +20,8 @@ export * from "./auto-bind";
 export * from "./backfill-participants";
 export * from "./ownership-resolution";
 export * from "./telegram/public-display-name";
+export * from "./telegram/public-leaderboard-identity";
+export * from "./reconcile-leaderboard-public-names";
 export * from "./telegram/membership-status";
 export * from "./telegram/competition-end-display";
 export * from "./player-search";

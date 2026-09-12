@@ -31,7 +31,11 @@ import {
   formatPublicResultsMessage
 } from "./public-message";
 import { publishPublicLeaderboardSnapshot } from "./public-leaderboard-publisher";
-import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
+import {
+  PUBLIC_LEADERBOARD_CONTACT_IDENTITY_SELECT,
+  resolveAndHealPublicLeaderboardDisplayName
+} from "./public-leaderboard-identity";
+import { toPublicLeaderboardDisplayName } from "./public-display-name";
 import { renderWinnersPictureCard } from "./winners-picture-card";
 import {
   formatPersonalAnnouncementDm,
@@ -617,34 +621,25 @@ export class LeaderboardTelegramProcessor {
       orderBy: { prizeRank: "asc" },
       include: {
         crmContact: {
-          select: {
-            displayName: true,
-            username: true,
-            chats: {
-              select: { firstName: true, lastName: true, username: true, updatedAt: true },
-              orderBy: { updatedAt: "desc" },
-              take: 1
-            }
-          }
+          select: PUBLIC_LEADERBOARD_CONTACT_IDENTITY_SELECT
         }
       }
     });
 
     const text = formatPublicResultsMessage({
       prizePoolCents: competition.prizePoolCents,
-      winners: payouts.map((p) => {
-        const chat = Array.isArray(p.crmContact.chats) ? p.crmContact.chats[0] : undefined;
-        return {
+      winners: await Promise.all(
+        payouts.map(async (p) => ({
           prizeRank: p.prizeRank as 1 | 2 | 3,
-          displayName: resolvePublicLeaderboardDisplayName({
-            displayName: p.crmContact.displayName,
-            firstName: chat?.firstName ?? null,
-            lastName: chat?.lastName ?? null,
-            username: p.crmContact.username ?? chat?.username ?? null
+          displayName: await resolveAndHealPublicLeaderboardDisplayName({
+            prisma: this.prisma,
+            crmContactId: p.crmContactId,
+            contact: p.crmContact,
+            ...(this.logger ? { logger: this.logger } : {})
           }),
           payoutCents: p.payoutCents
-        };
-      })
+        }))
+      )
     });
 
     await this.client.sendMessage(token, integration.channelId, text);
@@ -784,15 +779,7 @@ export class LeaderboardTelegramProcessor {
       orderBy: { prizeRank: "asc" },
       include: {
         crmContact: {
-          select: {
-            displayName: true,
-            username: true,
-            chats: {
-              select: { firstName: true, lastName: true, username: true, updatedAt: true },
-              orderBy: { updatedAt: "desc" },
-              take: 1
-            }
-          }
+          select: PUBLIC_LEADERBOARD_CONTACT_IDENTITY_SELECT
         }
       }
     });
@@ -802,19 +789,18 @@ export class LeaderboardTelegramProcessor {
       endsAt: competition.endsAt,
       timezone: settings?.timezone ?? "America/Chicago",
       prizePoolCents: competition.prizePoolCents,
-      winners: payouts.map((p) => {
-        const chat = Array.isArray(p.crmContact.chats) ? p.crmContact.chats[0] : undefined;
-        return {
+      winners: await Promise.all(
+        payouts.map(async (p) => ({
           prizeRank: p.prizeRank as 1 | 2 | 3,
-          displayName: resolvePublicLeaderboardDisplayName({
-            displayName: p.crmContact.displayName,
-            firstName: chat?.firstName ?? null,
-            lastName: chat?.lastName ?? null,
-            username: p.crmContact.username ?? chat?.username ?? null
+          displayName: await resolveAndHealPublicLeaderboardDisplayName({
+            prisma: this.prisma,
+            crmContactId: p.crmContactId,
+            contact: p.crmContact,
+            ...(this.logger ? { logger: this.logger } : {})
           }),
           payoutCents: p.payoutCents
-        };
-      })
+        }))
+      )
     });
     const sent = await this.client.sendPhoto(token, integration.channelId, png, {
       filename: "competition-winners.png"
@@ -1007,9 +993,13 @@ export class LeaderboardTelegramProcessor {
 
     const provenFromRank =
       input.fromRank != null && input.fromRank > current.rank ? input.fromRank : null;
+    const displayName = await this.resolvePublicLeaderboardDisplayNameForContact(
+      input.crmContactId,
+      input.displayName
+    );
     return {
       text: formatCurrentStateRankAnnouncement({
-        displayName: input.displayName,
+        displayName,
         rank: current.rank,
         totalPoints: current.totalPoints,
         pointsBehindNext: current.rank === 1 ? null : current.pointsBehindNext,
@@ -1069,6 +1059,27 @@ export class LeaderboardTelegramProcessor {
       totalPoints: current.totalPoints,
       pointsBehindNext
     };
+  }
+
+  private async resolvePublicLeaderboardDisplayNameForContact(
+    crmContactId: string,
+    fallbackDisplayName: string
+  ): Promise<string> {
+    try {
+      const contact = await this.prisma.crmContact.findUnique({
+        where: { id: crmContactId },
+        select: PUBLIC_LEADERBOARD_CONTACT_IDENTITY_SELECT
+      });
+      if (!contact) return toPublicLeaderboardDisplayName(fallbackDisplayName);
+      return await resolveAndHealPublicLeaderboardDisplayName({
+        prisma: this.prisma,
+        crmContactId,
+        contact,
+        ...(this.logger ? { logger: this.logger } : {})
+      });
+    } catch {
+      return toPublicLeaderboardDisplayName(fallbackDisplayName);
+    }
   }
 
   private async processPlayerDm(

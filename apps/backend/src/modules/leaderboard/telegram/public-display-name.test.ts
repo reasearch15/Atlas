@@ -8,6 +8,9 @@ import {
 describe("toPublicLeaderboardDisplayName", () => {
   it("preserves safe full names and initials", () => {
     expect(toPublicLeaderboardDisplayName("L. J.")).toBe("L. J.");
+    expect(toPublicLeaderboardDisplayName("A.J.")).toBe("A.J.");
+    expect(toPublicLeaderboardDisplayName("Jake")).toBe("Jake");
+    expect(toPublicLeaderboardDisplayName("J R")).toBe("J R");
     expect(toPublicLeaderboardDisplayName("S F")).toBe("S F");
     expect(toPublicLeaderboardDisplayName("Amanda")).toBe("Amanda");
     expect(toPublicLeaderboardDisplayName("O'Neil")).toBe("O'Neil");
@@ -56,6 +59,7 @@ describe("toPublicLeaderboardDisplayName", () => {
     expect(toPublicLeaderboardDisplayName("   ")).toBe("Player");
     expect(toPublicLeaderboardDisplayName("A")).toBe("Player");
     expect(toPublicLeaderboardDisplayName("Unknown User")).toBe("Player");
+    expect(toPublicLeaderboardDisplayName("Player")).toBe("Player");
   });
 });
 
@@ -128,5 +132,28 @@ describe("resolvePublicLeaderboardDisplayName", () => {
         username: "AdyXen"
       })
     ).toBe("A.");
+  });
+
+  it("recovers Telegram first/last/title when CRM would publish as Player", () => {
+    expect(
+      resolvePublicLeaderboardDisplayName({
+        displayName: "Player",
+        firstName: "John",
+        lastName: "McCloud"
+      })
+    ).toBe("John McCloud");
+    expect(
+      resolvePublicLeaderboardDisplayName({
+        displayName: "Telegram user 8201130943",
+        firstName: "L.",
+        lastName: "J."
+      })
+    ).toBe("L. J.");
+    expect(
+      resolvePublicLeaderboardDisplayName({
+        displayName: "@privateusername",
+        title: "Amanda Mauricio"
+      })
+    ).toBe("Amanda Mauricio");
   });
 });

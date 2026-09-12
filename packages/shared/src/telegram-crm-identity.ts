@@ -304,6 +304,11 @@ export function isPlaceholderCrmDisplayName(
   const trimmed = cleanDisplayPart(value);
   if (!trimmed) return true;
   if (/^unknown(\s|$)/i.test(trimmed)) return true;
+  if (/^player$/i.test(trimmed)) return true;
+  if (/^@/.test(trimmed)) return true;
+  if (/https?:\/\//i.test(trimmed) || /www\./i.test(trimmed)) return true;
+  if (/@/.test(trimmed)) return true;
+  if (/^\+?[0-9][\d\s().-]{5,}$/.test(trimmed)) return true;
   if (isTemporaryTelegramUserTitle(trimmed)) return true;
   if (telegramChatId && trimmed === telegramChatId.trim()) return true;
   return false;

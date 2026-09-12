@@ -5,9 +5,15 @@
  * Prefer a safe human-readable CRM/Telegram display label (including initials and
  * gamer-style names that contain digits, e.g. Kapnocap85).
  * Staff privacy caps are separate — public posts use this stricter allowlist.
+ *
+ * The generic token "Player" is only a last-resort fallback. It is never treated
+ * as a real CRM/Telegram identity, so recovery can still use first/last/title.
  */
 
 const MAX_PUBLIC_NAME_LENGTH = 40;
+
+/** Last-resort public label when no safe human-readable identity exists. */
+export const PUBLIC_LEADERBOARD_FALLBACK_NAME = "Player";
 
 /** Public channel posts intentionally do not publish Telegram @usernames. */
 export const PUBLIC_LEADERBOARD_USERNAME_FALLBACK_ALLOWED = false;
@@ -16,6 +22,8 @@ export interface PublicLeaderboardNameSources {
   readonly displayName?: string | null;
   readonly firstName?: string | null;
   readonly lastName?: string | null;
+  /** Private telegram_chats.title (never a group/channel title). */
+  readonly title?: string | null;
   /**
    * Present for callers that have CRM/Telegram username available.
    * Ignored while {@link PUBLIC_LEADERBOARD_USERNAME_FALLBACK_ALLOWED} is false.
@@ -25,11 +33,24 @@ export interface PublicLeaderboardNameSources {
 
 /**
  * Sanitizes a single candidate label for public leaderboard posts.
- * Preserves multi-word names, initials (e.g. "L. J.", "S F"), and
+ * Preserves multi-word names, initials (e.g. "L. J.", "A.J.", "J R"), and
  * letter-led names that contain digits (e.g. "Kapnocap85").
  */
 export function toPublicLeaderboardDisplayName(displayName: string | null | undefined): string {
-  return sanitizePublicDisplayLabel(displayName) ?? "Player";
+  return tryPublicLeaderboardDisplayName(displayName) ?? PUBLIC_LEADERBOARD_FALLBACK_NAME;
+}
+
+/** Returns the sanitized label, or null when the value must not be published. */
+export function tryPublicLeaderboardDisplayName(displayName: string | null | undefined): string | null {
+  return sanitizePublicDisplayLabel(displayName);
+}
+
+/**
+ * True when a stored CRM label would publish as {@link PUBLIC_LEADERBOARD_FALLBACK_NAME}.
+ * Used to decide whether Telegram identity may replace the CRM value.
+ */
+export function isWeakPublicLeaderboardCrmName(displayName: string | null | undefined): boolean {
+  return tryPublicLeaderboardDisplayName(displayName) == null;
 }
 
 /**
@@ -45,12 +66,21 @@ export function resolvePublicLeaderboardDisplayName(sources: PublicLeaderboardNa
   );
   if (fromParts) return fromParts;
 
+  const fromFirst = sanitizePublicDisplayLabel(sources.firstName);
+  if (fromFirst) return fromFirst;
+
+  const fromLast = sanitizePublicDisplayLabel(sources.lastName);
+  if (fromLast) return fromLast;
+
+  const fromTitle = sanitizePublicDisplayLabel(sources.title);
+  if (fromTitle) return fromTitle;
+
   if (PUBLIC_LEADERBOARD_USERNAME_FALLBACK_ALLOWED) {
     const fromUsername = sanitizePublicUsername(sources.username);
     if (fromUsername) return fromUsername;
   }
 
-  return "Player";
+  return PUBLIC_LEADERBOARD_FALLBACK_NAME;
 }
 
 function sanitizePublicDisplayLabel(value: string | null | undefined): string | null {
@@ -58,6 +88,7 @@ function sanitizePublicDisplayLabel(value: string | null | undefined): string | 
   const collapsed = value.trim().replace(/\s+/g, " ");
   if (!collapsed) return null;
 
+  if (/^player$/i.test(collapsed)) return null;
   if (/^@/.test(collapsed)) return null;
   if (/^-?\d{5,}$/.test(collapsed)) return null;
   if (/^telegram\s+user\s+-?\d+$/i.test(collapsed)) return null;
@@ -67,9 +98,11 @@ function sanitizePublicDisplayLabel(value: string | null | undefined): string | 
   if (/[\u0000-\u001F\u007F]/.test(collapsed)) return null;
   if (/^unknown(\s|$)/i.test(collapsed)) return null;
 
-  // Letters, marks, digits (Kapnocap85 / Player2), spaces, apostrophe, hyphen, periods.
+  // Letters, marks, digits (Kapnocap85 / Player2), spaces, apostrophe, hyphen, periods
+  // (initials such as "L. J.", "A.J.", "J R").
   const cleaned = collapsed.replace(/[^\p{L}\p{M}\p{Nd}\s'.-]/gu, "").replace(/\s+/g, " ").trim();
   if (!cleaned) return null;
+  if (/^player$/i.test(cleaned)) return null;
   if (looksLikeCodedPublicIdentifier(cleaned)) return null;
 
   const letterCount = (cleaned.match(/\p{L}/gu) ?? []).length;

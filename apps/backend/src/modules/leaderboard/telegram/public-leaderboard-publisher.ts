@@ -14,7 +14,11 @@ import {
   buildPublicLeaderboardClimbTips,
   maxWheelPointsFromDistribution
 } from "./public-leaderboard-climb-tips";
-import { resolvePublicLeaderboardDisplayName } from "./public-display-name";
+import {
+  PUBLIC_LEADERBOARD_CONTACT_IDENTITY_SELECT,
+  resolveAndHealPublicLeaderboardDisplayName
+} from "./public-leaderboard-identity";
+import { PUBLIC_LEADERBOARD_FALLBACK_NAME } from "./public-display-name";
 import {
   buildPublicLeaderboardKeyboard,
   formatPublicLeaderboardCaption,
@@ -121,15 +125,7 @@ export async function publishPublicLeaderboardSnapshot(
     where: { competitionId: competition.id, ownerCoadminUserId: input.ownerCoadminUserId },
     include: {
       crmContact: {
-        select: {
-          displayName: true,
-          username: true,
-          chats: {
-            select: { firstName: true, lastName: true, username: true, updatedAt: true },
-            orderBy: { updatedAt: "desc" },
-            take: 1
-          }
-        }
+        select: PUBLIC_LEADERBOARD_CONTACT_IDENTITY_SELECT
       }
     }
   });
@@ -143,24 +139,23 @@ export async function publishPublicLeaderboardSnapshot(
   ).slice(0, 10);
 
   const displayById = new Map(
-    standings.map((s) => {
-      const chat = Array.isArray(s.crmContact.chats) ? s.crmContact.chats[0] : undefined;
-      return [
-        s.crmContactId,
-        resolvePublicLeaderboardDisplayName({
-          displayName: s.crmContact.displayName,
-          firstName: chat?.firstName ?? null,
-          lastName: chat?.lastName ?? null,
-          username: s.crmContact.username ?? chat?.username ?? null
-        })
-      ] as const;
-    })
+    await Promise.all(
+      standings.map(async (s) => {
+        const displayName = await resolveAndHealPublicLeaderboardDisplayName({
+          prisma: input.prisma,
+          crmContactId: s.crmContactId,
+          contact: s.crmContact,
+          ...(input.logger ? { logger: input.logger } : {})
+        });
+        return [s.crmContactId, displayName] as const;
+      })
+    )
   );
 
   const nextTop10: PublicLeaderboardTop10Row[] = ranked.map((r) => ({
     crmContactId: r.crmContactId,
     rank: r.rank,
-    displayName: displayById.get(r.crmContactId) ?? "Player",
+    displayName: displayById.get(r.crmContactId) ?? PUBLIC_LEADERBOARD_FALLBACK_NAME,
     totalPoints: r.totalPoints
   }));
 

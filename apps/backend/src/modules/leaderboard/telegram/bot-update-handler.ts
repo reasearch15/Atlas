@@ -8,7 +8,11 @@
  * Prefer webhook in production; optional LEADERBOARD_BOT_POLLING is for local/dev only.
  */
 import type { PrismaClient } from "@prisma/client";
-import type { FreeplayPlayerStatusDto, FreeplaySpinResultDto } from "@atlas/shared";
+import {
+  isPlaceholderCrmDisplayName,
+  type FreeplayPlayerStatusDto,
+  type FreeplaySpinResultDto
+} from "@atlas/shared";
 import {
   decryptSecret,
   type EncryptedSecret
@@ -37,6 +41,7 @@ import {
   LEADERBOARD_WHEEL_SPIN_CALLBACK_DATA
 } from "./personal-rank-message";
 import { buildPlayTelegramKeyboard } from "./public-message";
+import { isWeakPublicLeaderboardCrmName } from "./public-display-name";
 import { EngagementService, type EngagementVoteStatus } from "../../engagement/engagement.service";
 
 export interface BotWheelServicePort {
@@ -278,7 +283,7 @@ export class LeaderboardBotUpdateHandler {
         integration,
         token,
         telegramUserId,
-        firstName: from.first_name ?? "Player",
+        firstName: from.first_name ?? "",
         lastName: from.last_name,
         username: from.username,
         payloadRaw
@@ -686,7 +691,7 @@ export class LeaderboardBotUpdateHandler {
       }
     }
 
-    const displayName = [input.firstName, input.lastName].filter(Boolean).join(" ").trim() || "Player";
+    const displayName = [input.firstName, input.lastName].filter(Boolean).join(" ").trim();
     const contact = await this.upsertPrivateContact({
       workspaceId: input.integration.workspaceId,
       telegramPeerId: input.telegramUserId,
@@ -938,6 +943,7 @@ export class LeaderboardBotUpdateHandler {
     displayName: string;
     username?: string | undefined;
   }) {
+    const incomingName = input.displayName.trim();
     const existing = await this.prisma.crmContact.findUnique({
       where: {
         workspaceId_telegramPeerId: {
@@ -947,11 +953,18 @@ export class LeaderboardBotUpdateHandler {
       }
     });
     if (existing) {
+      const keepExisting =
+        !isWeakPublicLeaderboardCrmName(existing.displayName) &&
+        !isPlaceholderCrmDisplayName(existing.displayName, input.telegramPeerId);
+      const nextName =
+        keepExisting || isWeakPublicLeaderboardCrmName(incomingName) || isPlaceholderCrmDisplayName(incomingName, input.telegramPeerId)
+          ? existing.displayName
+          : incomingName;
       return this.prisma.crmContact.update({
         where: { id: existing.id },
         data: {
           kind: "PRIVATE",
-          displayName: input.displayName.slice(0, 255),
+          displayName: (nextName || existing.displayName).slice(0, 255),
           ...(input.username !== undefined ? { username: input.username.slice(0, 120) } : {}),
           lastSeenAt: new Date()
         }
@@ -962,7 +975,7 @@ export class LeaderboardBotUpdateHandler {
         workspaceId: input.workspaceId,
         telegramPeerId: input.telegramPeerId,
         kind: "PRIVATE",
-        displayName: input.displayName.slice(0, 255),
+        displayName: (incomingName || "Unknown User").slice(0, 255),
         username: input.username?.slice(0, 120) ?? null
       }
     });

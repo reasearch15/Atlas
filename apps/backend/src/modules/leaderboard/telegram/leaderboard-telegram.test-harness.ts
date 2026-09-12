@@ -216,7 +216,23 @@ export function createMemoryPrisma() {
     },
     crmContact: {
       findFirst: async ({ where }: any) =>
-        contacts.find((c) => c.id === where.id && c.workspaceId === where.workspaceId) ?? null
+        contacts.find((c) => {
+          if (where?.id && c.id !== where.id) return false;
+          if (where?.workspaceId && c.workspaceId !== where.workspaceId) return false;
+          return true;
+        }) ?? null,
+      findUnique: async ({ where }: any) => contacts.find((c) => c.id === where.id) ?? null,
+      update: async ({ where, data }: any) => {
+        const row = contacts.find((c) => c.id === where.id);
+        if (!row) throw new Error("contact missing");
+        Object.assign(row, data, { updatedAt: new Date() });
+        for (const standing of standings) {
+          if (standing.crmContactId === where.id && standing.crmContact) {
+            Object.assign(standing.crmContact, data);
+          }
+        }
+        return row;
+      }
     },
     giveawayPayout: {
       findMany: async ({ where }: any) =>
