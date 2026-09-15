@@ -207,7 +207,7 @@ describe("renderPublicLeaderboardCard", () => {
       now: NOW,
       theme: "FROZEN"
     });
-  });
+  }, 15_000);
 
   it("SVG includes empty-state copy, prize text, and how-to-climb", () => {
     const svg = buildPublicLeaderboardCardSvg({

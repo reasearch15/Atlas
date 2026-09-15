@@ -3,7 +3,7 @@ import { LEADERBOARD_TIMEZONE } from "../leaderboard/leaderboard.constants";
 
 export const ENGAGEMENT_TIMEZONE = LEADERBOARD_TIMEZONE;
 export const POLL_DURATION_MS = 4 * 60 * 60 * 1000;
-export const POLL_POST_HOURS = [6, 10, 14, 18, 22] as const;
+export const POLL_POST_HOURS = [6, 18] as const;
 export const DECLARATION_HOUR = 23;
 export const QUIET_START_HOUR = 2;
 export const QUIET_END_HOUR = 6;

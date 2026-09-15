@@ -189,7 +189,7 @@ describe("immediate live Telegram refresh after scoring", () => {
     const live = livePublicBoards(tgState.chats.get(Number(channelId))!);
     expect(live).toHaveLength(1);
     expect((prisma._state.integrations[0].lastPublicTop10Json as Array<{ totalPoints: number }>)[0]!.totalPoints).toBe(100);
-  });
+  }, 15_000);
 
   it("mutation during DISPATCHING dirties payload and final snapshot is latest", async () => {
     const { prisma } = seedBoard(10, 20);

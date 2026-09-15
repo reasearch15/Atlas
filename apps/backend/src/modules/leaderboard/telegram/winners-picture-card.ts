@@ -19,6 +19,11 @@ export interface WinnersPictureInput {
   readonly timezone: string;
   readonly prizePoolCents: number;
   readonly winners: readonly WinnersPictureWinner[];
+  readonly bonusWinner?: {
+    readonly displayName: string;
+    readonly leaderboardRank: number;
+    readonly rewardAmountCents: number;
+  } | null;
 }
 
 export async function renderWinnersPictureCard(input: WinnersPictureInput): Promise<Buffer> {
@@ -48,8 +53,15 @@ export function buildWinnersPictureSvg(input: WinnersPictureInput): string {
   const brand = truncate(input.brandName.trim() || "SAYU GAMING HUB", 32).toUpperCase();
   const range = formatDateRange(input.startsAt, input.endsAt, input.timezone);
   const pool = formatPrizePoolHero(input.prizePoolCents);
+  const bonus = input.bonusWinner
+    ? `<rect x="130" y="1230" width="820" height="220" rx="24" fill="#17130d" stroke="#d4af37" stroke-width="2.5"/>
+  <text x="540" y="1280" text-anchor="middle" fill="#c9b88a" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700" letter-spacing="2">RANDOM FREE PLAY WINNER</text>
+  <text x="540" y="1340" text-anchor="middle" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700">${escapeSvgText(truncate(input.bonusWinner.displayName, 24))}</text>
+  <text x="540" y="1382" text-anchor="middle" fill="#ffe9a0" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="700">${escapeSvgText(formatFreeplay(input.bonusWinner.rewardAmountCents))} FREE PLAY</text>
+  <text x="540" y="1420" text-anchor="middle" fill="#c9b88a" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700">LEADERBOARD RANK #${input.bonusWinner.leaderboardRank}</text>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${LEADERBOARD_CARD_WIDTH}" height="1400" viewBox="0 0 ${LEADERBOARD_CARD_WIDTH} 1400">
+<svg xmlns="http://www.w3.org/2000/svg" width="${LEADERBOARD_CARD_WIDTH}" height="1580" viewBox="0 0 ${LEADERBOARD_CARD_WIDTH} 1580">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0.25" y2="1">
       <stop offset="0%" stop-color="#120e08"/>
@@ -68,7 +80,7 @@ export function buildWinnersPictureSvg(input: WinnersPictureInput): string {
   </defs>
   <rect width="100%" height="100%" fill="url(#bg)"/>
   <rect width="100%" height="100%" fill="url(#glow)"/>
-  <rect x="48" y="48" width="984" height="1304" rx="36" fill="none" stroke="url(#gold)" stroke-width="3"/>
+  <rect x="48" y="48" width="984" height="1484" rx="36" fill="none" stroke="url(#gold)" stroke-width="3"/>
   <text x="540" y="126" text-anchor="middle" fill="#f4f0e6" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" letter-spacing="6">${escapeSvgText(brand)}</text>
   <text x="540" y="230" text-anchor="middle" fill="url(#gold)" font-family="Arial, Helvetica, sans-serif" font-size="62" font-weight="700" letter-spacing="4">COMPETITION</text>
   <text x="540" y="296" text-anchor="middle" fill="url(#gold)" font-family="Arial, Helvetica, sans-serif" font-size="62" font-weight="700" letter-spacing="4">WINNERS</text>
@@ -78,7 +90,12 @@ export function buildWinnersPictureSvg(input: WinnersPictureInput): string {
   <text x="540" y="606" text-anchor="middle" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="700">${escapeSvgText(range)}</text>
   ${rowSvg}
   ${empty}
+  ${bonus}
 </svg>`;
+}
+
+function formatFreeplay(cents: number): string {
+  return `$${(Math.max(0, Math.trunc(cents)) / 100).toFixed(0)}`;
 }
 
 function formatDateRange(startsAt: Date, endsAt: Date, timezone: string): string {

@@ -104,7 +104,7 @@ function rngPick(pick: number): WheelRng {
 }
 
 function setup(
-  now = chicagoWallTimeToUtc("2026-08-25T10:00:00"),
+  now = chicagoWallTimeToUtc("2026-08-25T06:00:00"),
   questions = tinyBank(),
   rng?: WheelRng
 ) {
@@ -181,38 +181,38 @@ describe("engagement cycle", () => {
 
 describe("engagement voting and settlement", () => {
   it("records a registered vote and rejects unregistered, duplicates, and post-close votes", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    expect(runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") })).toBe("recorded");
-    expect(runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 1, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") })).toBe("already_voted");
-    expect(runtime.vote({ pollId: poll.id, telegramUserId: "999", optionIndex: 1, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") })).toBe("unregistered");
+    expect(runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") })).toBe("recorded");
+    expect(runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 1, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") })).toBe("already_voted");
+    expect(runtime.vote({ pollId: poll.id, telegramUserId: "999", optionIndex: 1, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") })).toBe("unregistered");
     expect(
-      runtime.voteFromCallback(buildVoteCallbackData(poll.id, 2), "200", chicagoWallTimeToUtc("2026-08-25T10:05:00"), "changed_name")
+      runtime.voteFromCallback(buildVoteCallbackData(poll.id, 2), "200", chicagoWallTimeToUtc("2026-08-25T06:05:00"), "changed_name")
     ).toBe("recorded");
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    expect(runtime.vote({ pollId: poll.id, telegramUserId: "300", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") })).toBe("closed");
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:00"));
+    expect(runtime.vote({ pollId: poll.id, telegramUserId: "300", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") })).toBe("closed");
   });
 
   it("settles poll counts without awarding engagement points", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") });
-    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 1, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") });
-    runtime.vote({ pollId: poll.id, telegramUserId: "300", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:30"));
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") });
+    runtime.vote({ pollId: poll.id, telegramUserId: "200", optionIndex: 1, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") });
+    runtime.vote({ pollId: poll.id, telegramUserId: "300", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:30"));
     expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
     expect(poll.winningOptionIndex).toBe(0);
     expect(poll.optionCounts).toEqual([2, 1, 0, 0]);
   });
 
   it("does not post more than one poll for a slot and persists message ids", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:20"));
-    const opens = runtime.polls.filter((p) => p.slotKey === "2026-08-25T10:00");
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:20"));
+    const opens = runtime.polls.filter((p) => p.slotKey === "2026-08-25T06:00");
     expect(opens).toHaveLength(1);
     expect(opens[0]?.telegramHeaderMessageId).toBe("1");
     expect(opens[0]?.telegramMessageId).toBe("2");
@@ -220,12 +220,12 @@ describe("engagement voting and settlement", () => {
   });
 
   it("closes with native stopPoll on the same message", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     const openMessageId = poll.telegramMessageId;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:00"));
     const message = nativePollMessage(state, poll);
     expect(String(message?.messageId)).toBe(openMessageId);
     expect(message?.poll?.isClosed).toBe(true);
@@ -237,8 +237,8 @@ describe("engagement voting and settlement", () => {
 
 describe("engagement poll presentation", () => {
   it("posts a native Telegram poll with four approved options and no callback buttons", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     const message = state.chats.get(Number(channelId))?.messages.find(
       (m) => String(m.messageId) === poll.telegramMessageId
@@ -261,10 +261,10 @@ describe("engagement poll presentation", () => {
   });
 
   it("sends emoji question text and options to native sendPoll unchanged", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"), [
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), [
       emojiChallengeBank[0]!
     ]);
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     const message = nativePollMessage(state, poll);
     expect(poll.questionText).toBe("🏆🔥 Which would you choose for a challenge?");
@@ -281,8 +281,8 @@ describe("engagement poll presentation", () => {
   });
 
   it("sends a decorative header before the native poll without repeating the question", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"), emojiChallengeBank);
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), emojiChallengeBank);
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     const header = headerMessage(state, poll);
     const message = nativePollMessage(state, poll);
@@ -303,8 +303,8 @@ describe("engagement poll presentation", () => {
   it("rotates header themes across consecutive polls", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), emojiChallengeBank);
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T06:00:01"));
     const posted = runtime.polls
       .filter((p) => p.telegramPollId && p.headerThemeId)
       .sort((a, b) => (a.postedAt?.getTime() ?? 0) - (b.postedAt?.getTime() ?? 0));
@@ -316,21 +316,21 @@ describe("engagement poll presentation", () => {
   });
 
   it("does not edit the public native poll after individual votes", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     const before = nativePollMessage(state, poll);
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
       telegramUserId: "100",
       optionIds: [0],
-      now: chicagoWallTimeToUtc("2026-08-25T10:05:00")
+      now: chicagoWallTimeToUtc("2026-08-25T06:05:00")
     });
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
       telegramUserId: "200",
       optionIds: [1],
-      now: chicagoWallTimeToUtc("2026-08-25T10:05:00")
+      now: chicagoWallTimeToUtc("2026-08-25T06:05:00")
     });
     const after = nativePollMessage(state, poll);
     expect(after?.messageId).toBe(before?.messageId);
@@ -340,29 +340,29 @@ describe("engagement poll presentation", () => {
   });
 
   it("closes the same native poll message with Telegram voter counts", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     const openMessageId = poll.telegramMessageId;
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
       telegramUserId: "100",
       optionIds: [0],
-      now: chicagoWallTimeToUtc("2026-08-25T10:05:00")
+      now: chicagoWallTimeToUtc("2026-08-25T06:05:00")
     });
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
       telegramUserId: "200",
       optionIds: [0],
-      now: chicagoWallTimeToUtc("2026-08-25T10:05:00")
+      now: chicagoWallTimeToUtc("2026-08-25T06:05:00")
     });
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
       telegramUserId: "300",
       optionIds: [1],
-      now: chicagoWallTimeToUtc("2026-08-25T10:05:00")
+      now: chicagoWallTimeToUtc("2026-08-25T06:05:00")
     });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:00"));
     const message = state.chats.get(Number(channelId))?.messages.find(
       (m) => String(m.messageId) === openMessageId
     );
@@ -375,10 +375,10 @@ describe("engagement poll presentation", () => {
   });
 
   it("handles a zero-vote native close without awarding points", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:00"));
     const message = nativePollMessage(state, poll);
     expect(poll.status).toBe("SETTLED");
     expect(poll.winningOptionIndex).toBeNull();
@@ -388,19 +388,19 @@ describe("engagement poll presentation", () => {
   });
 
   it("does not re-stop a closed native poll inconsistently on retry", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 2, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 2, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:00"));
     const closed = nativePollMessage(state, poll);
     const firstCloseAt = poll.closeEditedAt;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:30"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:30"));
     expect(poll.closeEditedAt).toEqual(firstCloseAt);
     expect(nativePollMessage(state, poll)?.poll?.isClosed).toBe(true);
     expect(nativePollMessage(state, poll)?.messageId).toBe(closed?.messageId);
     poll.closeEditedAt = null;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:01:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:01:00"));
     const original = state.chats.get(Number(channelId))?.messages.find((m) => m.messageId === closed?.messageId);
     expect(original?.poll?.isClosed).toBe(true);
     expect(original?.poll?.options.map((option) => option.voterCount)).toEqual(closed?.poll?.options.map((option) => option.voterCount));
@@ -408,55 +408,53 @@ describe("engagement poll presentation", () => {
 });
 
 describe("engagement poll schedule", () => {
-  it("keeps the 10 PM poll on the next Chicago scoring date and awards no poll points", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T22:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T22:00:01"));
-    const poll = runtime.polls.find((p) => p.slotKey === "2026-08-25T22:00")!;
-    expect(poll.chicagoDate).toBe("2026-08-26");
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") });
+  it("keeps the 6 PM poll on the same Chicago scoring date and awards no poll points", async () => {
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    const poll = runtime.polls.find((p) => p.slotKey === "2026-08-25T18:00")!;
+    expect(poll.chicagoDate).toBe("2026-08-25");
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T18:05:00") });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T23:00:00"));
     expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
     expect(runtime.results).toHaveLength(0);
-    expect(runtime.draws.find((row) => row.chicagoDate === "2026-08-25")).toBeUndefined();
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T02:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T22:00:00"));
     expect(poll.status).toBe("SETTLED");
     expect(runtime.ledger.filter((row) => row.kind === "POLL_PARTICIPATION")).toHaveLength(0);
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T23:00:00"));
-    expect(runtime.draws.filter((row) => row.chicagoDate === "2026-08-26")).toHaveLength(1);
+    expect(runtime.draws.filter((row) => row.chicagoDate === "2026-08-25")).toHaveLength(1);
     expect(runtime.results).toHaveLength(0);
   });
 });
 
 describe("engagement recovery", () => {
   it("posts a missed open slot and closes an overdue poll after restart", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T11:00:00"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T11:00:00"));
-    const poll = runtime.polls.find((p) => p.slotKey === "2026-08-25T10:00")!;
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T07:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T07:00:00"));
+    const poll = runtime.polls.find((p) => p.slotKey === "2026-08-25T06:00")!;
     expect(poll.status).toBe("OPEN");
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:05:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:05:00"));
     expect(poll.status).toBe("SETTLED");
   });
 
   it("does not duplicate a poll message after a successful send", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:15"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:15"));
     expect(pollChannelMessages(state)).toHaveLength(1);
   });
 
   it("resumes a POSTING poll and a SETTLED poll that never finished Telegram edits", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    const poll = runtime.polls.find((p) => p.slotKey === "2026-08-25T10:00")!;
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    const poll = runtime.polls.find((p) => p.slotKey === "2026-08-25T06:00")!;
     poll.status = "POSTING";
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:20"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:20"));
     expect(poll.status).toBe("OPEN");
     expect(pollChannelMessages(state)).toHaveLength(1);
-    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T10:05:00") });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    runtime.vote({ pollId: poll.id, telegramUserId: "100", optionIndex: 0, now: chicagoWallTimeToUtc("2026-08-25T06:05:00") });
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:00"));
     poll.closeEditedAt = null;
     const closedText = state.chats.get(Number(channelId))?.messages[0]?.text;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:30"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:30"));
     expect(poll.closeEditedAt).not.toBeNull();
     expect(state.chats.get(Number(channelId))?.messages[0]?.text).toBe(closedText);
   });
@@ -464,15 +462,15 @@ describe("engagement recovery", () => {
 
 describe("native poll answers without scoring", () => {
   it("routes poll_answer by Telegram poll id and ignores username", async () => {
-    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     expect(
       runtime.voteFromPollAnswer({
         telegramPollId: poll.telegramPollId!,
         telegramUserId: "100",
         optionIds: [2],
-        now: chicagoWallTimeToUtc("2026-08-25T10:05:00"),
+        now: chicagoWallTimeToUtc("2026-08-25T06:05:00"),
         username: "spoofed"
       })
     ).toBe("recorded");
@@ -481,22 +479,22 @@ describe("native poll answers without scoring", () => {
   });
 
   it("counts unregistered native votes publicly without awarding anyone points", async () => {
-    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
+    const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
     const poll = runtime.polls.find((p) => p.status === "OPEN")!;
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
       telegramUserId: "999",
       optionIds: [1],
-      now: chicagoWallTimeToUtc("2026-08-25T10:05:00")
+      now: chicagoWallTimeToUtc("2026-08-25T06:05:00")
     });
     runtime.voteFromPollAnswer({
       telegramPollId: poll.telegramPollId!,
       telegramUserId: "100",
       optionIds: [0],
-      now: chicagoWallTimeToUtc("2026-08-25T10:05:00")
+      now: chicagoWallTimeToUtc("2026-08-25T06:05:00")
     });
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:00"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:00"));
     expect(nativePollMessage(state, poll)?.poll?.options.map((option) => option.voterCount)).toEqual([
       1, 1, 0, 0
     ]);
@@ -594,8 +592,8 @@ describe("native poll channel visibility retention", () => {
   it("keeps the first three native polls visible with nothing deleted", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T06:00:01"));
     expect(visibleNativePollMessages(state)).toHaveLength(3);
     expect(trackedVisiblePolls(runtime)).toHaveLength(3);
     expect(state.chats.get(Number(channelId))?.messages.every((m) => !m.deleted)).toBe(true);
@@ -604,12 +602,12 @@ describe("native poll channel visibility retention", () => {
   it("deletes the oldest native poll when the 4th is posted", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T06:00:01"));
     const first = runtime.polls.find((p) => p.slotKey === "2026-08-25T06:00")!;
     const firstMessageId = first.telegramMessageId;
     const firstHeaderId = first.telegramHeaderMessageId;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T18:00:01"));
     expect(visibleNativePollMessages(state)).toHaveLength(3);
     expect(first.telegramMessageId).toBeNull();
     expect(first.telegramHeaderMessageId).toBeNull();
@@ -620,46 +618,46 @@ describe("native poll channel visibility retention", () => {
       state.chats.get(Number(channelId))?.messages.find((m) => String(m.messageId) === firstHeaderId)?.deleted
     ).toBe(true);
     expect(trackedVisiblePolls(runtime).map((p) => p.slotKey)).toEqual([
-      "2026-08-25T10:00",
-      "2026-08-25T14:00",
-      "2026-08-25T18:00"
+      "2026-08-25T18:00",
+      "2026-08-26T06:00",
+      "2026-08-26T18:00"
     ]);
   });
 
   it("deletes the next-oldest when the 5th native poll posts", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
-    const second = runtime.polls.find((p) => p.slotKey === "2026-08-25T10:00")!;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T18:00:01"));
+    const second = runtime.polls.find((p) => p.slotKey === "2026-08-25T18:00")!;
     const secondMessageId = second.telegramMessageId;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T22:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-27T06:00:01"));
     expect(visibleNativePollMessages(state)).toHaveLength(3);
     expect(second.telegramMessageId).toBeNull();
     expect(
       state.chats.get(Number(channelId))?.messages.find((m) => String(m.messageId) === secondMessageId)?.deleted
     ).toBe(true);
     expect(trackedVisiblePolls(runtime).map((p) => p.slotKey)).toEqual([
-      "2026-08-25T14:00",
-      "2026-08-25T18:00",
-      "2026-08-25T22:00"
+      "2026-08-26T06:00",
+      "2026-08-26T18:00",
+      "2026-08-27T06:00"
     ]);
   });
 
   it("continues when an old poll message was already deleted manually", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T06:00:01"));
     const first = runtime.polls.find((p) => p.slotKey === "2026-08-25T06:00")!;
     const firstMessage = state.chats
       .get(Number(channelId))
       ?.messages.find((m) => String(m.messageId) === first.telegramMessageId);
     expect(firstMessage).toBeTruthy();
     firstMessage!.deleted = true;
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
-    expect(runtime.polls.find((p) => p.slotKey === "2026-08-25T18:00")?.telegramPollId).toBeTruthy();
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T18:00:01"));
+    expect(runtime.polls.find((p) => p.slotKey === "2026-08-26T18:00")?.telegramPollId).toBeTruthy();
     expect(first.telegramMessageId).toBeNull();
     expect(visibleNativePollMessages(state)).toHaveLength(3);
   });
@@ -672,9 +670,9 @@ describe("native poll channel visibility retention", () => {
       caption: "Daily Freeplay winner"
     });
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T06:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T18:00:01"));
     const messages = state.chats.get(Number(channelId))?.messages ?? [];
     const leaderboard = messages.find((m) => m.text?.includes("Leaderboard snapshot"));
     const draw = messages.find((m) => m.caption?.includes("Daily Freeplay winner"));
@@ -713,8 +711,8 @@ describe("native poll channel visibility retention", () => {
       botToken: "token"
     });
     await firstRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
-    await firstRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await firstRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    await firstRuntime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await firstRuntime.sweep(chicagoWallTimeToUtc("2026-08-26T06:00:01"));
 
     // Simulate process restart: new runtime reloads durable poll rows (message ids included).
     const restartedClient = createFakeLeaderboardTelegramClient(sharedState);
@@ -737,7 +735,7 @@ describe("native poll channel visibility retention", () => {
     const oldestHeaderId = oldest?.telegramHeaderMessageId;
     expect(oldestMessageId).toBeTruthy();
     expect(oldestHeaderId).toBeTruthy();
-    await restarted.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await restarted.sweep(chicagoWallTimeToUtc("2026-08-26T18:00:01"));
     expect(
       sharedState.chats.get(Number(channelId))?.messages.find((m) => String(m.messageId) === oldestMessageId)
         ?.deleted
@@ -748,14 +746,14 @@ describe("native poll channel visibility retention", () => {
     ).toBe(true);
     expect(
       restarted.polls.filter((p) => p.telegramPollId && p.telegramMessageId).map((p) => p.slotKey).sort()
-    ).toEqual(["2026-08-25T10:00", "2026-08-25T14:00", "2026-08-25T18:00"]);
+    ).toEqual(["2026-08-25T18:00", "2026-08-26T06:00", "2026-08-26T18:00"]);
   });
 
   it("still posts the new poll when Telegram deletion of an old set fails", async () => {
     const { runtime, state } = setup(chicagoWallTimeToUtc("2026-08-25T06:00:01"), tinyBank(12));
     await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T06:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T10:00:01"));
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T14:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T06:00:01"));
     state.failures = new Map([
       [
         "token:deleteMessage",
@@ -767,8 +765,8 @@ describe("native poll channel visibility retention", () => {
         })
       ]
     ]);
-    await runtime.sweep(chicagoWallTimeToUtc("2026-08-25T18:00:01"));
-    const fourth = runtime.polls.find((p) => p.slotKey === "2026-08-25T18:00")!;
+    await runtime.sweep(chicagoWallTimeToUtc("2026-08-26T18:00:01"));
+    const fourth = runtime.polls.find((p) => p.slotKey === "2026-08-26T18:00")!;
     expect(fourth.telegramPollId).toBeTruthy();
     expect(fourth.telegramMessageId).toBeTruthy();
     expect(fourth.telegramHeaderMessageId).toBeTruthy();

@@ -40,7 +40,7 @@ interface SpinWindowRow {
 interface ClaimRow {
   id: string;
   spinId: string | null;
-  source: "WHEEL" | "ENGAGEMENT_DAILY" | "ENGAGEMENT_DAILY_DRAW";
+  source: "WHEEL" | "ENGAGEMENT_DAILY" | "ENGAGEMENT_DAILY_DRAW" | "LEADERBOARD_RANDOM";
   crmContactId: string;
   chatId: string | null;
   rewardAmountCents: number;

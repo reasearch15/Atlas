@@ -36,6 +36,7 @@ import {
   participantTransferUnsupported,
   payoutAlreadySettled,
   payoutNotFound,
+  pendingReviewBlocksFinalize,
   referralAlreadyExists,
   referralNotFound,
   selfReferralForbidden,
@@ -44,7 +45,15 @@ import {
 import { milestonesToAward, milestonesToReverse } from "./milestones";
 import { assertAllowedPoolRate, depositPointsFromCumulativeCents, poolContributionCents, splitPrizePool } from "./points-math";
 import { createCryptoRandomSource, resolvePromotionPoints, type RandomSource } from "./promotion-points";
+import { selectPrizeWinnersFromEligibility } from "./prize-eligibility";
 import { sortStandings } from "./ranking";
+import {
+  leaderboardRandomFreeplayIdempotencyKey,
+  LEADERBOARD_RANDOM_FREEPLAY_CENTS,
+  LEADERBOARD_RANDOM_FREEPLAY_SOURCE,
+  resolveLeaderboardBonusPool,
+  secureBonusCandidateIndex
+} from "./leaderboard-bonus-award";
 import type {
   BindParticipantInput,
   DepositInput,
@@ -80,18 +89,21 @@ export class PrismaLeaderboardService {
   private readonly audit: AuditService;
   private readonly random: RandomSource;
   private readonly projectionHooks: LeaderboardProjectionHooks | undefined;
+  private readonly bonusRandomIndex: (candidateCount: number) => number;
 
   public constructor(
     private readonly prisma: PrismaClient,
     options: {
       audit?: AuditService;
       random?: RandomSource;
+      bonusRandomIndex?: (candidateCount: number) => number;
       projectionHooks?: LeaderboardProjectionHooks;
     } = {}
   ) {
     this.audit = options.audit ?? new AuditService(prisma);
     this.random = options.random ?? createCryptoRandomSource();
     this.projectionHooks = options.projectionHooks;
+    this.bonusRandomIndex = options.bonusRandomIndex ?? secureBonusCandidateIndex;
   }
 
   private async flushPendingAudits(pending: readonly PendingLeaderboardAudit[]): Promise<void> {
@@ -924,6 +936,7 @@ export class PrismaLeaderboardService {
       if (!snapshot) throw eventNotFound();
 
       const winnersPayload = await this.buildAutomaticWinnersPayloadTx(tx, competition.id, snapshot.prizePoolCents);
+      await this.ensureLeaderboardBonusAwardTx(tx, competition, now);
 
       if (!snapshot.winnersJson) {
         await tx.competitionSnapshot.update({
@@ -1662,6 +1675,7 @@ export class PrismaLeaderboardService {
       competitionId,
       snapshot.prizePoolCents
     );
+    await this.ensureLeaderboardBonusAwardTx(tx, competition, now);
 
     if (!snapshot.winnersJson) {
       await tx.competitionSnapshot.update({
@@ -1732,22 +1746,68 @@ export class PrismaLeaderboardService {
   > {
     const candidates = await tx.giveawayEligibilityCandidate.findMany({
       where: { competitionId },
-      orderBy: { leaderboardRank: "asc" },
-      take: 3
+      orderBy: { leaderboardRank: "asc" }
     });
-    const winnerCount = Math.min(candidates.length, 3) as 0 | 1 | 2 | 3;
+    const selection = selectPrizeWinnersFromEligibility(candidates);
+    if (!selection.ok) {
+      throw pendingReviewBlocksFinalize(selection.pendingCrmContactIds);
+    }
+    const winnerCount = selection.winners.length as 0 | 1 | 2 | 3;
     if (winnerCount === 0) return [];
     const splits = splitPrizePool(prizePoolCents, winnerCount);
-    return candidates.map((candidate, index) => {
-      const prizeRank = (index + 1) as 1 | 2 | 3;
-      const split = splits.find((s) => s.rank === prizeRank)!;
+    return selection.winners.map((winner) => {
+      const split = splits.find((s) => s.rank === winner.prizeRank)!;
       return {
-        prizeRank,
-        leaderboardRank: candidate.leaderboardRank,
-        crmContactId: candidate.crmContactId,
-        totalPoints: candidate.totalPoints,
+        prizeRank: winner.prizeRank,
+        leaderboardRank: winner.leaderboardRank,
+        crmContactId: winner.crmContactId,
+        totalPoints: winner.totalPoints,
         payoutCents: split.payoutCents
       };
+    });
+  }
+
+  private async ensureLeaderboardBonusAwardTx(
+    tx: Tx,
+    competition: { id: string; workspaceId: string; ownerCoadminUserId: string },
+    now: Date
+  ) {
+    const existing = await tx.leaderboardBonusAward.findUnique({ where: { competitionId: competition.id } });
+    if (existing) return existing;
+
+    const candidates = await tx.giveawayEligibilityCandidate.findMany({
+      where: { competitionId: competition.id, leaderboardRank: { gte: 4, lte: 10 } },
+      orderBy: { leaderboardRank: "asc" }
+    });
+    const pool = resolveLeaderboardBonusPool(candidates);
+    if (!pool.ok) throw pendingReviewBlocksFinalize(pool.pendingCrmContactIds);
+    if (pool.candidates.length === 0) return null;
+
+    const selected = pool.candidates[this.bonusRandomIndex(pool.candidates.length)]!;
+    const claim = await tx.freeplayClaim.upsert({
+      where: { idempotencyKey: leaderboardRandomFreeplayIdempotencyKey(competition.id) },
+      create: {
+        workspaceId: competition.workspaceId,
+        ownerCoadminUserId: competition.ownerCoadminUserId,
+        crmContactId: selected.crmContactId,
+        source: LEADERBOARD_RANDOM_FREEPLAY_SOURCE,
+        idempotencyKey: leaderboardRandomFreeplayIdempotencyKey(competition.id),
+        rewardAmountCents: LEADERBOARD_RANDOM_FREEPLAY_CENTS,
+        status: "UNCLAIMED"
+      },
+      update: {}
+    });
+    return tx.leaderboardBonusAward.create({
+      data: {
+        workspaceId: competition.workspaceId,
+        ownerCoadminUserId: competition.ownerCoadminUserId,
+        competitionId: competition.id,
+        crmContactId: selected.crmContactId,
+        leaderboardRank: selected.leaderboardRank,
+        rewardAmountCents: LEADERBOARD_RANDOM_FREEPLAY_CENTS,
+        freeplayClaimId: claim.id,
+        selectedAt: now
+      }
     });
   }
 

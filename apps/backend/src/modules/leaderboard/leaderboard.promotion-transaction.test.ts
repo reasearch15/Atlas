@@ -435,13 +435,21 @@ function createPromotionPrismaHarness(options?: {
       },
       competitionSnapshot: {
         findUnique: async ({ where }: { where: { competitionId: string } }) =>
-          state.snapshots.find((s) => s.competitionId === where.competitionId) ?? null,
+          state.snapshots.find((s) => s.competitionId === where.competitionId)
+            ? { ...state.snapshots.find((s) => s.competitionId === where.competitionId)!, winnersJson: [] }
+            : null,
         create: async ({ data }: { data: { competitionId: string } }) => {
           state.snapshots.push({ competitionId: data.competitionId });
           return data;
         }
       },
       giveawayEligibilityCandidate: {
+        findMany: async () => state.eligibility.map((row, index) => ({
+          ...row,
+          leaderboardRank: index + 1,
+          totalPoints: 0,
+          membershipStatus: "ELIGIBLE"
+        })),
         create: async ({
           data
         }: {
@@ -453,6 +461,9 @@ function createPromotionPrismaHarness(options?: {
           });
           return data;
         }
+      },
+      leaderboardBonusAward: {
+        findUnique: async () => null
       },
       auditLog: {
         create: async () => {
@@ -636,7 +647,7 @@ describe("PrismaLeaderboardService.reversePromotion transaction/audit", () => {
 });
 
 describe("freezeCompetitionTx audit timing", () => {
-  it("freezes expired competition without root audit while tx is open", async () => {
+  it("finalizes an expired competition without root audit while tx is open", async () => {
     const prisma = createPromotionPrismaHarness({ expiredCompetition: true });
     const auditCalls: Array<{ duringTx: boolean; action: string }> = [];
     const service = new PrismaLeaderboardService(prisma, {
@@ -649,8 +660,8 @@ describe("freezeCompetitionTx audit timing", () => {
 
     await service.ensureCurrentCompetition(workspaceId, ownerA, prisma._now);
     const expired = prisma._state.competitions.find((c) => c.id === prisma._expiredId)!;
-    expect(expired.status).toBe("FROZEN");
-    expect(auditCalls.some((c) => c.action === "leaderboard.competition_frozen")).toBe(true);
+    expect(expired.status).toBe("FINALIZED");
+    expect(auditCalls.some((c) => c.action === "leaderboard.competition_completed")).toBe(true);
     expect(auditCalls.every((c) => c.duringTx === false)).toBe(true);
     expect(prisma._state.rootClientCallsDuringTx).toBe(0);
   });

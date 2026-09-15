@@ -194,7 +194,11 @@ function createService(state: ReturnType<typeof createState>) {
     }
   };
 
-  return new CrmService({ prisma, redis } as never);
+  return new CrmService({
+    prisma,
+    redis,
+    notifications: { notifyAssignment: async () => undefined }
+  } as never);
 }
 
 describe("CrmService assignment", () => {

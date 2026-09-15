@@ -348,6 +348,7 @@ enum FreeplayClaimSource {
   WHEEL
   ENGAGEMENT_DAILY
   ENGAGEMENT_DAILY_DRAW
+  LEADERBOARD_RANDOM
 }
 
 enum EngagementPollStatus {
@@ -421,6 +422,7 @@ model Workspace {
   poolRateHistory PoolRateHistory[]
   competitionSnapshots CompetitionSnapshot[]
   giveawayPayouts GiveawayPayout[]
+  leaderboardBonusAwards LeaderboardBonusAward[]
   giveawayEligibilityCandidates GiveawayEligibilityCandidate[]
   leaderboardBotIntegrations LeaderboardBotIntegration[]
   leaderboardTelegramOutbox LeaderboardTelegramOutbox[]
@@ -492,6 +494,7 @@ model User {
   promotionAwardsActed     PromotionAward[] @relation("PromotionAwardActor")
   poolRateHistoryChanged   PoolRateHistory[] @relation("PoolRateHistoryChangedBy")
   giveawayPayoutsMarked    GiveawayPayout[] @relation("GiveawayPayoutMarkedBy")
+  ownedLeaderboardBonusAwards LeaderboardBonusAward[] @relation("LeaderboardBonusAwardOwner")
   giveawayEligibilityResolved GiveawayEligibilityCandidate[] @relation("GiveawayEligibilityResolvedBy")
   ownedLeaderboardSettings LeaderboardSettings[] @relation("LeaderboardSettingsOwner")
   ownedLeaderboardCompetitions LeaderboardCompetition[] @relation("LeaderboardCompetitionOwner")
@@ -755,6 +758,7 @@ model CrmContact {
   leaderboardParticipants LeaderboardParticipant[]
   promotionAwards PromotionAward[]
   giveawayPayouts GiveawayPayout[]
+  leaderboardBonusAwards LeaderboardBonusAward[]
   giveawayEligibilityCandidates GiveawayEligibilityCandidate[]
   leaderboardBotPlayerLinks LeaderboardBotPlayerLink[]
   leaderboardWheelQualifications LeaderboardWheelQualification[]
@@ -1252,6 +1256,7 @@ model LeaderboardCompetition {
   poolRateHistory            PoolRateHistory[]
   snapshot                   CompetitionSnapshot?
   payouts                    GiveawayPayout[]
+  bonusAward                 LeaderboardBonusAward?
   eligibilityCandidates      GiveawayEligibilityCandidate[]
   telegramArtifacts          LeaderboardTelegramArtifact[]
   referralMilestoneAwards    ReferralMilestoneAward[]
@@ -1546,6 +1551,29 @@ model GiveawayPayout {
   @@unique([competitionId, prizeRank])
   @@index([ownerCoadminUserId, competitionId])
   @@map("giveaway_payouts")
+}
+
+/// Once-per-competition random Free Play award selected from frozen leaderboard ranks 4-10.
+model LeaderboardBonusAward {
+  id                 String   @id @default(uuid()) @db.Uuid
+  workspaceId        String   @map("workspace_id") @db.Uuid
+  ownerCoadminUserId String   @map("owner_coadmin_user_id") @db.Uuid
+  competitionId      String   @unique @map("competition_id") @db.Uuid
+  crmContactId       String   @map("crm_contact_id") @db.Uuid
+  leaderboardRank    Int      @map("leaderboard_rank")
+  rewardAmountCents  Int      @map("reward_amount_cents")
+  freeplayClaimId    String   @unique @map("freeplay_claim_id") @db.Uuid
+  selectedAt         DateTime @default(now()) @map("selected_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  ownerCoadmin       User @relation("LeaderboardBonusAwardOwner", fields: [ownerCoadminUserId], references: [id], onDelete: Restrict)
+  competition        LeaderboardCompetition @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  crmContact         CrmContact @relation(fields: [crmContactId], references: [id], onDelete: Restrict)
+  freeplayClaim      FreeplayClaim @relation(fields: [freeplayClaimId], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, ownerCoadminUserId])
+  @@index([ownerCoadminUserId, crmContactId])
+  @@map("leaderboard_bonus_awards")
 }
 
 /// Per-Coadmin dedicated Bot API bot for public leaderboard + channel membership checks.
@@ -1877,6 +1905,7 @@ model FreeplayClaim {
   updatedAt          DateTime            @updatedAt @map("updated_at")
   engagementPrize     EngagementDailyPrize?
   engagementDailyDraw EngagementDailyDraw?
+  leaderboardBonusAward LeaderboardBonusAward?
 
   @@index([ownerCoadminUserId, crmContactId, status, createdAt])
   @@index([workspaceId, ownerCoadminUserId])

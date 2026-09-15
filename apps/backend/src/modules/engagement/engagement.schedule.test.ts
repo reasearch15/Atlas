@@ -16,20 +16,23 @@ import {
 } from "./engagement.schedule";
 
 describe("engagement schedule", () => {
-  it("posts only at 6/10/14/18/22 and keeps 2-6 quiet", () => {
-    expect([0, 1, 2, 3, 4, 5, 6, 10, 14, 18, 22].filter(isEngagementPostHour)).toEqual([6, 10, 14, 18, 22]);
+  it("posts only at 6 and 18, twelve wall-clock hours apart, outside quiet hours", () => {
+    const hours = Array.from({ length: 24 }, (_, hour) => hour).filter(isEngagementPostHour);
+    expect(hours).toEqual([6, 18]);
+    expect(hours[1]! - hours[0]!).toBe(12);
+    expect(hours.every((hour) => !isEngagementQuietHour(hour))).toBe(true);
     expect(isEngagementQuietHour(2)).toBe(true);
     expect(isEngagementQuietHour(5)).toBe(true);
     expect(isEngagementQuietHour(6)).toBe(false);
   });
 
-  it("builds the five Chicago wall slots", () => {
+  it("builds exactly two Chicago wall slots per normal calendar day", () => {
     const date = "2026-08-25";
-    expect(buildSlot(date, 6).slotKey).toBe("2026-08-25T06:00");
-    expect(buildSlot(date, 10).opensAt).toEqual(pollOpensAt(date, 10));
-    expect(buildSlot(date, 14).closesAt).toEqual(pollClosesAt(buildSlot(date, 14).opensAt));
-    expect(buildSlot(date, 18).chicagoDate).toBe("2026-08-25");
-    expect(buildSlot(date, 22).chicagoDate).toBe("2026-08-26");
+    const from = chicagoWallTimeToUtc(`${date}T00:00:00`);
+    const to = chicagoWallTimeToUtc("2026-08-26T00:00:00");
+    const slots = listSlotsInRange(from, to).filter((slot) => slot.chicagoWallDate === date);
+    expect(slots.map((slot) => slot.slotKey)).toEqual(["2026-08-25T06:00", "2026-08-25T18:00"]);
+    expect(slots).toHaveLength(2);
   });
 
   it("never lists a 2 AM post", () => {
@@ -39,32 +42,31 @@ describe("engagement schedule", () => {
     expect(hours).not.toContain(2);
   });
 
-  it("closes 4 elapsed hours later, including the 10 PM poll", () => {
-    const opens = pollOpensAt("2026-08-25", 22);
+  it("closes each poll exactly 4 elapsed hours later", () => {
+    const opens = pollOpensAt("2026-08-25", 18);
     const closes = pollClosesAt(opens);
     expect(closes.getTime() - opens.getTime()).toBe(4 * 60 * 60 * 1000);
   });
 
-  it("assigns the 10 PM poll to the next 11 PM declaration day", () => {
-    const tenPm = buildSlot("2026-08-25", 22);
-    expect(scoringChicagoDateForInstant(tenPm.closesAt)).toBe("2026-08-26");
+  it("assigns the 6 PM poll to the same 11 PM declaration day", () => {
+    const sixPm = buildSlot("2026-08-25", 18);
+    expect(scoringChicagoDateForInstant(sixPm.closesAt)).toBe("2026-08-25");
     expect(latestDeclarationChicagoDate(chicagoWallTimeToUtc("2026-08-25T23:00:00"))).toBe("2026-08-25");
     expect(latestDeclarationChicagoDate(chicagoWallTimeToUtc("2026-08-25T22:59:59"))).toBe("2026-08-24");
   });
 
-  it("handles Chicago spring-forward for the 10 PM close", () => {
-    // 2026-03-08 02:00 does not exist; 22:00 March 7 + 4 elapsed hours lands at 03:00 CDT.
-    const opens = pollOpensAt("2026-03-07", 22);
+  it("keeps four elapsed hours across Chicago spring-forward", () => {
+    const opens = pollOpensAt("2026-03-08", 6);
     const closes = pollClosesAt(opens);
     expect(closes.getTime() - opens.getTime()).toBe(4 * 60 * 60 * 1000);
-    expect(scoringChicagoDateForInstant(closes)).toBe("2026-03-08");
+    expect(closes.getTime()).toBe(pollOpensAt("2026-03-08", 10).getTime());
   });
 
-  it("handles Chicago fall-back without double-counting 2 AM", () => {
-    const opens = pollOpensAt("2026-10-31", 22);
+  it("keeps four elapsed hours across Chicago fall-back without creating removed slots", () => {
+    const opens = pollOpensAt("2026-11-01", 6);
     const closes = pollClosesAt(opens);
     expect(closes.getTime() - opens.getTime()).toBe(4 * 60 * 60 * 1000);
-    expect(scoringChicagoDateForInstant(closes)).toBe("2026-11-01");
+    expect([10, 14, 22].some(isEngagementPostHour)).toBe(false);
   });
 
   it("derives the first eligible declaration date from poll scoring dates", () => {

@@ -783,6 +783,10 @@ export class LeaderboardTelegramProcessor {
         }
       }
     });
+    const bonusAward = await this.prisma.leaderboardBonusAward.findUnique({
+      where: { competitionId: row.competitionId },
+      include: { crmContact: { select: PUBLIC_LEADERBOARD_CONTACT_IDENTITY_SELECT } }
+    });
     const png = await renderWinnersPictureCard({
       brandName: integration.channelTitle ?? "SAYU GAMING HUB",
       startsAt: competition.startsAt,
@@ -800,7 +804,19 @@ export class LeaderboardTelegramProcessor {
           }),
           payoutCents: p.payoutCents
         }))
-      )
+      ),
+      bonusWinner: bonusAward
+        ? {
+            displayName: await resolveAndHealPublicLeaderboardDisplayName({
+              prisma: this.prisma,
+              crmContactId: bonusAward.crmContactId,
+              contact: bonusAward.crmContact,
+              ...(this.logger ? { logger: this.logger } : {})
+            }),
+            leaderboardRank: bonusAward.leaderboardRank,
+            rewardAmountCents: bonusAward.rewardAmountCents
+          }
+        : null
     });
     const sent = await this.client.sendPhoto(token, integration.channelId, png, {
       filename: "competition-winners.png"

@@ -196,6 +196,7 @@ function prisma(store: TenantStore): PrismaClient {
     },
     telegramAccount: { count: async () => 0 },
     developerApp: { count: async () => 0 },
+    pushDeviceToken: { updateMany: async () => ({ count: 0 }) },
     $transaction: async (callback: any) => callback(client)
   };
   return client as unknown as PrismaClient;
