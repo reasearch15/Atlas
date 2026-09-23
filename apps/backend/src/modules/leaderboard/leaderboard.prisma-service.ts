@@ -29,6 +29,7 @@ import {
   invalidEventType,
   invalidMembershipStatus,
   leaderboardDisabled,
+  LeaderboardError,
   missingReason,
   ownerMismatch,
   participantIntegrityError,
@@ -72,6 +73,7 @@ import type {
 } from "./leaderboard.types";
 
 type Tx = Prisma.TransactionClient;
+type CompetitionModel = Awaited<ReturnType<Tx["leaderboardCompetition"]["findUniqueOrThrow"]>>;
 
 export type DurableFinalizationProjection = (
   tx: Tx,
@@ -209,7 +211,7 @@ export class PrismaLeaderboardService {
     actorUserId: string,
     now = new Date()
   ) {
-    const newlyCompleted: string[] = [];
+    const newlyFrozen: string[] = [];
     const result = await this.prisma.$transaction(async (tx) => {
       const pendingAudits: PendingLeaderboardAudit[] = [];
       await this.ensureSettingsTx(tx, workspaceId, ownerCoadminUserId, actorUserId);
@@ -227,7 +229,7 @@ export class PrismaLeaderboardService {
           ownerCoadminUserId,
           now,
           false,
-          newlyCompleted,
+          newlyFrozen,
           pendingAudits
         );
         await this.ensureZeroPointStandingsForOwnerTx(
@@ -256,7 +258,7 @@ export class PrismaLeaderboardService {
         { workspaceId, ownerCoadminUserId, error }
       );
     }
-    await this.emitCompleted(workspaceId, ownerCoadminUserId, newlyCompleted);
+    await this.emitFrozen(workspaceId, ownerCoadminUserId, newlyFrozen);
     return result.settings;
   }
 
@@ -321,7 +323,7 @@ export class PrismaLeaderboardService {
     ownerCoadminUserId: string,
     now = new Date()
   ) {
-    const newlyCompleted: string[] = [];
+    const newlyFrozen: string[] = [];
     const result = await this.prisma.$transaction(async (tx) => {
       const pendingAudits: PendingLeaderboardAudit[] = [];
       const competition = await this.ensureCurrentCompetitionTx(
@@ -330,49 +332,80 @@ export class PrismaLeaderboardService {
         ownerCoadminUserId,
         now,
         false,
-        newlyCompleted,
+        newlyFrozen,
         pendingAudits
       );
       return { competition, pendingAudits };
     });
     await this.flushPendingAudits(result.pendingAudits);
-    await this.emitCompleted(workspaceId, ownerCoadminUserId, newlyCompleted);
+    await this.emitFrozen(workspaceId, ownerCoadminUserId, newlyFrozen);
     return result.competition;
   }
 
+  /**
+   * Periodic lifecycle sweep. Two independent, per-row-isolated phases so one stuck
+   * owner/competition can never starve the rest of the batch:
+   *   1. Freeze any ACTIVE competitions past their window (never attempts winner
+   *      selection here — see ensureCurrentCompetitionTx).
+   *   2. Re-scan FROZEN competitions and retry automatic finalization. This is the
+   *      recovery path for finalization that does not depend on the onFrozen /
+   *      VERIFY_MEMBERSHIP event callback ever firing or completing.
+   */
   public async completeExpiredCompetitions(now = new Date(), limit = 50): Promise<number> {
-    const rows = await this.prisma.leaderboardCompetition.findMany({
+    let actioned = 0;
+
+    const expiredRows = await this.prisma.leaderboardCompetition.findMany({
       where: {
         status: "ACTIVE",
         endsAt: { lte: now }
       },
       orderBy: { endsAt: "asc" },
       take: limit,
-      select: { workspaceId: true, ownerCoadminUserId: true }
+      select: { id: true, workspaceId: true, ownerCoadminUserId: true }
     });
-
-    let completed = 0;
-    for (const row of rows) {
-      const before = await this.prisma.leaderboardCompetition.count({
-        where: {
+    for (const row of expiredRows) {
+      try {
+        const before = await this.prisma.leaderboardCompetition.findUnique({
+          where: { id: row.id },
+          select: { status: true }
+        });
+        await this.ensureCurrentCompetition(row.workspaceId, row.ownerCoadminUserId, now);
+        const after = await this.prisma.leaderboardCompetition.findUnique({
+          where: { id: row.id },
+          select: { status: true }
+        });
+        if (before?.status === "ACTIVE" && after?.status !== "ACTIVE") actioned += 1;
+      } catch (error) {
+        console.error("leaderboard.complete_expired_competitions.freeze_failed", {
           workspaceId: row.workspaceId,
           ownerCoadminUserId: row.ownerCoadminUserId,
-          status: "ACTIVE",
-          endsAt: { lte: now }
-        }
-      });
-      await this.ensureCurrentCompetition(row.workspaceId, row.ownerCoadminUserId, now);
-      const after = await this.prisma.leaderboardCompetition.count({
-        where: {
-          workspaceId: row.workspaceId,
-          ownerCoadminUserId: row.ownerCoadminUserId,
-          status: "ACTIVE",
-          endsAt: { lte: now }
-        }
-      });
-      completed += Math.max(0, before - after);
+          competitionId: row.id,
+          error
+        });
+      }
     }
-    return completed;
+
+    const frozenRows = await this.prisma.leaderboardCompetition.findMany({
+      where: { status: "FROZEN" },
+      orderBy: { frozenAt: "asc" },
+      take: limit,
+      select: { id: true, workspaceId: true, ownerCoadminUserId: true }
+    });
+    for (const row of frozenRows) {
+      try {
+        const outcome = await this.attemptAutoFinalize(row.workspaceId, row.ownerCoadminUserId, row.id, now);
+        if (outcome.finalized) actioned += 1;
+      } catch (error) {
+        console.error("leaderboard.complete_expired_competitions.finalize_failed", {
+          workspaceId: row.workspaceId,
+          ownerCoadminUserId: row.ownerCoadminUserId,
+          competitionId: row.id,
+          error
+        });
+      }
+    }
+
+    return actioned;
   }
 
   public async recordDeposit(input: DepositInput) {
@@ -1006,6 +1039,13 @@ export class PrismaLeaderboardService {
     return result.competition;
   }
 
+  /**
+   * @deprecated Unused by any caller today. Freeze (if needed) and the finalize
+   * attempt are still kept as two logically separate steps: attemptAutoFinalizeTx
+   * never performs the freeze, and swallows PENDING_REVIEW_BLOCKS_FINALIZE rather
+   * than throwing, so a still-pending competition here comes back FROZEN, not
+   * rolled back to ACTIVE.
+   */
   public async completeCompetition(input: {
     readonly workspaceId: string;
     readonly ownerCoadminUserId: string;
@@ -1015,7 +1055,8 @@ export class PrismaLeaderboardService {
     const now = input.now ?? new Date();
     const result = await this.prisma.$transaction(async (tx) => {
       const pendingAudits: PendingLeaderboardAudit[] = [];
-      const completed = await this.completeCompetitionTx(
+      await this.freezeCompetitionTx(tx, input.competitionId, now, pendingAudits);
+      const outcome = await this.attemptAutoFinalizeTx(
         tx,
         input.workspaceId,
         input.ownerCoadminUserId,
@@ -1032,10 +1073,12 @@ export class PrismaLeaderboardService {
         undefined,
         pendingAudits
       );
-      return { competition: completed, pendingAudits };
+      return { ...outcome, pendingAudits };
     });
     await this.flushPendingAudits(result.pendingAudits);
-    await this.emitCompleted(input.workspaceId, input.ownerCoadminUserId, [result.competition.id]);
+    if (result.finalized) {
+      await this.emitCompleted(input.workspaceId, input.ownerCoadminUserId, [result.competition.id]);
+    }
     return result.competition;
   }
 
@@ -1476,7 +1519,7 @@ export class PrismaLeaderboardService {
     ownerCoadminUserId: string,
     now: Date,
     skipEnabledCheck: boolean,
-    newlyCompleted?: string[],
+    newlyFrozen?: string[],
     pendingAudits?: PendingLeaderboardAudit[]
   ) {
     await this.lockWorkspace(tx, workspaceId);
@@ -1491,16 +1534,12 @@ export class PrismaLeaderboardService {
         endsAt: { lte: now }
       }
     });
+    // Freeze only. Winner selection/finalization never runs in this transaction —
+    // see attemptAutoFinalizeTx, which always operates in its own separate transaction
+    // so a PENDING_REVIEW block can never roll back an already-committed freeze.
     for (const competition of expired) {
-      const completed = await this.completeCompetitionTx(
-        tx,
-        workspaceId,
-        ownerCoadminUserId,
-        competition.id,
-        now,
-        pendingAudits
-      );
-      if (completed.status === "FINALIZED") newlyCompleted?.push(completed.id);
+      const frozen = await this.freezeCompetitionTx(tx, competition.id, now, pendingAudits);
+      if (frozen.status === "FROZEN") newlyFrozen?.push(frozen.id);
     }
 
     const window = competitionWindowContaining(now);
@@ -1660,37 +1699,46 @@ export class PrismaLeaderboardService {
     return tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
   }
 
-  private async completeCompetitionTx(
+  /**
+   * Attempts FROZEN → FINALIZED for an already-frozen competition. Never performs the
+   * ACTIVE → FROZEN transition itself (see freezeCompetitionTx / ensureCurrentCompetitionTx),
+   * so this always runs in a transaction that is completely separate from freezing —
+   * winner selection is never attempted in the same transaction as the freeze.
+   *
+   * PENDING_REVIEW_BLOCKS_FINALIZE (from either the Top 3 selection or the rank 4-10
+   * bonus draw) is swallowed here and reported back as `finalized: false` rather than
+   * thrown: it is an expected, routine "not ready yet" outcome while Telegram membership
+   * verification is still in flight, not a failure that should roll anything back or
+   * abort a caller iterating over multiple competitions (see completeExpiredCompetitions).
+   */
+  private async attemptAutoFinalizeTx(
     tx: Tx,
     workspaceId: string,
     ownerCoadminUserId: string,
     competitionId: string,
     now: Date,
     pendingAudits?: PendingLeaderboardAudit[]
-  ) {
+  ): Promise<{ competition: CompetitionModel; finalized: boolean }> {
     await this.lockCompetition(tx, competitionId);
     const competition = await this.requireCompetitionTx(tx, competitionId, ownerCoadminUserId);
     if (competition.workspaceId !== workspaceId) throw ownerMismatch();
-    if (competition.status === "FINALIZED") return competition;
-    if (competition.status !== "FROZEN" && competition.status !== "ACTIVE") {
-      return competition;
+    if (competition.status !== "FROZEN") {
+      return { competition, finalized: false };
     }
-
-    const frozen =
-      competition.status === "ACTIVE"
-        ? await this.freezeCompetitionTx(tx, competitionId, now, pendingAudits)
-        : competition;
-    if (frozen.status === "FINALIZED") return frozen;
-    if (frozen.status !== "FROZEN") return frozen;
 
     const snapshot = await tx.competitionSnapshot.findUnique({ where: { competitionId } });
     if (!snapshot) throw eventNotFound();
-    const winnersPayload = await this.buildAutomaticWinnersPayloadTx(
-      tx,
-      competitionId,
-      snapshot.prizePoolCents
-    );
-    await this.ensureLeaderboardBonusAwardTx(tx, competition, now);
+
+    let winnersPayload: Awaited<ReturnType<typeof this.buildAutomaticWinnersPayloadTx>>;
+    try {
+      winnersPayload = await this.buildAutomaticWinnersPayloadTx(tx, competitionId, snapshot.prizePoolCents);
+      await this.ensureLeaderboardBonusAwardTx(tx, competition, now);
+    } catch (error) {
+      if (error instanceof LeaderboardError && error.code === "PENDING_REVIEW_BLOCKS_FINALIZE") {
+        return { competition, finalized: false };
+      }
+      throw error;
+    }
 
     if (!snapshot.winnersJson) {
       await tx.competitionSnapshot.update({
@@ -1731,7 +1779,8 @@ export class PrismaLeaderboardService {
       }
     });
     if (updated.count === 0) {
-      return tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
+      const current = await tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
+      return { competition: current, finalized: false };
     }
     await this.durableFinalizationProjection?.(tx, { workspaceId, ownerCoadminUserId, competitionId });
     pendingAudits?.push({
@@ -1744,7 +1793,49 @@ export class PrismaLeaderboardService {
         winners: winnersPayload
       }
     });
-    return tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
+    const finalCompetition = await tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
+    return { competition: finalCompetition, finalized: true };
+  }
+
+  /**
+   * Public, standalone retry of FROZEN → FINALIZED. Always its own transaction — never
+   * combined with freezing. Safe/idempotent to call repeatedly and concurrently:
+   * - No-op (finalized: false) for anything not currently FROZEN (including already
+   *   FINALIZED, matching the conditional `updateMany` guard below).
+   * - No-op (finalized: false) while any Top-3-relevant or bonus-pool candidate is
+   *   still PENDING_REVIEW.
+   * - `winnersJson`/payouts are only written once (`snapshot.winnersJson` /
+   *   `giveawayPayout.upsert` guards), and the FINALIZED transition itself is a
+   *   conditional `updateMany` on `status: "FROZEN"`, so re-entrant calls never
+   *   duplicate payouts or finalization projections.
+   *
+   * Called from: the periodic FROZEN re-scan (completeExpiredCompetitions) and the
+   * event-driven resume once Telegram membership verification resolves enough
+   * candidates to determine the prize Top 3 (leaderboard-telegram.processor.ts).
+   */
+  public async attemptAutoFinalize(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string,
+    now = new Date()
+  ): Promise<{ competition: CompetitionModel; finalized: boolean }> {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const pendingAudits: PendingLeaderboardAudit[] = [];
+      const outcome = await this.attemptAutoFinalizeTx(
+        tx,
+        workspaceId,
+        ownerCoadminUserId,
+        competitionId,
+        now,
+        pendingAudits
+      );
+      return { ...outcome, pendingAudits };
+    });
+    await this.flushPendingAudits(result.pendingAudits);
+    if (result.finalized) {
+      await this.emitCompleted(workspaceId, ownerCoadminUserId, [result.competition.id]);
+    }
+    return { competition: result.competition, finalized: result.finalized };
   }
 
   private async buildAutomaticWinnersPayloadTx(

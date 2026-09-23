@@ -38,22 +38,39 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     webhookBaseUrl: app.env.LEADERBOARD_BOT_WEBHOOK_BASE_URL ?? null
   });
   const engagement = new EngagementService(app.prisma, outbox);
-  const processor = new LeaderboardTelegramProcessor({
-    prisma: app.prisma,
-    encryptionKey: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY,
-    outbox,
-    client,
-    engagement,
-    logger: app.log
-  });
+  // `processor` and `lifecycleDomain` reference each other: the domain's projection
+  // hooks drive Telegram jobs via the processor, and the processor resumes
+  // finalization via the domain (attemptAutoFinalize) once membership verification
+  // resolves. Both closures only read `processor` at call time (well after both are
+  // constructed below), so the forward reference through this `let` is safe.
+  let processor: LeaderboardTelegramProcessor;
   const lifecycleDomain = new PrismaLeaderboardService(app.prisma, {
     durableFinalizationProjection: (tx, info) => outbox.enqueueFinalizationJobsTx(tx, info),
     projectionHooks: {
+      onFrozen: async (info) => {
+        const refreshId = await outbox.enqueueRefresh(info.workspaceId, info.ownerCoadminUserId, info.competitionId);
+        await processor.processJob(refreshId);
+        const verifyId = await outbox.enqueueVerifyMembership(
+          info.workspaceId,
+          info.ownerCoadminUserId,
+          info.competitionId
+        );
+        await processor.processJob(verifyId);
+      },
       onCompleted: async (info) => {
         const outboxIds = await outbox.wakeFinalizationJobs(info.ownerCoadminUserId, info.competitionId);
         for (const outboxId of outboxIds) await processor.processJob(outboxId);
       }
     }
+  });
+  processor = new LeaderboardTelegramProcessor({
+    prisma: app.prisma,
+    encryptionKey: app.env.TELEGRAM_SESSION_ENCRYPTION_KEY,
+    outbox,
+    client,
+    engagement,
+    domain: lifecycleDomain,
+    logger: app.log
   });
   const botUpdateHandler = new LeaderboardBotUpdateHandler({
     prisma: app.prisma,

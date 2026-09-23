@@ -67,7 +67,11 @@ export interface LeaderboardTelegramProcessorDeps {
   readonly domain?: PrismaLeaderboardService;
   readonly engagement?: EngagementService;
   readonly audit?: AuditService;
-  readonly logger?: { warn: (obj: unknown, msg?: string) => void; info: (obj: unknown, msg?: string) => void };
+  readonly logger?: {
+    warn: (obj: unknown, msg?: string) => void;
+    info: (obj: unknown, msg?: string) => void;
+    error: (obj: unknown, msg?: string) => void;
+  };
 }
 
 /**
@@ -475,13 +479,17 @@ export class LeaderboardTelegramProcessor {
     }
 
     let verified = 0;
+    let resolved = false;
     while (verified < MAX_VERIFY_CANDIDATES) {
       const candidates = await this.prisma.giveawayEligibilityCandidate.findMany({
         where: { competitionId: competition.id, ownerCoadminUserId: row.ownerCoadminUserId },
         orderBy: { leaderboardRank: "asc" }
       });
       const plan = planMembershipVerification(candidates);
-      if (plan.resolved || plan.toVerify.length === 0) break;
+      if (plan.resolved || plan.toVerify.length === 0) {
+        resolved = true;
+        break;
+      }
 
       const batch = plan.toVerify.slice(0, Math.min(VERIFY_CONCURRENCY, MAX_VERIFY_CANDIDATES - verified));
       await Promise.all(
@@ -505,6 +513,22 @@ export class LeaderboardTelegramProcessor {
       where: { id: integration.id },
       data: { lastMembershipCheckAt: new Date(), lastError: null }
     });
+
+    // Membership no longer blocks the prize Top 3 (and bonus pool) — try to resume
+    // finalization right away instead of waiting for the next periodic re-scan.
+    // A still-blocked attempt (e.g. new candidates appeared, or the bonus pool at
+    // ranks 4-10 is separately unresolved) is a routine, harmless no-op here; the
+    // periodic FROZEN re-scan in completeExpiredCompetitions remains the backstop.
+    if (resolved) {
+      try {
+        await this.domain.attemptAutoFinalize(row.workspaceId, row.ownerCoadminUserId, competition.id, new Date());
+      } catch (error) {
+        this.logger?.error(
+          { err: error, workspaceId: row.workspaceId, ownerCoadminUserId: row.ownerCoadminUserId, competitionId: competition.id },
+          "leaderboard.verify_membership.auto_finalize_failed"
+        );
+      }
+    }
   }
 
   private async verifyOneCandidate(input: {

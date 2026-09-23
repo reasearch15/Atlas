@@ -647,22 +647,43 @@ describe("PrismaLeaderboardService.reversePromotion transaction/audit", () => {
 });
 
 describe("freezeCompetitionTx audit timing", () => {
-  it("finalizes an expired competition without root audit while tx is open", async () => {
+  it("freezes (but does not auto-finalize) an expired competition without root audit while tx is open", async () => {
     const prisma = createPromotionPrismaHarness({ expiredCompetition: true });
     const auditCalls: Array<{ duringTx: boolean; action: string }> = [];
+    const onFrozenCalls: Array<{ workspaceId: string; ownerCoadminUserId: string; competitionId: string }> = [];
     const service = new PrismaLeaderboardService(prisma, {
       audit: {
         record: async (input: { action: string }) => {
           auditCalls.push({ duringTx: prisma._state.txOpen, action: input.action });
         }
-      } as never
+      } as never,
+      projectionHooks: {
+        onFrozen: async (info) => {
+          onFrozenCalls.push(info);
+        }
+      }
     });
 
+    // ACTIVE -> FROZEN commits on its own: freezing never performs automatic winner
+    // selection in the same transaction, so this never reaches FINALIZED by itself.
     await service.ensureCurrentCompetition(workspaceId, ownerA, prisma._now);
     const expired = prisma._state.competitions.find((c) => c.id === prisma._expiredId)!;
-    expect(expired.status).toBe("FINALIZED");
-    expect(auditCalls.some((c) => c.action === "leaderboard.competition_completed")).toBe(true);
+    expect(expired.status).toBe("FROZEN");
+    expect(auditCalls.some((c) => c.action === "leaderboard.competition_frozen")).toBe(true);
     expect(auditCalls.every((c) => c.duringTx === false)).toBe(true);
     expect(prisma._state.rootClientCallsDuringTx).toBe(0);
+
+    // onFrozen fires exactly once, after the freeze transaction has already committed.
+    expect(onFrozenCalls).toEqual([
+      { workspaceId, ownerCoadminUserId: ownerA, competitionId: prisma._expiredId }
+    ]);
+
+    // FROZEN -> FINALIZED is a separate, explicit step (zero standings here, so it
+    // resolves immediately with zero winners).
+    const outcome = await service.attemptAutoFinalize(workspaceId, ownerA, prisma._expiredId, prisma._now);
+    expect(outcome.finalized).toBe(true);
+    const finalized = prisma._state.competitions.find((c) => c.id === prisma._expiredId)!;
+    expect(finalized.status).toBe("FINALIZED");
+    expect(auditCalls.some((c) => c.action === "leaderboard.competition_completed")).toBe(true);
   });
 });
