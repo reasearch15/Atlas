@@ -329,6 +329,7 @@ enum LeaderboardTelegramJobStatus {
 }
 
 enum LeaderboardTelegramArtifactType {
+  PUBLIC_RESULTS
   FINAL_LEADERBOARD
   WINNERS_PICTURE
 }

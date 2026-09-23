@@ -47,14 +47,11 @@ export const leaderboardTelegramPlugin = fp(async (app) => {
     logger: app.log
   });
   const lifecycleDomain = new PrismaLeaderboardService(app.prisma, {
+    durableFinalizationProjection: (tx, info) => outbox.enqueueFinalizationJobsTx(tx, info),
     projectionHooks: {
       onCompleted: async (info) => {
-        const outboxId = await outbox.enqueueFinalLeaderboard(
-          info.workspaceId,
-          info.ownerCoadminUserId,
-          info.competitionId
-        );
-        await processor.processJob(outboxId);
+        const outboxIds = await outbox.wakeFinalizationJobs(info.ownerCoadminUserId, info.competitionId);
+        for (const outboxId of outboxIds) await processor.processJob(outboxId);
       }
     }
   });

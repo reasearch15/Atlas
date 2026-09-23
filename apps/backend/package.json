@@ -29,6 +29,7 @@
     "identity:backfill": "dotenv -e ../../.env -- node scripts/backfill-telegram-identity.mjs",
     "crm:reconcile-identity": "dotenv -e ../../.env -- tsx src/modules/crm/scripts/reconcile-crm-telegram-identity.ts",
     "leaderboard:reconcile-public-names": "dotenv -e ../../.env -- tsx src/modules/leaderboard/scripts/reconcile-leaderboard-public-names.ts",
+    "leaderboard:recover-winner-announcements": "dotenv -e ../../.env -- tsx src/modules/leaderboard/scripts/recover-winner-announcements.ts",
     "engagement:import-questions": "dotenv -e ../../.env -- tsx src/modules/engagement/scripts/import-question-bank.ts",
     "engagement:replace-legacy-poll": "dotenv -e ../../.env -- tsx src/modules/engagement/scripts/replace-legacy-channel-poll.ts",
     "scripts:syntax-check": "node --check scripts/backfill-telegram-identity.mjs && node --check scripts/inbox-diagnostics.mjs && node --check scripts/cleanup-telegram-service-chats.mjs"

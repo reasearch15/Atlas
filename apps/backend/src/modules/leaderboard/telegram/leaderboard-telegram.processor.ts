@@ -599,7 +599,9 @@ export class LeaderboardTelegramProcessor {
     integration: { id: string; postingEnabled: boolean; channelId: string | null },
     token: string
   ): Promise<void> {
-    if (!integration.postingEnabled) return;
+    if (!integration.postingEnabled) {
+      throw permanentError("POSTING_DISABLED", "Leaderboard Telegram posting is disabled");
+    }
     if (!integration.channelId || !row.competitionId) {
       throw permanentError("CHANNEL_OR_COMPETITION_MISSING", "Channel or competition missing for results");
     }
@@ -614,6 +616,17 @@ export class LeaderboardTelegramProcessor {
     });
     if (!competition) {
       throw permanentError("COMPETITION_NOT_FINALIZED", "Results require a FINALIZED competition");
+    }
+
+    const existing = await this.prisma.leaderboardTelegramArtifact.findUnique({
+      where: { competitionId_artifactType: { competitionId: competition.id, artifactType: "PUBLIC_RESULTS" } }
+    });
+    if (existing?.status === "SENT" && existing.messageId && existing.chatId) return;
+    if (existing) {
+      throw permanentError(
+        "DELIVERY_AMBIGUOUS",
+        "A public-results delivery was reserved but no Telegram acknowledgement was persisted"
+      );
     }
 
     const payouts = await this.prisma.giveawayPayout.findMany({
@@ -642,7 +655,36 @@ export class LeaderboardTelegramProcessor {
       )
     });
 
-    await this.client.sendMessage(token, integration.channelId, text);
+    const reservation = await this.prisma.leaderboardTelegramArtifact.create({
+      data: {
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        competitionId: competition.id,
+        botIntegrationId: integration.id,
+        artifactType: "PUBLIC_RESULTS",
+        status: "RESERVED",
+        chatId: integration.channelId
+      }
+    });
+    let sent: Awaited<ReturnType<LeaderboardTelegramClient["sendMessage"]>>;
+    try {
+      sent = await this.client.sendMessage(token, integration.channelId, text);
+    } catch (error) {
+      if (error instanceof LeaderboardTelegramApiError && error.httpStatus !== 0) {
+        await this.prisma.leaderboardTelegramArtifact.deleteMany({
+          where: { id: reservation.id, status: "RESERVED", messageId: null }
+        });
+        throw error;
+      }
+      throw permanentError(
+        "DELIVERY_AMBIGUOUS",
+        "Telegram public-results delivery outcome is unknown; manual reconciliation is required"
+      );
+    }
+    await this.prisma.leaderboardTelegramArtifact.update({
+      where: { id: reservation.id },
+      data: { status: "SENT", messageId: String(sent.messageId), sentAt: new Date() }
+    });
     await this.prisma.leaderboardBotIntegration.update({
       where: { id: integration.id },
       data: { lastSuccessfulPostAt: new Date(), lastError: null }
@@ -664,7 +706,9 @@ export class LeaderboardTelegramProcessor {
     },
     token: string
   ): Promise<void> {
-    if (!integration.postingEnabled) return;
+    if (!integration.postingEnabled) {
+      throw permanentError("POSTING_DISABLED", "Leaderboard Telegram posting is disabled");
+    }
     if (!integration.channelId || !row.competitionId) {
       throw permanentError("CHANNEL_OR_COMPETITION_MISSING", "Channel or competition missing for final leaderboard");
     }
@@ -735,7 +779,9 @@ export class LeaderboardTelegramProcessor {
     integration: { id: string; postingEnabled: boolean; channelId: string | null; channelTitle?: string | null },
     token: string
   ): Promise<void> {
-    if (!integration.postingEnabled) return;
+    if (!integration.postingEnabled) {
+      throw permanentError("POSTING_DISABLED", "Leaderboard Telegram posting is disabled");
+    }
     if (!integration.channelId || !row.competitionId) {
       throw permanentError("CHANNEL_OR_COMPETITION_MISSING", "Channel or competition missing for winners picture");
     }

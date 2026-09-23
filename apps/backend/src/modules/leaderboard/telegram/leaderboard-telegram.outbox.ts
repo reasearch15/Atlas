@@ -184,6 +184,52 @@ export class LeaderboardTelegramOutboxService {
     });
   }
 
+  /** Insert the public finalization jobs in the same transaction as FINALIZED. */
+  public async enqueueFinalizationJobsTx(
+    tx: Prisma.TransactionClient,
+    input: { readonly workspaceId: string; readonly ownerCoadminUserId: string; readonly competitionId: string }
+  ): Promise<void> {
+    const integration = await tx.leaderboardBotIntegration.findUnique({
+      where: { ownerCoadminUserId: input.ownerCoadminUserId },
+      select: { id: true, disconnectedAt: true }
+    });
+    const botIntegrationId = integration?.disconnectedAt ? null : (integration?.id ?? null);
+    const jobs = [
+      { jobType: "POST_PUBLIC_RESULTS" as const, idempotencyKey: `lb:results:${input.ownerCoadminUserId}:${input.competitionId}` },
+      { jobType: "PUBLISH_FINAL_LEADERBOARD" as const, idempotencyKey: `lb:final-board:${input.ownerCoadminUserId}:${input.competitionId}` }
+    ];
+    for (const job of jobs) {
+      await tx.leaderboardTelegramOutbox.upsert({
+        where: { idempotencyKey: job.idempotencyKey },
+        create: {
+          workspaceId: input.workspaceId,
+          ownerCoadminUserId: input.ownerCoadminUserId,
+          competitionId: input.competitionId,
+          botIntegrationId,
+          jobType: job.jobType,
+          status: "QUEUED",
+          idempotencyKey: job.idempotencyKey,
+          payloadJson: { competitionId: input.competitionId }
+        },
+        update: {}
+      });
+    }
+  }
+
+  public async wakeFinalizationJobs(ownerCoadminUserId: string, competitionId: string): Promise<string[]> {
+    const rows = await this.prisma.leaderboardTelegramOutbox.findMany({
+      where: {
+        ownerCoadminUserId,
+        competitionId,
+        jobType: { in: ["POST_PUBLIC_RESULTS", "PUBLISH_FINAL_LEADERBOARD"] },
+        status: { in: [...PENDING_STATUSES] }
+      },
+      select: { id: true }
+    });
+    for (const row of rows) await this.wakeBestEffort(row.id, 0);
+    return rows.map((row) => row.id);
+  }
+
   public async enqueueFinalLeaderboard(
     workspaceId: string,
     ownerCoadminUserId: string,

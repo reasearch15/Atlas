@@ -11,6 +11,7 @@ export function createMemoryPrisma() {
   const audits: any[] = [];
   const playerLinks: any[] = [];
   const wheelConfigs: any[] = [];
+  const artifacts: any[] = [];
 
   const prisma = {
     leaderboardBotPlayerLink: {
@@ -90,7 +91,8 @@ export function createMemoryPrisma() {
           if (where?.workspaceId && r.workspaceId !== where.workspaceId) return false;
           if (where?.ownerCoadminUserId && r.ownerCoadminUserId !== where.ownerCoadminUserId) return false;
           if (where?.competitionId && r.competitionId !== where.competitionId) return false;
-          if (where?.jobType && r.jobType !== where.jobType) return false;
+          if (typeof where?.jobType === "string" && r.jobType !== where.jobType) return false;
+          if (where?.jobType?.in && !where.jobType.in.includes(r.jobType)) return false;
           if (where?.status?.in && !where.status.in.includes(r.status)) return false;
           if (where?.idempotencyKey?.startsWith && !r.idempotencyKey.startsWith(where.idempotencyKey.startsWith)) {
             return false;
@@ -121,6 +123,14 @@ export function createMemoryPrisma() {
         };
         outbox.push(row);
         return row;
+      },
+      upsert: async ({ where, create, update }: any) => {
+        const existing = outbox.find((r) => r.idempotencyKey === where.idempotencyKey);
+        if (existing) {
+          Object.assign(existing, update, { updatedAt: new Date() });
+          return existing;
+        }
+        return prisma.leaderboardTelegramOutbox.create({ data: create });
       },
       update: async ({ where, data }: any) => {
         const row = outbox.find((r) => r.id === where.id);
@@ -153,7 +163,54 @@ export function createMemoryPrisma() {
         return { count };
       }
     },
+    leaderboardTelegramArtifact: {
+      findUnique: async ({ where }: any) => {
+        if (where.id) return artifacts.find((a) => a.id === where.id) ?? null;
+        const key = where.competitionId_artifactType;
+        return artifacts.find((a) => a.competitionId === key.competitionId && a.artifactType === key.artifactType) ?? null;
+      },
+      findMany: async ({ where }: any) => artifacts.filter((a) => {
+        if (where.competitionId && a.competitionId !== where.competitionId) return false;
+        if (where.artifactType?.in && !where.artifactType.in.includes(a.artifactType)) return false;
+        return true;
+      }),
+      create: async ({ data }: any) => {
+        const row = { id: crypto.randomUUID(), messageId: null, sentAt: null, createdAt: new Date(), updatedAt: new Date(), ...data };
+        artifacts.push(row);
+        return row;
+      },
+      update: async ({ where, data }: any) => {
+        const row = artifacts.find((a) => a.id === where.id);
+        if (!row) throw new Error("artifact missing");
+        Object.assign(row, data, { updatedAt: new Date() });
+        return row;
+      },
+      deleteMany: async ({ where }: any) => {
+        let count = 0;
+        for (let index = artifacts.length - 1; index >= 0; index -= 1) {
+          const row = artifacts[index];
+          if (where.id && row.id !== where.id) continue;
+          if (where.status && row.status !== where.status) continue;
+          if (where.messageId === null && row.messageId !== null) continue;
+          artifacts.splice(index, 1);
+          count += 1;
+        }
+        return { count };
+      }
+    },
     leaderboardCompetition: {
+      findMany: async ({ where }: any) => competitions.filter((c) => {
+        if (where.id && c.id !== where.id) return false;
+        if (where.status && c.status !== where.status) return false;
+        if (where.finalizedAt?.gte && (!c.finalizedAt || c.finalizedAt < where.finalizedAt.gte)) return false;
+        if (where.finalizedAt?.lte && (!c.finalizedAt || c.finalizedAt > where.finalizedAt.lte)) return false;
+        return true;
+      }).map((c) => ({
+        ...c,
+        snapshot: c.snapshot ?? null,
+        payouts: payouts.filter((p) => p.competitionId === c.id),
+        eligibilityCandidates: candidates.filter((candidate) => candidate.competitionId === c.id)
+      })),
       findFirst: async ({ where }: any) =>
         competitions.find((c) => {
           if (where.id && c.id !== where.id) return false;
@@ -261,7 +318,8 @@ export function createMemoryPrisma() {
       payouts,
       audits,
       playerLinks,
-      wheelConfigs
+      wheelConfigs,
+      artifacts
     }
   };
 

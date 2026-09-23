@@ -73,6 +73,11 @@ import type {
 
 type Tx = Prisma.TransactionClient;
 
+export type DurableFinalizationProjection = (
+  tx: Tx,
+  info: { readonly workspaceId: string; readonly ownerCoadminUserId: string; readonly competitionId: string }
+) => Promise<void>;
+
 type PendingLeaderboardAudit = {
   readonly workspaceId: string | null;
   readonly actorId: string | null;
@@ -89,6 +94,7 @@ export class PrismaLeaderboardService {
   private readonly audit: AuditService;
   private readonly random: RandomSource;
   private readonly projectionHooks: LeaderboardProjectionHooks | undefined;
+  private readonly durableFinalizationProjection: DurableFinalizationProjection | undefined;
   private readonly bonusRandomIndex: (candidateCount: number) => number;
 
   public constructor(
@@ -98,11 +104,13 @@ export class PrismaLeaderboardService {
       random?: RandomSource;
       bonusRandomIndex?: (candidateCount: number) => number;
       projectionHooks?: LeaderboardProjectionHooks;
+      durableFinalizationProjection?: DurableFinalizationProjection;
     } = {}
   ) {
     this.audit = options.audit ?? new AuditService(prisma);
     this.random = options.random ?? createCryptoRandomSource();
     this.projectionHooks = options.projectionHooks;
+    this.durableFinalizationProjection = options.durableFinalizationProjection;
     this.bonusRandomIndex = options.bonusRandomIndex ?? secureBonusCandidateIndex;
   }
 
@@ -976,6 +984,11 @@ export class PrismaLeaderboardService {
         }
         throw competitionAlreadyFinalized();
       }
+      await this.durableFinalizationProjection?.(tx, {
+        workspaceId: input.workspaceId,
+        ownerCoadminUserId: input.ownerCoadminUserId,
+        competitionId: competition.id
+      });
       const finalized = await tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competition.id } });
       pendingAudits.push({
         workspaceId: input.workspaceId,
@@ -1434,8 +1447,9 @@ export class PrismaLeaderboardService {
     for (const competitionId of competitionIds) {
       try {
         await this.projectionHooks.onFrozen({ workspaceId, ownerCoadminUserId, competitionId });
-      } catch {
+      } catch (error) {
         // Projection failures must never roll back domain commits.
+        console.error("leaderboard.frozen_projection_failed", { workspaceId, ownerCoadminUserId, competitionId, error });
       }
     }
   }
@@ -1449,8 +1463,9 @@ export class PrismaLeaderboardService {
     for (const competitionId of competitionIds) {
       try {
         await this.projectionHooks.onCompleted({ workspaceId, ownerCoadminUserId, competitionId });
-      } catch {
+      } catch (error) {
         // Projection failures must never roll back domain commits.
+        console.error("leaderboard.completed_projection_failed", { workspaceId, ownerCoadminUserId, competitionId, error });
       }
     }
   }
@@ -1718,6 +1733,7 @@ export class PrismaLeaderboardService {
     if (updated.count === 0) {
       return tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
     }
+    await this.durableFinalizationProjection?.(tx, { workspaceId, ownerCoadminUserId, competitionId });
     pendingAudits?.push({
       workspaceId,
       actorId: null,

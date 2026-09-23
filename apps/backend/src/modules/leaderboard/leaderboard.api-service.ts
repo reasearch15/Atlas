@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type { Prisma } from "@prisma/client";
 import type {
   LeaderboardAdminCompetitionDto,
   LeaderboardCompetitionReviewDto,
@@ -158,6 +159,9 @@ export class LeaderboardApiService {
     this.telegramIntegration = decorated.leaderboardTelegramIntegration;
     this.telegramProcessor = decorated.leaderboardTelegramProcessor;
     this.domain = new PrismaLeaderboardService(app.prisma, {
+      ...(this.outbox
+        ? { durableFinalizationProjection: (tx: Prisma.TransactionClient, info: { workspaceId: string; ownerCoadminUserId: string; competitionId: string }) => this.outbox!.enqueueFinalizationJobsTx(tx, info) }
+        : {}),
       projectionHooks: {
         onFrozen: async (info) => {
           await this.outbox?.enqueueRefresh(info.workspaceId, info.ownerCoadminUserId, info.competitionId);
@@ -168,13 +172,10 @@ export class LeaderboardApiService {
           );
         },
         onCompleted: async (info) => {
-          const outboxId = await this.outbox?.enqueueFinalLeaderboard(
-            info.workspaceId,
-            info.ownerCoadminUserId,
-            info.competitionId
-          );
-          if (outboxId && this.telegramProcessor) {
-            await this.telegramProcessor.processJob(outboxId);
+          if (!this.outbox) return;
+          const outboxIds = await this.outbox.wakeFinalizationJobs(info.ownerCoadminUserId, info.competitionId);
+          if (this.telegramProcessor) {
+            for (const outboxId of outboxIds) await this.telegramProcessor.processJob(outboxId);
           }
         }
       }
@@ -1565,13 +1566,16 @@ export class LeaderboardApiService {
       idempotencyKey
     });
     try {
-      const outboxId = await this.outbox?.enqueueFinalLeaderboard(workspaceId, user.id, competitionId);
-      if (outboxId && this.telegramProcessor) {
-        await this.telegramProcessor.processJob(outboxId);
+      const outboxIds = await this.outbox?.wakeFinalizationJobs(user.id, competitionId) ?? [];
+      if (this.telegramProcessor) {
+        for (const outboxId of outboxIds) await this.telegramProcessor.processJob(outboxId);
       }
       await this.enqueueFinalResultDms(workspaceId, user.id, competitionId);
-    } catch {
-      // ignore projection errors
+    } catch (error) {
+      this.app.log.error(
+        { err: error, workspaceId, ownerCoadminUserId: user.id, competitionId },
+        "leaderboard.finalization_projection_failed"
+      );
     }
     return finalized;
   }
