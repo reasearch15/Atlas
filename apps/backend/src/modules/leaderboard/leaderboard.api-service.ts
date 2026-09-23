@@ -716,6 +716,9 @@ export class LeaderboardApiService {
       throw new AppError(500, "STANDING_MISSING", "Standing was not found after deposit.");
     }
 
+    // Best-effort cleanup of the PREVIOUS competition's final leaderboard message
+    // (removing its buttons). This must never gate the CURRENT competition's
+    // leaderboard refresh below — they are independent outcomes.
     const firstDepositTransitionId = await this.outbox?.enqueueFirstDepositTransition(
       workspaceId,
       owner,
@@ -730,9 +733,10 @@ export class LeaderboardApiService {
           "leaderboard.first_deposit_transition.immediate_process_failed"
         );
       }
-    } else {
-      await this.projectAfterMutation(workspaceId, owner, competition.id);
     }
+    // Always refresh the CURRENT competition's live leaderboard, regardless of
+    // whether the previous competition's cleanup above ran, succeeded, or failed.
+    await this.projectAfterMutation(workspaceId, owner, competition.id);
     await this.enqueueRecentReferralMilestoneDms(workspaceId, owner, competition.id);
     await new FreeplayService(this.app).applyLeaderboardDepositEvent({
       eventId: event.id,

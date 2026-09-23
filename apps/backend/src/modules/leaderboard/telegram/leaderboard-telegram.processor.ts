@@ -958,9 +958,18 @@ export class LeaderboardTelegramProcessor {
       if (!this.client.editMessageReplyMarkup) {
         throw permanentError("EDIT_REPLY_MARKUP_UNAVAILABLE", "Telegram client cannot remove final leaderboard buttons");
       }
-      await this.client.editMessageReplyMarkup(token, artifact.chatId, Number(artifact.messageId), {
-        inline_keyboard: []
-      });
+      try {
+        await this.client.editMessageReplyMarkup(token, artifact.chatId, Number(artifact.messageId), {
+          inline_keyboard: []
+        });
+      } catch (error) {
+        // The old/final message is gone, already edited, or otherwise unreachable
+        // (e.g. "message to edit not found") — there is nothing left to remove.
+        // Treat this as done rather than retrying up to MAX_ATTEMPTS: retrying can
+        // never make a deleted message reappear, and blocking here previously
+        // starved the CURRENT competition's leaderboard refresh below.
+        if (!isMessageEditRecoverable(error)) throw error;
+      }
       await this.prisma.leaderboardTelegramArtifact.update({
         where: { id: artifact.id },
         data: { status: "BUTTONS_REMOVED", buttonsRemovedAt: new Date() }
