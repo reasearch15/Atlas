@@ -478,18 +478,19 @@ export class LeaderboardTelegramProcessor {
       return;
     }
 
+    // This loop IS the bounded verification phase: it makes one pass, resolving as
+    // many candidates as possible (bounded by MAX_VERIFY_CANDIDATES), and stops as
+    // soon as nothing more is needed for the prize Top 3. It deliberately does NOT
+    // keep retrying indefinitely — a competition must never stay FROZEN waiting on
+    // Telegram/API verification.
     let verified = 0;
-    let resolved = false;
     while (verified < MAX_VERIFY_CANDIDATES) {
       const candidates = await this.prisma.giveawayEligibilityCandidate.findMany({
         where: { competitionId: competition.id, ownerCoadminUserId: row.ownerCoadminUserId },
         orderBy: { leaderboardRank: "asc" }
       });
       const plan = planMembershipVerification(candidates);
-      if (plan.resolved || plan.toVerify.length === 0) {
-        resolved = true;
-        break;
-      }
+      if (plan.resolved || plan.toVerify.length === 0) break;
 
       const batch = plan.toVerify.slice(0, Math.min(VERIFY_CONCURRENCY, MAX_VERIFY_CANDIDATES - verified));
       await Promise.all(
@@ -514,20 +515,22 @@ export class LeaderboardTelegramProcessor {
       data: { lastMembershipCheckAt: new Date(), lastError: null }
     });
 
-    // Membership no longer blocks the prize Top 3 (and bonus pool) — try to resume
-    // finalization right away instead of waiting for the next periodic re-scan.
-    // A still-blocked attempt (e.g. new candidates appeared, or the bonus pool at
-    // ranks 4-10 is separately unresolved) is a routine, harmless no-op here; the
-    // periodic FROZEN re-scan in completeExpiredCompetitions remains the backstop.
-    if (resolved) {
-      try {
-        await this.domain.attemptAutoFinalize(row.workspaceId, row.ownerCoadminUserId, competition.id, new Date());
-      } catch (error) {
-        this.logger?.error(
-          { err: error, workspaceId: row.workspaceId, ownerCoadminUserId: row.ownerCoadminUserId, competitionId: competition.id },
-          "leaderboard.verify_membership.auto_finalize_failed"
-        );
-      }
+    // The bounded verification pass is over — finalize now, unconditionally.
+    // attemptAutoFinalize never blocks on PENDING_REVIEW: anyone still unresolved
+    // (Telegram/API technical failure or simply never reached) is skipped for the
+    // prize/bonus, never silently marked ELIGIBLE, and their PENDING_REVIEW status
+    // is left on the record. This is what guarantees FROZEN can never become a
+    // permanent state merely because membership verification could not resolve
+    // someone in time. The periodic FROZEN re-scan in completeExpiredCompetitions
+    // is a pure backstop for cases where this call never runs at all (crash, no
+    // Telegram integration configured, etc.) — not a dependency of this path.
+    try {
+      await this.domain.attemptAutoFinalize(row.workspaceId, row.ownerCoadminUserId, competition.id, new Date());
+    } catch (error) {
+      this.logger?.error(
+        { err: error, workspaceId: row.workspaceId, ownerCoadminUserId: row.ownerCoadminUserId, competitionId: competition.id },
+        "leaderboard.verify_membership.auto_finalize_failed"
+      );
     }
   }
 

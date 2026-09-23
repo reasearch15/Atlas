@@ -29,7 +29,6 @@ import {
   invalidEventType,
   invalidMembershipStatus,
   leaderboardDisabled,
-  LeaderboardError,
   missingReason,
   ownerMismatch,
   participantIntegrityError,
@@ -976,7 +975,10 @@ export class PrismaLeaderboardService {
       const snapshot = await tx.competitionSnapshot.findUnique({ where: { competitionId: competition.id } });
       if (!snapshot) throw eventNotFound();
 
-      const winnersPayload = await this.buildAutomaticWinnersPayloadTx(tx, competition.id, snapshot.prizePoolCents);
+      // Manual, human-confirmed finalize stays strict: PENDING_REVIEW still blocks
+      // (force omitted/false), so an admin sees the real PENDING_REVIEW_BLOCKS_FINALIZE
+      // error and can resolve eligibility first if they want a fully-verified result.
+      const { winnersPayload } = await this.buildAutomaticWinnersPayloadTx(tx, competition.id, snapshot.prizePoolCents);
       await this.ensureLeaderboardBonusAwardTx(tx, competition, now);
 
       if (!snapshot.winnersJson) {
@@ -1705,11 +1707,20 @@ export class PrismaLeaderboardService {
    * so this always runs in a transaction that is completely separate from freezing —
    * winner selection is never attempted in the same transaction as the freeze.
    *
-   * PENDING_REVIEW_BLOCKS_FINALIZE (from either the Top 3 selection or the rank 4-10
-   * bonus draw) is swallowed here and reported back as `finalized: false` rather than
-   * thrown: it is an expected, routine "not ready yet" outcome while Telegram membership
-   * verification is still in flight, not a failure that should roll anything back or
-   * abort a caller iterating over multiple competitions (see completeExpiredCompetitions).
+   * CRITICAL PRODUCT RULE: a competition must never remain FROZEN indefinitely because
+   * Telegram membership verification is PENDING_REVIEW. Membership verification decides
+   * PRIZE ELIGIBILITY, not permission to publish the result. So this always runs winner
+   * selection in "bounded" mode (selectPrizeWinnersFromEligibility /
+   * resolveLeaderboardBonusPool with `skipUnresolved: true`): a candidate still
+   * PENDING_REVIEW after the bounded verification pass (see
+   * leaderboard-telegram.processor.ts's processVerifyMembership, and the periodic
+   * FROZEN re-scan in completeExpiredCompetitions, which together guarantee this is
+   * retried within one maintenance tick even if the event-driven path never fires) is
+   * skipped for the prize / bonus draw and ranking continues downward — it is never
+   * silently marked ELIGIBLE, and its stored membershipStatus is left untouched, so the
+   * fact that verification never resolved them is preserved on the record. This can
+   * never fail with PENDING_REVIEW_BLOCKS_FINALIZE — the only remaining early-return is
+   * "nothing to do" (not FROZEN, or already raced to FINALIZED).
    */
   private async attemptAutoFinalizeTx(
     tx: Tx,
@@ -1729,16 +1740,9 @@ export class PrismaLeaderboardService {
     const snapshot = await tx.competitionSnapshot.findUnique({ where: { competitionId } });
     if (!snapshot) throw eventNotFound();
 
-    let winnersPayload: Awaited<ReturnType<typeof this.buildAutomaticWinnersPayloadTx>>;
-    try {
-      winnersPayload = await this.buildAutomaticWinnersPayloadTx(tx, competitionId, snapshot.prizePoolCents);
-      await this.ensureLeaderboardBonusAwardTx(tx, competition, now);
-    } catch (error) {
-      if (error instanceof LeaderboardError && error.code === "PENDING_REVIEW_BLOCKS_FINALIZE") {
-        return { competition, finalized: false };
-      }
-      throw error;
-    }
+    const { winnersPayload, skippedPendingReviewCrmContactIds: skippedForPrize } =
+      await this.buildAutomaticWinnersPayloadTx(tx, competitionId, snapshot.prizePoolCents, { force: true });
+    const bonus = await this.ensureLeaderboardBonusAwardTx(tx, competition, now, { force: true });
 
     if (!snapshot.winnersJson) {
       await tx.competitionSnapshot.update({
@@ -1790,7 +1794,12 @@ export class PrismaLeaderboardService {
       metadata: {
         competitionId,
         ownerCoadminUserId,
-        winners: winnersPayload
+        winners: winnersPayload,
+        // Preserves, for audit/support purposes, exactly who was skipped for a
+        // prize/bonus slot because Telegram/API verification never resolved them
+        // in time — their membershipStatus stays PENDING_REVIEW in the DB.
+        skippedPendingReviewForPrize: skippedForPrize,
+        bonusAwardSkippedForPendingReview: bonus.skippedPendingReviewCrmContactIds
       }
     });
     const finalCompetition = await tx.leaderboardCompetition.findUniqueOrThrow({ where: { id: competitionId } });
@@ -1799,19 +1808,19 @@ export class PrismaLeaderboardService {
 
   /**
    * Public, standalone retry of FROZEN → FINALIZED. Always its own transaction — never
-   * combined with freezing. Safe/idempotent to call repeatedly and concurrently:
+   * combined with freezing, and always bounded (see attemptAutoFinalizeTx) — never
+   * blocks on PENDING_REVIEW. Safe/idempotent to call repeatedly and concurrently:
    * - No-op (finalized: false) for anything not currently FROZEN (including already
    *   FINALIZED, matching the conditional `updateMany` guard below).
-   * - No-op (finalized: false) while any Top-3-relevant or bonus-pool candidate is
-   *   still PENDING_REVIEW.
    * - `winnersJson`/payouts are only written once (`snapshot.winnersJson` /
    *   `giveawayPayout.upsert` guards), and the FINALIZED transition itself is a
    *   conditional `updateMany` on `status: "FROZEN"`, so re-entrant calls never
    *   duplicate payouts or finalization projections.
    *
-   * Called from: the periodic FROZEN re-scan (completeExpiredCompetitions) and the
-   * event-driven resume once Telegram membership verification resolves enough
-   * candidates to determine the prize Top 3 (leaderboard-telegram.processor.ts).
+   * Called from: the periodic FROZEN re-scan (completeExpiredCompetitions) — the
+   * backstop that guarantees FROZEN is never a permanent state, bounded to at most one
+   * maintenance tick — and the event-driven resume right after the bounded Telegram
+   * membership verification pass completes (leaderboard-telegram.processor.ts).
    */
   public async attemptAutoFinalize(
     workspaceId: string,
@@ -1841,28 +1850,32 @@ export class PrismaLeaderboardService {
   private async buildAutomaticWinnersPayloadTx(
     tx: Tx,
     competitionId: string,
-    prizePoolCents: number
-  ): Promise<
-    Array<{
+    prizePoolCents: number,
+    options?: { readonly force?: boolean }
+  ): Promise<{
+    winnersPayload: Array<{
       prizeRank: 1 | 2 | 3;
       leaderboardRank: number;
       crmContactId: string;
       totalPoints: number;
       payoutCents: number;
-    }>
-  > {
+    }>;
+    skippedPendingReviewCrmContactIds: readonly string[];
+  }> {
     const candidates = await tx.giveawayEligibilityCandidate.findMany({
       where: { competitionId },
       orderBy: { leaderboardRank: "asc" }
     });
-    const selection = selectPrizeWinnersFromEligibility(candidates);
+    const selection = selectPrizeWinnersFromEligibility(candidates, { skipUnresolved: options?.force === true });
     if (!selection.ok) {
       throw pendingReviewBlocksFinalize(selection.pendingCrmContactIds);
     }
     const winnerCount = selection.winners.length as 0 | 1 | 2 | 3;
-    if (winnerCount === 0) return [];
+    if (winnerCount === 0) {
+      return { winnersPayload: [], skippedPendingReviewCrmContactIds: selection.skippedPendingReviewCrmContactIds };
+    }
     const splits = splitPrizePool(prizePoolCents, winnerCount);
-    return selection.winners.map((winner) => {
+    const winnersPayload = selection.winners.map((winner) => {
       const split = splits.find((s) => s.rank === winner.prizeRank)!;
       return {
         prizeRank: winner.prizeRank,
@@ -1872,23 +1885,29 @@ export class PrismaLeaderboardService {
         payoutCents: split.payoutCents
       };
     });
+    return { winnersPayload, skippedPendingReviewCrmContactIds: selection.skippedPendingReviewCrmContactIds };
   }
 
   private async ensureLeaderboardBonusAwardTx(
     tx: Tx,
     competition: { id: string; workspaceId: string; ownerCoadminUserId: string },
-    now: Date
+    now: Date,
+    options?: { readonly force?: boolean }
   ) {
     const existing = await tx.leaderboardBonusAward.findUnique({ where: { competitionId: competition.id } });
-    if (existing) return existing;
+    if (existing) return { award: existing, skippedPendingReviewCrmContactIds: [] as readonly string[] };
 
     const candidates = await tx.giveawayEligibilityCandidate.findMany({
       where: { competitionId: competition.id, leaderboardRank: { gte: 4, lte: 10 } },
       orderBy: { leaderboardRank: "asc" }
     });
-    const pool = resolveLeaderboardBonusPool(candidates);
+    const force = options?.force === true;
+    const pool = resolveLeaderboardBonusPool(candidates, { skipUnresolved: force });
     if (!pool.ok) throw pendingReviewBlocksFinalize(pool.pendingCrmContactIds);
-    if (pool.candidates.length === 0) return null;
+    const skippedPendingReviewCrmContactIds: readonly string[] = force
+      ? candidates.filter((c) => c.membershipStatus === "PENDING_REVIEW").map((c) => c.crmContactId)
+      : [];
+    if (pool.candidates.length === 0) return { award: null, skippedPendingReviewCrmContactIds };
 
     const selected = pool.candidates[this.bonusRandomIndex(pool.candidates.length)]!;
     const claim = await tx.freeplayClaim.upsert({
@@ -1904,7 +1923,7 @@ export class PrismaLeaderboardService {
       },
       update: {}
     });
-    return tx.leaderboardBonusAward.create({
+    const award = await tx.leaderboardBonusAward.create({
       data: {
         workspaceId: competition.workspaceId,
         ownerCoadminUserId: competition.ownerCoadminUserId,
@@ -1916,6 +1935,7 @@ export class PrismaLeaderboardService {
         selectedAt: now
       }
     });
+    return { award, skippedPendingReviewCrmContactIds };
   }
 
   private async syncReferralMilestonesTx(

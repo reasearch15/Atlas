@@ -430,18 +430,27 @@ describe("Lifecycle: ACTIVE expiry freezes independently of finalization", () =>
     expect(candidates.map((c) => c.crmContactId).sort()).toEqual([...contactIds].sort());
   });
 
-  it("does not finalize while required membership remains unresolved", async () => {
+  it("CRITICAL RULE: still finalizes when membership is never resolved — FROZEN is never permanent", async () => {
+    // No Telegram verification ever ran for this competition (no onFrozen hook wired).
+    // The bounded automatic finalize path must still complete it deterministically:
+    // every candidate is skipped for the prize (never silently marked ELIGIBLE), their
+    // PENDING_REVIEW status is left untouched on the record, and the result publishes
+    // with zero winners rather than the competition staying FROZEN forever.
     const prisma = createLifecyclePrisma();
     seedEnabledSettings(prisma, ownerA);
-    const { competitionId } = seedExpiredActiveCompetition(prisma, ownerA, 3);
+    const { competitionId, contactIds } = seedExpiredActiveCompetition(prisma, ownerA, 3);
     const service = new PrismaLeaderboardService(prisma, { audit: { record: async () => undefined } as never });
 
     await service.ensureCurrentCompetition(workspaceId, ownerA, now);
     const outcome = await service.attemptAutoFinalize(workspaceId, ownerA, competitionId, now);
 
-    expect(outcome.finalized).toBe(false);
-    expect(outcome.competition.status).toBe("FROZEN");
-    expect(prisma._state.payouts).toHaveLength(0);
+    expect(outcome.finalized).toBe(true);
+    expect(outcome.competition.status).toBe("FINALIZED");
+    expect(prisma._state.payouts.filter((p) => p.competitionId === competitionId)).toHaveLength(0);
+    const candidates = prisma._state.eligibility.filter((c) => c.competitionId === competitionId);
+    expect(candidates.map((c) => c.crmContactId).sort()).toEqual([...contactIds].sort());
+    // Preserved, not fabricated: never overwritten to ELIGIBLE or NOT_ELIGIBLE.
+    expect(candidates.every((c) => c.membershipStatus === "PENDING_REVIEW")).toBe(true);
   });
 
   it("emits onFrozen exactly once, only after the freeze transaction commits", async () => {
@@ -528,7 +537,7 @@ describe("Lifecycle: automatic finalization resumes once membership resolves", (
 });
 
 describe("Lifecycle: batch isolation across owners", () => {
-  it("one owner's forced failure does not prevent another owner's expired competition from freezing", async () => {
+  it("one owner's forced failure does not prevent another owner's expired competition from completing", async () => {
     const prisma = createLifecyclePrisma();
     seedEnabledSettings(prisma, ownerA);
     seedEnabledSettings(prisma, ownerB);
@@ -537,13 +546,35 @@ describe("Lifecycle: batch isolation across owners", () => {
     prisma._state.throwOnLockCompetitionId.add(blockedId);
 
     const service = new PrismaLeaderboardService(prisma, { audit: { record: async () => undefined } as never });
+    // A single tick: owner A's freeze is force-broken, owner B's freezes AND (since
+    // nothing verifies it) is force-finalized by the same call's FROZEN re-scan phase.
     const actioned = await service.completeExpiredCompetitions(now, 50);
 
     const blocked = prisma._state.competitions.find((c) => c.id === blockedId)!;
     const healthy = prisma._state.competitions.find((c) => c.id === healthyId)!;
     expect(blocked.status).toBe("ACTIVE"); // rolled back, unchanged
-    expect(healthy.status).toBe("FROZEN"); // owner B still processed
+    expect(healthy.status).toBe("FINALIZED"); // owner B still fully processed this tick
     expect(actioned).toBeGreaterThanOrEqual(1);
+  });
+
+  it("one owner permanently stuck (repeated lock failures) never blocks other owners across ticks", async () => {
+    const prisma = createLifecyclePrisma();
+    seedEnabledSettings(prisma, ownerA);
+    seedEnabledSettings(prisma, ownerB);
+    const { competitionId: blockedId } = seedExpiredActiveCompetition(prisma, ownerA, 2);
+    const { competitionId: healthyId } = seedExpiredActiveCompetition(prisma, ownerB, 2);
+    prisma._state.throwOnLockCompetitionId.add(blockedId);
+
+    const service = new PrismaLeaderboardService(prisma, { audit: { record: async () => undefined } as never });
+    await service.completeExpiredCompetitions(now, 50);
+    await service.completeExpiredCompetitions(now, 50);
+    await service.completeExpiredCompetitions(now, 50);
+
+    const blocked = prisma._state.competitions.find((c) => c.id === blockedId)!;
+    const healthy = prisma._state.competitions.find((c) => c.id === healthyId)!;
+    expect(blocked.status).toBe("ACTIVE");
+    expect(healthy.status).toBe("FINALIZED");
+    expect(prisma._state.payouts.filter((p) => p.competitionId === healthyId)).toHaveLength(0);
   });
 });
 
@@ -585,5 +616,94 @@ describe("Lifecycle: end-to-end regression (standings -> expiry -> freeze -> ver
     const payouts = prisma._state.payouts.filter((p) => p.competitionId === competitionId);
     expect(payouts).toHaveLength(2);
     expect(payouts.map((p) => p.crmContactId).sort()).toEqual([contactIds[0], contactIds[2]].sort());
+  });
+});
+
+describe("Lifecycle: public result publication is triggered by the bounded finalize path", () => {
+  it("durableFinalizationProjection (POST_PUBLIC_RESULTS / PUBLISH_FINAL_LEADERBOARD source) and onCompleted both fire exactly once when the bounded path finalizes", async () => {
+    // durableFinalizationProjection is the same hook production wires to
+    // outbox.enqueueFinalizationJobsTx (POST_PUBLIC_RESULTS + PUBLISH_FINAL_LEADERBOARD,
+    // see leaderboard-telegram.plugin.ts), and onCompleted is the same hook wired to
+    // wake + process those jobs (which itself chains PUBLISH_WINNERS_PICTURE — see
+    // leaderboard-winner-announcement.test.ts / leaderboard-telegram.winners-picture.test.ts
+    // for that unchanged chain in isolation). This test proves the NEW bounded
+    // attemptAutoFinalize path reaches that same trigger point, not just the old
+    // manual finalizeCompetition path.
+    const prisma = createLifecyclePrisma();
+    seedEnabledSettings(prisma, ownerA);
+    const { competitionId, contactIds } = seedExpiredActiveCompetition(prisma, ownerA, 3);
+
+    const projectionCalls: Array<{ workspaceId: string; ownerCoadminUserId: string; competitionId: string }> = [];
+    const completedCalls: Array<{ workspaceId: string; ownerCoadminUserId: string; competitionId: string }> = [];
+    const service = new PrismaLeaderboardService(prisma, {
+      audit: { record: async () => undefined } as never,
+      durableFinalizationProjection: async (_tx, info) => {
+        projectionCalls.push(info);
+      },
+      projectionHooks: {
+        onCompleted: async (info) => {
+          completedCalls.push(info);
+        }
+      }
+    });
+
+    await service.ensureCurrentCompetition(workspaceId, ownerA, now);
+    await resolveTop3(service, competitionId, ownerA, contactIds, ["ELIGIBLE", "ELIGIBLE", "ELIGIBLE"]);
+    const outcome = await service.attemptAutoFinalize(workspaceId, ownerA, competitionId, now);
+
+    expect(outcome.finalized).toBe(true);
+    expect(projectionCalls).toEqual([{ workspaceId, ownerCoadminUserId: ownerA, competitionId }]);
+    expect(completedCalls).toEqual([{ workspaceId, ownerCoadminUserId: ownerA, competitionId }]);
+  });
+});
+
+describe("Lifecycle: next competition is never blocked by the previous one's finalization", () => {
+  it("a new ACTIVE competition exists as soon as the old one freezes, before it ever finalizes", async () => {
+    const prisma = createLifecyclePrisma();
+    seedEnabledSettings(prisma, ownerA);
+    const { competitionId: previousId } = seedExpiredActiveCompetition(prisma, ownerA, 3);
+    const service = new PrismaLeaderboardService(prisma, { audit: { record: async () => undefined } as never });
+
+    // Only the freeze phase runs here — no finalize attempt yet.
+    await service.ensureCurrentCompetition(workspaceId, ownerA, now);
+
+    const previous = prisma._state.competitions.find((c) => c.id === previousId)!;
+    const others = prisma._state.competitions.filter((c) => c.id !== previousId && c.ownerCoadminUserId === ownerA);
+    expect(previous.status).toBe("FROZEN"); // not finalized yet
+    expect(others).toHaveLength(1);
+    expect(others[0]?.status).toBe("ACTIVE"); // next competition already running
+
+    // Finalizing the previous competition afterward must succeed normally and must
+    // not touch the next (already-ACTIVE) competition at all.
+    const outcome = await service.attemptAutoFinalize(workspaceId, ownerA, previousId, now);
+    expect(outcome.finalized).toBe(true);
+    const stillActive = prisma._state.competitions.find((c) => c.id === others[0]?.id)!;
+    expect(stillActive.status).toBe("ACTIVE");
+  });
+});
+
+describe("Lifecycle: restart/recovery", () => {
+  it("a competition frozen before a crash (no verification ever ran) is picked up and finalized by a later tick, exactly once", async () => {
+    const prisma = createLifecyclePrisma();
+    seedEnabledSettings(prisma, ownerA);
+    const { competitionId } = seedExpiredActiveCompetition(prisma, ownerA, 3);
+    // No projectionHooks at all — simulates the process crashing/restarting between
+    // the freeze commit and any VERIFY_MEMBERSHIP job ever running.
+    const service = new PrismaLeaderboardService(prisma, { audit: { record: async () => undefined } as never });
+
+    await service.ensureCurrentCompetition(workspaceId, ownerA, now); // "before restart": freezes only
+    expect(prisma._state.competitions.find((c) => c.id === competitionId)!.status).toBe("FROZEN");
+
+    // "After restart": a fresh service instance, simulating a new process, running
+    // the ordinary periodic sweep — this must still finalize the orphaned FROZEN
+    // competition via the backstop re-scan.
+    const restarted = new PrismaLeaderboardService(prisma, { audit: { record: async () => undefined } as never });
+    await restarted.completeExpiredCompetitions(now, 50);
+    await restarted.completeExpiredCompetitions(now, 50); // a second tick must be a no-op, not a duplicate
+
+    const finalCompetition = prisma._state.competitions.find((c) => c.id === competitionId)!;
+    expect(finalCompetition.status).toBe("FINALIZED");
+    const payouts = prisma._state.payouts.filter((p) => p.competitionId === competitionId);
+    expect(payouts).toHaveLength(0); // nothing was ever verified — nobody auto-disqualified or auto-approved
   });
 });

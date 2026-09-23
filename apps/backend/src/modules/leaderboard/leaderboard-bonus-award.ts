@@ -10,14 +10,27 @@ export interface LeaderboardBonusCandidate {
   readonly membershipStatus: PrizeMembershipStatus;
 }
 
-export function resolveLeaderboardBonusPool(candidates: readonly LeaderboardBonusCandidate[]):
+/**
+ * By default (`skipUnresolved` false/omitted), any PENDING_REVIEW candidate in
+ * the rank 4-10 bonus range blocks the draw entirely (strict — used for manual,
+ * human-confirmed finalize). With `skipUnresolved: true`, PENDING_REVIEW
+ * candidates are simply excluded from the draw pool (they get no shot at the
+ * bonus this cycle) instead of blocking — used by the bounded automatic finalize
+ * path so an unresolved rank 4-10 candidate can never keep the whole competition
+ * (including its already-decided Top 3) stuck FROZEN.
+ */
+export function resolveLeaderboardBonusPool(
+  candidates: readonly LeaderboardBonusCandidate[],
+  options?: { readonly skipUnresolved?: boolean }
+):
   | { readonly ok: true; readonly candidates: readonly LeaderboardBonusCandidate[] }
   | { readonly ok: false; readonly pendingCrmContactIds: readonly string[] } {
+  const skipUnresolved = options?.skipUnresolved === true;
   const inRange = candidates.filter((candidate) => candidate.leaderboardRank >= 4 && candidate.leaderboardRank <= 10);
   const pendingCrmContactIds = inRange
     .filter((candidate) => candidate.membershipStatus === "PENDING_REVIEW")
     .map((candidate) => candidate.crmContactId);
-  if (pendingCrmContactIds.length > 0) return { ok: false, pendingCrmContactIds };
+  if (pendingCrmContactIds.length > 0 && !skipUnresolved) return { ok: false, pendingCrmContactIds };
   return {
     ok: true,
     candidates: inRange.filter((candidate) => candidate.membershipStatus === "ELIGIBLE")
