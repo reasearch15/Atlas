@@ -728,6 +728,7 @@ function deliveryHarness() {
   const provider = new FakeProvider(async () => success(500));
   const media = new FakeMedia();
   const delivery = new FakeDelivery(invoices);
+  const logs: PyeCashLogEvent[] = [];
   const service = new PyeCashService({
     config: config(),
     provider,
@@ -737,14 +738,15 @@ function deliveryHarness() {
     decrypt: (envelope) => decryptSecret(envelope, KEY),
     media,
     delivery,
-    now: () => new Date("2026-11-17T12:00:00.000Z")
+    now: () => new Date("2026-11-17T12:00:00.000Z"),
+    log: (event) => logs.push(event)
   });
-  return { service, invoices, provider, media, delivery };
+  return { service, invoices, provider, media, delivery, logs };
 }
 
 describe("Pye-Cash QR delivery", () => {
   it("stores one scannable card and queues it for the workspace chat", async () => {
-    const { service, provider, media, delivery, invoices } = deliveryHarness();
+    const { service, provider, media, delivery, invoices, logs } = deliveryHarness();
     const created = await service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "deliver-5" });
     const queued = await service.queueQr(sender, CHAT, created.invoice.id);
     expect(queued.statusCode).toBe(202);
@@ -761,6 +763,11 @@ describe("Pye-Cash QR delivery", () => {
     expect(invoices.rows[0]?.mediaStorageKey).toContain("telegram-1");
     const image = await sharp(media.png ?? Buffer.alloc(0)).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
     expect(jsQR(new Uint8ClampedArray(image.data), image.info.width, image.info.height)?.data).toBe(BOLT);
+    const stages = logs.map((entry) => entry.stage);
+    expect(stages).toContain("QR_RENDERED");
+    expect(stages).toContain("IMAGE_STORED");
+    expect(stages).toContain("JOB_REGISTERED");
+    expect(JSON.stringify(logs)).not.toContain(BOLT);
   });
 
   it("does not queue a second copy or call the provider again", async () => {
@@ -869,10 +876,23 @@ describe("Pye-Cash QR delivery", () => {
     expect(provider.calls).toBe(1);
   });
 
-  it("keeps one command when the job write crashes and reconciles a sent command", async () => {
+  it("registers the job on the first click after one failed add, and keeps the same command", async () => {
+    const { service, invoices, provider, delivery } = deliveryHarness();
+    const created = await service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "deliver-job-once" });
+    delivery.failAfterWrite = 1;
+    const pending = await service.queueQr(sender, CHAT, created.invoice.id);
+    expect(pending.statusCode).toBe(202);
+    expect(pending.invoice.deliveryState).toBe("QUEUED");
+    expect(invoices.rows[0]?.errorCategory).toBeNull();
+    expect(delivery.commands.size).toBe(1);
+    expect(delivery.jobs).toEqual(["cmd-1"]);
+    expect(provider.calls).toBe(1);
+  });
+
+  it("keeps one command when job registration keeps failing and reconciles a sent command", async () => {
     const { service, invoices, provider, delivery } = deliveryHarness();
     const created = await service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "deliver-job-crash" });
-    delivery.failAfterWrite = 1;
+    delivery.failAfterWrite = 2;
     await expect(service.queueQr(sender, CHAT, created.invoice.id)).rejects.toMatchObject({ code: "PYE_CASH_QUEUE_UNAVAILABLE" });
     expect(invoices.rows[0]?.deliveryState).toBe("QUEUED");
     expect(invoices.rows[0]?.errorCategory).toBeNull();
@@ -880,6 +900,7 @@ describe("Pye-Cash QR delivery", () => {
     expect(delivery.commands.size).toBe(1);
     expect(delivery.jobs).toHaveLength(0);
     const resumed = await service.queueQr(sender, CHAT, created.invoice.id);
+    expect(resumed.statusCode).toBe(202);
     expect(resumed.invoice.deliveryState).toBe("QUEUED");
     expect(delivery.jobs).toHaveLength(1);
     expect(provider.calls).toBe(1);

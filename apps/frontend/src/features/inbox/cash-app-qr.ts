@@ -153,13 +153,15 @@ export function cashAppAttemptFeedback(result: CashAppSendResult): CashAppAttemp
 }
 
 function cashAppFailureMessage(code: string | null | undefined, invoiceId: string | null, fallback: string): string {
-  if (code === "PYE_CASH_QUEUE_UNAVAILABLE") {
+  if (code === "PYE_CASH_QUEUE_UNAVAILABLE" || code === "WORKER_UNAVAILABLE") {
     return "Invoice created. Telegram delivery is pending because the queue is temporarily unavailable.";
   }
+  if (code === "PYE_CASH_DELIVERY_FAILED") return "The Telegram command could not be saved. Send again to reuse this invoice.";
+  if (!code && invoiceId) return "The delivery request failed before the queue was confirmed. Send again to reuse this invoice.";
   if (code === "PYE_CASH_RENDER_FAILED") return "The QR image could not be rendered.";
   if (code === "PYE_CASH_STORAGE_FAILED") return "The QR image could not be stored.";
   if (code === "PYE_CASH_NOT_READY") return "The invoice was not confirmed.";
-  if (invoiceId) return "QR was not queued. Send again to reuse this invoice.";
+  if (invoiceId && code) return `Delivery did not finish (${code}). Send again to reuse this invoice.`;
   return fallback;
 }
 

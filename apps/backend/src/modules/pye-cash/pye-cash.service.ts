@@ -264,7 +264,9 @@ export class PyeCashService {
         amountCents: invoice.amountCents,
         expiresAt: invoice.expiresAt ?? this.clock().toISOString()
       });
+      this.logStage(invoice.id, "QR_RENDERED", null);
     } catch (error) {
+      this.logStage(invoice.id, "QR_RENDER_FAILED", error instanceof AppError ? error.code : "QR_RENDER_FAILED");
       await this.markDeliveryFailed(invoice.id, "QR_RENDER_FAILED");
       if (error instanceof AppError) throw error;
       throw new AppError(502, "PYE_CASH_RENDER_FAILED", "The QR image could not be rendered.");
@@ -278,8 +280,10 @@ export class PyeCashService {
         png: card.png
       });
       await this.deps.invoices.update(invoice.id, { mediaStorageKey: storageKey }, this.clock());
+      this.logStage(invoice.id, "IMAGE_STORED", null);
       return { storageKey, fileSizeBytes: card.png.length };
     } catch (error) {
+      this.logStage(invoice.id, "IMAGE_STORE_FAILED", error instanceof AppError ? error.code : "QR_STORAGE_FAILED");
       await this.markDeliveryFailed(invoice.id, "QR_STORAGE_FAILED");
       if (error instanceof AppError) throw error;
       throw new AppError(502, "PYE_CASH_STORAGE_FAILED", "The QR image could not be stored.");
@@ -294,13 +298,21 @@ export class PyeCashService {
     const delivery = this.deps.delivery;
     if (!delivery) throw new AppError(503, "PYE_CASH_DELIVERY_UNAVAILABLE", "QR delivery is not configured.");
     try {
-      return await delivery.enqueue(input);
+      return await this.registered(input.invoiceId, await delivery.enqueue(input));
     } catch (error) {
-      const pending = await this.queueRegistrationError(input.invoiceId, error);
-      if (pending) throw pending;
+      if (await this.commandAwaitingJob(input.invoiceId, error)) {
+        try {
+          return await this.registered(input.invoiceId, await delivery.enqueue(input));
+        } catch (retryError) {
+          this.logStage(input.invoiceId, "JOB_REGISTRATION_FAILED", this.stageReason(retryError));
+          const pending = await this.queueRegistrationError(input.invoiceId, retryError);
+          if (pending) throw pending;
+          throw retryError;
+        }
+      }
       if (error instanceof AppError) throw error;
       try {
-        return await delivery.enqueue(input);
+        return await this.registered(input.invoiceId, await delivery.enqueue(input));
       } catch (retryError) {
         const pendingRetry = await this.queueRegistrationError(input.invoiceId, retryError);
         if (pendingRetry) throw pendingRetry;
@@ -309,6 +321,26 @@ export class PyeCashService {
         throw new AppError(502, "PYE_CASH_DELIVERY_FAILED", "The QR could not be stored or queued.");
       }
     }
+  }
+
+  private async registered(
+    invoiceId: string,
+    outcome: { readonly outcome: "queued" | "already_queued" | "already_sent" | "reconciled_failed"; readonly telegramMessageId: string | null }
+  ) {
+    if (outcome.outcome === "queued" || outcome.outcome === "already_queued") this.logStage(invoiceId, "JOB_REGISTERED", null);
+    if (outcome.outcome === "already_sent") this.logStage(invoiceId, "TELEGRAM_SENT", null);
+    return outcome;
+  }
+
+  /**
+   * A persisted command whose job add failed can be registered again in this same request.
+   * Ambiguous Telegram results are not retried.
+   */
+  private async commandAwaitingJob(invoiceId: string, error: unknown): Promise<boolean> {
+    const current = await this.deps.invoices.get(invoiceId);
+    if (!current || current.deliveryState !== "QUEUED") return false;
+    if (error instanceof AppError && error.code !== "WORKER_UNAVAILABLE" && error.code !== "PYE_CASH_QUEUE_UNAVAILABLE") return false;
+    return true;
   }
 
   /**
@@ -429,9 +461,30 @@ export class PyeCashService {
       httpStatus: null,
       contentType: null,
       expirationType: null,
-      expirationFormat: null
+      expirationFormat: null,
+      stage: null
     });
     return toPublicInvoice(record);
+  }
+
+  private logStage(invoiceId: string, stage: string, reason: string | null): void {
+    this.deps.log?.({
+      event: "pye_cash.provider_response",
+      correlationId: invoiceId,
+      invoiceId,
+      creationState: null,
+      reason,
+      httpStatus: null,
+      contentType: null,
+      expirationType: null,
+      expirationFormat: null,
+      stage
+    });
+  }
+
+  private stageReason(error: unknown): string {
+    if (error instanceof AppError) return error.code;
+    return error instanceof Error ? error.name : "UNKNOWN";
   }
 
   private logProvider(
@@ -450,7 +503,8 @@ export class PyeCashService {
       httpStatus,
       contentType,
       expirationType: expiration?.type ?? null,
-      expirationFormat: expiration?.format ?? null
+      expirationFormat: expiration?.format ?? null,
+      stage: null
     });
   }
 

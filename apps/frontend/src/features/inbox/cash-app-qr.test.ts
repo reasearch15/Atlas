@@ -290,8 +290,14 @@ describe("Cash App QR CRM controls", () => {
       invoice: invoice({ creationState: "FAILED", deliveryState: "FAILED", errorCategory: "DELIVERY_FAILED" })
     })).toMatchObject({
       temporary: true,
-      message: "QR was not queued. Send again to reuse this invoice."
+      message: "The delivery request failed before the queue was confirmed. Send again to reuse this invoice."
     });
+    expect(cashAppAttemptFeedback({
+      status: "failed",
+      invoiceId: "invoice-1",
+      code: "WORKER_UNAVAILABLE",
+      message: "queue"
+    })?.message).toContain("queue is temporarily unavailable");
     expect(cashAppAttemptFeedback({
       status: "failed",
       invoiceId: "invoice-1",
