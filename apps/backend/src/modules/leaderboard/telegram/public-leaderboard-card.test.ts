@@ -227,7 +227,8 @@ describe("renderPublicLeaderboardCard", () => {
     expect(svg).toContain("$250");
     expect(svg).toContain("HOW TO CLIMB");
     expect(svg).toContain("$1 = 1 PT");
-    expect(svg).toContain("48H WHEEL");
+    expect(svg).toContain("SPIN");
+    expect(svg).toContain("$40+");
   });
 
   it("renders digit-containing CRM names without rewriting them to Player", () => {
@@ -351,6 +352,146 @@ describe("renderPublicLeaderboardCard", () => {
       })
       .png()
       .toBuffer();
+    const review: Array<{ name: string; input: Parameters<typeof renderPublicLeaderboardCard>[0] }> = [
+      {
+        name: "review-active-ten.png",
+        input: {
+          brandName: "SAYU GAMING HUB",
+          prizePoolCents: 12269,
+          endsAt: new Date("2026-11-19T02:00:00.000Z"),
+          timezone: "America/Chicago",
+          competitionStatus: "ACTIVE",
+          standings: [
+            standing(1, "Redface", 90),
+            standing(2, "Joe Mashburn", 80),
+            standing(3, "Janet Prado", 70),
+            standing(4, "Amanda Mauricio", 60),
+            standing(5, "Sttc.La", 50),
+            standing(6, "Kimberly Amea", 40),
+            standing(7, "Tanya McLemore", 30),
+            standing(8, "Joe Blanford", 20),
+            standing(9, "Poko", 10),
+            standing(10, "John Mccloud", 5)
+          ],
+          now: new Date("2026-11-18T08:17:00.000Z"),
+          climbTips
+        }
+      },
+      {
+        name: "review-active-two.png",
+        input: {
+          brandName: "SAYU GAMING HUB",
+          prizePoolCents: 2500,
+          endsAt: ENDS,
+          timezone: "America/Chicago",
+          competitionStatus: "ACTIVE",
+          standings: [standing(1, "Redface", 20), standing(2, "Joe Mashburn", 10)],
+          now: NOW,
+          climbTips
+        }
+      },
+      {
+        name: "review-active-zero.png",
+        input: {
+          brandName: "SAYU GAMING HUB",
+          prizePoolCents: 0,
+          endsAt: ENDS,
+          timezone: "America/Chicago",
+          competitionStatus: "ACTIVE",
+          standings: [],
+          now: NOW,
+          climbTips
+        }
+      },
+      {
+        name: "review-long-names.png",
+        input: {
+          brandName: "SAYU GAMING HUB",
+          prizePoolCents: 1_234_567,
+          endsAt: ENDS,
+          timezone: "America/Chicago",
+          competitionStatus: "ACTIVE",
+          standings: [
+            standing(1, "AlexanderTheGreat123", 1),
+            standing(2, "SuperLongDisplayNameXYZ", 1),
+            standing(3, "José María González de la Cruz", 1),
+            standing(4, "PlayerWithVeryLongHandle99", 1),
+            standing(5, "AnotherExtremelyLongUserName", 1)
+          ],
+          now: NOW,
+          climbTips
+        }
+      },
+      {
+        name: "review-unicode.png",
+        input: {
+          brandName: "SAYU GAMING HUB",
+          prizePoolCents: 9999,
+          endsAt: ENDS,
+          timezone: "America/Chicago",
+          competitionStatus: "ACTIVE",
+          standings: [
+            standing(1, "🔥Champion", 1),
+            standing(2, "玩家名字很长", 1),
+            standing(3, "Владимир", 1),
+            standing(4, "José", 1),
+            standing(5, "580.1a", 1)
+          ],
+          now: NOW,
+          climbTips
+        }
+      },
+      {
+        name: "review-large-pool.png",
+        input: {
+          brandName: "SAYU GAMING HUB",
+          prizePoolCents: 1_234_567,
+          endsAt: ENDS,
+          timezone: "America/Chicago",
+          competitionStatus: "ACTIVE",
+          standings: FULL_TEN,
+          now: NOW,
+          climbTips
+        }
+      },
+      {
+        name: "review-final-three.png",
+        input: {
+          brandName: "SAYU GAMING HUB",
+          prizePoolCents: 12269,
+          endsAt: ENDS,
+          timezone: "America/Chicago",
+          competitionStatus: "FINALIZED",
+          standings: FULL_TEN.slice(0, 3),
+          now: NOW,
+          climbTips
+        }
+      },
+      {
+        name: "review-final-two.png",
+        input: {
+          brandName: "SAYU GAMING HUB",
+          prizePoolCents: 8000,
+          endsAt: ENDS,
+          timezone: "America/Chicago",
+          competitionStatus: "FINALIZED",
+          standings: [standing(1, "Redface", 20), standing(2, "Tanya McLemore", 10)],
+          now: NOW,
+          climbTips
+        }
+      }
+    ];
+    for (const item of review) {
+      const result = await renderPublicLeaderboardCard(item.input);
+      writeFileSync(join(SAMPLE_DIR, item.name), result.png);
+      expect(isValidPngBuffer(result.png)).toBe(true);
+      expect(result.svg).not.toContain("45 PTS");
+      if (item.input.competitionStatus === "FINALIZED") {
+        expect(result.svg).toContain("FINAL RESULTS ARE IN");
+        expect(result.svg).not.toContain("COMPETITION IS LIVE");
+      }
+    }
+
     writeFileSync(join(SAMPLE_DIR, "mobile-preview-420.png"), mobile);
     expect(isValidPngBuffer(mobile)).toBe(true);
     expect(Math.max(...renderTimes)).toBeLessThan(5000);

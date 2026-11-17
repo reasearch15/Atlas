@@ -63,13 +63,13 @@ export function buildWinnersPictureSvg(input: WinnersPictureInput): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${LEADERBOARD_CARD_WIDTH}" height="1580" viewBox="0 0 ${LEADERBOARD_CARD_WIDTH} 1580">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0.25" y2="1">
-      <stop offset="0%" stop-color="#120e08"/>
-      <stop offset="60%" stop-color="#080706"/>
-      <stop offset="100%" stop-color="#050403"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#140818"/>
+      <stop offset="40%" stop-color="#07060a"/>
+      <stop offset="100%" stop-color="#09060f"/>
     </linearGradient>
-    <radialGradient id="glow" cx="50%" cy="35%" r="58%">
-      <stop offset="0%" stop-color="#d4af37" stop-opacity="0.34"/>
+    <radialGradient id="glow" cx="50%" cy="28%" r="52%">
+      <stop offset="0%" stop-color="#d4af37" stop-opacity="0.32"/>
       <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
@@ -77,20 +77,27 @@ export function buildWinnersPictureSvg(input: WinnersPictureInput): string {
       <stop offset="45%" stop-color="#d4af37"/>
       <stop offset="100%" stop-color="#7a5c16"/>
     </linearGradient>
+    <linearGradient id="curtain" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3a1468"/>
+      <stop offset="100%" stop-color="#1a082e"/>
+    </linearGradient>
   </defs>
   <rect width="100%" height="100%" fill="url(#bg)"/>
   <rect width="100%" height="100%" fill="url(#glow)"/>
+  <path d="M0 0 C70 120 20 360 60 700 C20 1040 70 1320 0 1580 Z" fill="url(#curtain)" opacity="0.9"/>
+  <path d="M1080 0 C1010 120 1060 360 1020 700 C1060 1040 1010 1320 1080 1580 Z" fill="url(#curtain)" opacity="0.9"/>
   <rect x="48" y="48" width="984" height="1484" rx="36" fill="none" stroke="url(#gold)" stroke-width="3"/>
-  <text x="540" y="126" text-anchor="middle" fill="#f4f0e6" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" letter-spacing="6">${escapeSvgText(brand)}</text>
-  <text x="540" y="230" text-anchor="middle" fill="url(#gold)" font-family="Arial, Helvetica, sans-serif" font-size="62" font-weight="700" letter-spacing="4">COMPETITION</text>
-  <text x="540" y="296" text-anchor="middle" fill="url(#gold)" font-family="Arial, Helvetica, sans-serif" font-size="62" font-weight="700" letter-spacing="4">WINNERS</text>
-  <rect x="210" y="350" width="660" height="180" rx="28" fill="#17130d" stroke="#d4af37" stroke-width="3"/>
-  <text x="540" y="408" text-anchor="middle" fill="#c9b88a" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" letter-spacing="3">TOTAL PRIZE POOL</text>
-  <text x="540" y="490" text-anchor="middle" fill="#ffe9a0" font-family="Arial, Helvetica, sans-serif" font-size="76" font-weight="700">${escapeSvgText(pool)}</text>
-  <text x="540" y="606" text-anchor="middle" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="700">${escapeSvgText(range)}</text>
+  <text x="540" y="118" text-anchor="middle" fill="#f4e7c3" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700" letter-spacing="5">${escapeSvgText(brand)}</text>
+  <text x="540" y="210" text-anchor="middle" fill="url(#gold)" font-family="Arial, Helvetica, sans-serif" font-size="58" font-weight="700" letter-spacing="4">COMPETITION</text>
+  <text x="540" y="276" text-anchor="middle" fill="url(#gold)" font-family="Arial, Helvetica, sans-serif" font-size="58" font-weight="700" letter-spacing="4">WINNERS</text>
+  <rect x="190" y="330" width="700" height="176" rx="28" fill="#120e08" stroke="url(#gold)" stroke-width="3"/>
+  <text x="540" y="386" text-anchor="middle" fill="#c9b88a" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700" letter-spacing="3">TOTAL PRIZE POOL</text>
+  <text x="540" y="468" text-anchor="middle" fill="#ffe9a0" font-family="Arial, Helvetica, sans-serif" font-size="72" font-weight="700">${escapeSvgText(pool)}</text>
+  <text x="540" y="560" text-anchor="middle" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="26" font-weight="700">${escapeSvgText(range)}</text>
   ${rowSvg}
   ${empty}
   ${bonus}
+  <text x="540" y="1520" text-anchor="middle" fill="#c9a85a" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" letter-spacing="3">FINAL RESULTS ARE IN</text>
 </svg>`;
 }
 
