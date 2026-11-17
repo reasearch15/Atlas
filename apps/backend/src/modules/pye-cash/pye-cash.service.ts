@@ -222,32 +222,10 @@ export class PyeCashService {
     const resend = invoice.deliveryState === "FAILED" && invoice.errorCategory === "TELEGRAM_FAILED";
     let storageKey = invoice.mediaStorageKey;
     let fileSizeBytes = 0;
-    try {
-      if (!storageKey) {
-        const bolt11 = (this.deps.decrypt ?? ((envelope: EncryptedSecret) => decryptSecret(envelope, this.deps.config.encryptionKey)))(
-          invoice.lightningInvoiceEncrypted as EncryptedSecret
-        );
-        const card = await renderPyeCashCard({
-          bolt11,
-          amountCents: invoice.amountCents,
-          expiresAt: invoice.expiresAt ?? this.clock().toISOString()
-        });
-        fileSizeBytes = card.png.length;
-        storageKey = await this.deps.media.putPng({
-          workspaceId: invoice.workspaceId,
-          telegramAccountId: chat.telegramAccountId,
-          telegramChatId: chat.telegramChatId,
-          invoiceId: invoice.id,
-          png: card.png
-        });
-        await this.deps.invoices.update(invoice.id, { mediaStorageKey: storageKey }, this.clock());
-      }
-    } catch (error) {
-      await this.deps.invoices
-        .update(invoice.id, { deliveryState: "FAILED", errorCategory: "DELIVERY_FAILED" }, this.clock())
-        .catch(() => undefined);
-      if (error instanceof AppError) throw error;
-      throw new AppError(502, "PYE_CASH_DELIVERY_FAILED", "The QR could not be stored or queued.");
+    if (!storageKey) {
+      const prepared = await this.prepareQrMedia(invoice, chat);
+      storageKey = prepared.storageKey;
+      fileSizeBytes = prepared.fileSizeBytes;
     }
     const caption = paymentCaption(invoice.amountCents, this.deps.config.baseUrl, invoice.providerInvoiceId as string);
     const outcome = await this.commitDelivery({
@@ -267,8 +245,50 @@ export class PyeCashService {
   }
 
   /**
-   * Writes the outbound command and QUEUED invoice together.
-   * A second attempt only recovers a command that was committed before the queue job existed.
+   * Renders and stores the QR before any Telegram command exists.
+   * A failure here does not create a provider invoice or an outbound command.
+   */
+  private async prepareQrMedia(
+    invoice: StoredPyeCashInvoice,
+    chat: { readonly telegramAccountId: string; readonly telegramChatId: string }
+  ): Promise<{ readonly storageKey: string; readonly fileSizeBytes: number }> {
+    const media = this.deps.media;
+    if (!media) throw new AppError(503, "PYE_CASH_DELIVERY_UNAVAILABLE", "QR delivery is not configured.");
+    let card: { readonly png: Buffer };
+    try {
+      const bolt11 = (this.deps.decrypt ?? ((envelope: EncryptedSecret) => decryptSecret(envelope, this.deps.config.encryptionKey)))(
+        invoice.lightningInvoiceEncrypted as EncryptedSecret
+      );
+      card = await renderPyeCashCard({
+        bolt11,
+        amountCents: invoice.amountCents,
+        expiresAt: invoice.expiresAt ?? this.clock().toISOString()
+      });
+    } catch (error) {
+      await this.markDeliveryFailed(invoice.id, "QR_RENDER_FAILED");
+      if (error instanceof AppError) throw error;
+      throw new AppError(502, "PYE_CASH_RENDER_FAILED", "The QR image could not be rendered.");
+    }
+    try {
+      const storageKey = await media.putPng({
+        workspaceId: invoice.workspaceId,
+        telegramAccountId: chat.telegramAccountId,
+        telegramChatId: chat.telegramChatId,
+        invoiceId: invoice.id,
+        png: card.png
+      });
+      await this.deps.invoices.update(invoice.id, { mediaStorageKey: storageKey }, this.clock());
+      return { storageKey, fileSizeBytes: card.png.length };
+    } catch (error) {
+      await this.markDeliveryFailed(invoice.id, "QR_STORAGE_FAILED");
+      if (error instanceof AppError) throw error;
+      throw new AppError(502, "PYE_CASH_STORAGE_FAILED", "The QR image could not be stored.");
+    }
+  }
+
+  /**
+   * Persists one outbound command, then registers its existing id with BullMQ.
+   * Registration failure leaves that command in place and does not report the QR as queued.
    */
   private async commitDelivery(input: Parameters<PyeCashQrDelivery["enqueue"]>[0]) {
     const delivery = this.deps.delivery;
@@ -276,21 +296,40 @@ export class PyeCashService {
     try {
       return await delivery.enqueue(input);
     } catch (error) {
+      const pending = await this.queueRegistrationError(input.invoiceId, error);
+      if (pending) throw pending;
       if (error instanceof AppError) throw error;
       try {
         return await delivery.enqueue(input);
       } catch (retryError) {
+        const pendingRetry = await this.queueRegistrationError(input.invoiceId, retryError);
+        if (pendingRetry) throw pendingRetry;
         if (retryError instanceof AppError) throw retryError;
-        const current = await this.deps.invoices.get(input.invoiceId);
-        if (current?.deliveryState === "QUEUED") {
-          return { outcome: "already_queued" as const, telegramMessageId: current.telegramMessageId };
-        }
-        await this.deps.invoices
-          .update(input.invoiceId, { deliveryState: "FAILED", errorCategory: "DELIVERY_FAILED" }, this.clock())
-          .catch(() => undefined);
+        await this.markDeliveryFailed(input.invoiceId, "DELIVERY_FAILED");
         throw new AppError(502, "PYE_CASH_DELIVERY_FAILED", "The QR could not be stored or queued.");
       }
     }
+  }
+
+  /**
+   * The command row is the recovery key. A later request registers that same command id.
+   * This does not claim the job is queued and does not mark the invoice failed.
+   */
+  private async queueRegistrationError(invoiceId: string, error: unknown): Promise<AppError | null> {
+    const current = await this.deps.invoices.get(invoiceId);
+    if (!current || current.deliveryState !== "QUEUED") return null;
+    if (error instanceof AppError && error.code !== "WORKER_UNAVAILABLE" && error.code !== "PYE_CASH_QUEUE_UNAVAILABLE") return null;
+    return new AppError(
+      503,
+      "PYE_CASH_QUEUE_UNAVAILABLE",
+      "Invoice created. Telegram delivery is pending because the queue is temporarily unavailable."
+    );
+  }
+
+  private async markDeliveryFailed(invoiceId: string, errorCategory: string): Promise<void> {
+    await this.deps.invoices
+      .update(invoiceId, { deliveryState: "FAILED", errorCategory }, this.clock())
+      .catch(() => undefined);
   }
 
   private async replay(

@@ -106,6 +106,7 @@ export type CashAppSendResult =
       readonly status: "failed";
       readonly invoiceId: string | null;
       readonly message: string;
+      readonly code?: string | null;
       readonly invoice?: CashAppInvoiceView;
     };
 
@@ -141,13 +142,29 @@ export function cashAppAttemptFeedback(result: CashAppSendResult): CashAppAttemp
     }
     return {
       tone: "bad",
-      message: result.invoiceId ? "QR was not queued. Send again to reuse this invoice." : result.message,
+      message: cashAppFailureMessage(result.code, result.invoiceId, result.message),
       invoice: result.invoice ?? null,
       temporary: true
     };
   }
   if (result.status === "invalid") return { tone: "bad", message: result.message, invoice: null, temporary: false };
   if (result.status === "disabled") return { tone: "neutral", message: "Live payments are not enabled.", invoice: null, temporary: false };
+  return null;
+}
+
+function cashAppFailureMessage(code: string | null | undefined, invoiceId: string | null, fallback: string): string {
+  if (code === "PYE_CASH_QUEUE_UNAVAILABLE") {
+    return "Invoice created. Telegram delivery is pending because the queue is temporarily unavailable.";
+  }
+  if (code === "PYE_CASH_RENDER_FAILED") return "The QR image could not be rendered.";
+  if (code === "PYE_CASH_STORAGE_FAILED") return "The QR image could not be stored.";
+  if (code === "PYE_CASH_NOT_READY") return "The invoice was not confirmed.";
+  if (invoiceId) return "QR was not queued. Send again to reuse this invoice.";
+  return fallback;
+}
+
+function errorCode(error: unknown): string | null {
+  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") return error.code;
   return null;
 }
 
@@ -195,7 +212,13 @@ export async function sendCashAppQr(input: {
         return { status: "unknown", invoice: created.invoice };
       }
       if (created.invoice.creationState !== "READY") {
-        return { status: "failed", invoiceId, message: "The invoice was not confirmed.", invoice: created.invoice };
+        return {
+          status: "failed",
+          invoiceId,
+          code: "PYE_CASH_NOT_READY",
+          message: "The invoice was not confirmed.",
+          invoice: created.invoice
+        };
       }
     }
     const queued = await input.gateway.queueQr(input.chatId, invoiceId);
@@ -206,6 +229,7 @@ export async function sendCashAppQr(input: {
     return {
       status: "failed",
       invoiceId,
+      code: errorCode(error),
       message: error instanceof Error ? error.message : "The QR could not be sent."
     };
   }

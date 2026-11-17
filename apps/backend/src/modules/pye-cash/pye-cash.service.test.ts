@@ -787,11 +787,26 @@ describe("Pye-Cash QR delivery", () => {
     const { service, media, delivery, provider, invoices } = deliveryHarness();
     media.fail = true;
     const created = await service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "deliver-store" });
-    await expect(service.queueQr(sender, CHAT, created.invoice.id)).rejects.toMatchObject({ code: "PYE_CASH_DELIVERY_FAILED" });
+    await expect(service.queueQr(sender, CHAT, created.invoice.id)).rejects.toMatchObject({ code: "PYE_CASH_STORAGE_FAILED" });
     expect(delivery.calls).toHaveLength(0);
     expect(provider.calls).toBe(1);
     expect(invoices.rows[0]?.deliveryState).toBe("FAILED");
+    expect(invoices.rows[0]?.errorCategory).toBe("QR_STORAGE_FAILED");
     expect(invoices.rows[0]?.creationState).toBe("READY");
+  });
+
+  it("reports a render failure without queueing Telegram or creating another invoice", async () => {
+    const { service, delivery, provider, invoices } = deliveryHarness();
+    const created = await service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "deliver-render" });
+    const row = invoices.rows[0];
+    if (!row) throw new Error("missing");
+    row.lightningInvoiceEncrypted = { ciphertext: "bad", iv: "bad", tag: "bad" };
+    await expect(service.queueQr(sender, CHAT, created.invoice.id)).rejects.toMatchObject({ code: "PYE_CASH_RENDER_FAILED" });
+    expect(delivery.calls).toHaveLength(0);
+    expect(delivery.commands.size).toBe(0);
+    expect(invoices.rows[0]?.errorCategory).toBe("QR_RENDER_FAILED");
+    expect(invoices.rows[0]?.creationState).toBe("READY");
+    expect(provider.calls).toBe(1);
   });
 
   it("resends a failed invoice without a new provider request or a new image", async () => {
@@ -857,9 +872,11 @@ describe("Pye-Cash QR delivery", () => {
   it("keeps one command when the job write crashes and reconciles a sent command", async () => {
     const { service, invoices, provider, delivery } = deliveryHarness();
     const created = await service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "deliver-job-crash" });
-    delivery.failAfterWrite = 2;
-    const pending = await service.queueQr(sender, CHAT, created.invoice.id);
-    expect(pending.invoice.deliveryState).toBe("QUEUED");
+    delivery.failAfterWrite = 1;
+    await expect(service.queueQr(sender, CHAT, created.invoice.id)).rejects.toMatchObject({ code: "PYE_CASH_QUEUE_UNAVAILABLE" });
+    expect(invoices.rows[0]?.deliveryState).toBe("QUEUED");
+    expect(invoices.rows[0]?.errorCategory).toBeNull();
+    expect(invoices.rows[0]?.creationState).toBe("READY");
     expect(delivery.commands.size).toBe(1);
     expect(delivery.jobs).toHaveLength(0);
     const resumed = await service.queueQr(sender, CHAT, created.invoice.id);

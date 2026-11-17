@@ -184,7 +184,11 @@ describe("Cash App QR CRM controls", () => {
       async queueQr(_chatId, invoiceId) {
         queueAttempts += 1;
         queued.push(invoiceId);
-        if (queueAttempts === 1) throw new Error("queue down");
+        if (queueAttempts === 1) {
+          const error = new Error("storage down");
+          Object.assign(error, { code: "PYE_CASH_STORAGE_FAILED" });
+          throw error;
+        }
         return { invoice: invoice({ id: invoiceId, deliveryState: "QUEUED" }) };
       }
     };
@@ -197,7 +201,7 @@ describe("Cash App QR CRM controls", () => {
       gateway,
       stillOnChat: () => true
     });
-    expect(failed).toMatchObject({ status: "failed", invoiceId: "keep-me" });
+    expect(failed).toMatchObject({ status: "failed", invoiceId: "keep-me", code: "PYE_CASH_STORAGE_FAILED" });
     const recovered = await sendCashAppQr({
       chatId: "chat-a",
       amountRaw: "25.00",
@@ -260,6 +264,25 @@ describe("Cash App QR CRM controls", () => {
       temporary: true,
       message: "Invoice outcome is unknown. It was not retried."
     });
+    expect(cashAppAttemptFeedback({ status: "queued", invoice: invoice({ deliveryState: "QUEUED" }) })?.message).not.toBe("QR sent.");
+    expect(cashAppAttemptFeedback({
+      status: "failed",
+      invoiceId: "invoice-1",
+      code: "PYE_CASH_QUEUE_UNAVAILABLE",
+      message: "worker down"
+    })?.message).toBe("Invoice created. Telegram delivery is pending because the queue is temporarily unavailable.");
+    expect(cashAppAttemptFeedback({
+      status: "failed",
+      invoiceId: "invoice-1",
+      code: "PYE_CASH_RENDER_FAILED",
+      message: "render"
+    })?.message).toBe("The QR image could not be rendered.");
+    expect(cashAppAttemptFeedback({
+      status: "failed",
+      invoiceId: "invoice-1",
+      code: "PYE_CASH_STORAGE_FAILED",
+      message: "storage"
+    })?.message).toBe("The QR image could not be stored.");
     expect(cashAppAttemptFeedback({
       status: "failed",
       invoiceId: "invoice-1",
