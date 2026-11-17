@@ -494,6 +494,45 @@ export const api = {
       body: JSON.stringify({ text, idempotencyKey })
     }),
   crmPanel: (chatId: string) => apiRequest<CrmConversationPanelDto>(`/api/crm/chats/${chatId}/panel`),
+  pyeCashCapability: (chatId: string) =>
+    apiRequest<{
+      enabled: boolean;
+      testMode: boolean;
+      maxAmountCents: number;
+      userAllowed: boolean;
+      chatAllowed: boolean;
+      canSend: boolean;
+    }>(`/api/pye-cash/chats/${chatId}/capability`),
+  pyeCashInvoices: (chatId: string) =>
+    apiRequest<{ invoices: Array<{
+      id: string;
+      amountCents: number;
+      creationState: "CREATING" | "READY" | "UNKNOWN" | "FAILED";
+      deliveryState: "NOT_SENT" | "QUEUED" | "SENT" | "FAILED";
+      paymentState: "UNCONFIRMED" | "PAID" | "EXPIRED" | "UNKNOWN";
+      expiresAt: string | null;
+      errorCategory: string | null;
+    }> }>(`/api/pye-cash/chats/${chatId}/invoices`),
+  pyeCashCreateInvoice: (chatId: string, body: { amountCents: number; idempotencyKey: string }) =>
+    apiRequest<{ invoice: {
+      id: string;
+      amountCents: number;
+      creationState: "CREATING" | "READY" | "UNKNOWN" | "FAILED";
+      deliveryState: "NOT_SENT" | "QUEUED" | "SENT" | "FAILED";
+      paymentState: "UNCONFIRMED" | "PAID" | "EXPIRED" | "UNKNOWN";
+      expiresAt: string | null;
+      errorCategory: string | null;
+    } }>(`/api/pye-cash/chats/${chatId}/invoices`, { method: "POST", body: JSON.stringify(body) }),
+  pyeCashQueueQr: (chatId: string, invoiceId: string) =>
+    apiRequest<{ invoice: {
+      id: string;
+      amountCents: number;
+      creationState: "CREATING" | "READY" | "UNKNOWN" | "FAILED";
+      deliveryState: "NOT_SENT" | "QUEUED" | "SENT" | "FAILED";
+      paymentState: "UNCONFIRMED" | "PAID" | "EXPIRED" | "UNKNOWN";
+      expiresAt: string | null;
+      errorCategory: string | null;
+    } }>(`/api/pye-cash/chats/${chatId}/invoices/${invoiceId}/qr`, { method: "POST" }),
   crmClaim: (chatId: string) => apiRequest<CrmConversationPanelDto>(`/api/crm/chats/${chatId}/claim`, { method: "POST" }),
   crmRelease: (chatId: string) => apiRequest<CrmConversationPanelDto>(`/api/crm/chats/${chatId}/release`, { method: "POST" }),
   crmAssign: (chatId: string, assigneeUserId: string | null) =>

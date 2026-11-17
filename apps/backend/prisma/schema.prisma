@@ -447,6 +447,7 @@ model Workspace {
   engagementDailyResults EngagementDailyResult[]
   engagementDailyPrizes EngagementDailyPrize[]
   engagementDailyDraws EngagementDailyDraw[]
+  pyeCashInvoices PyeCashInvoice[]
 
   @@map("workspaces")
 }
@@ -475,6 +476,7 @@ model User {
   sentTelegramMessages    TelegramMessage[]         @relation("InternalTelegramMessages")
   deletedTelegramMessages TelegramMessage[]         @relation("DeletedTelegramMessages")
   telegramCommands        TelegramOutboundCommand[] @relation("RequestedTelegramCommands")
+  pyeCashInvoicesRequested PyeCashInvoice[]          @relation("PyeCashInvoiceRequester")
   ownedWorkspace           Workspace?                @relation("PrimaryWorkspaceCoadmin")
   platformAdmin           PlatformAdmin?
   trustedDevices           UserTrustedDevice[]
@@ -728,6 +730,7 @@ model TelegramChat {
   assignedByUser     User?                     @relation("ChatAssignedBy", fields: [assignedByUserId], references: [id], onDelete: SetNull)
   messages           TelegramMessage[]
   outboundCommands   TelegramOutboundCommand[]
+  pyeCashInvoices    PyeCashInvoice[]
   tags               TelegramChatTag[]
   notes              CrmInternalNote[]
   activities         CrmActivityEvent[]
@@ -2157,4 +2160,56 @@ model EngagementDailyDraw {
   @@unique([ownerCoadminUserId, chicagoDate])
   @@index([ownerCoadminUserId, drawnAt])
   @@map("engagement_daily_draws")
+}
+
+enum PyeCashCreationState {
+  CREATING
+  READY
+  UNKNOWN
+  FAILED
+}
+
+enum PyeCashDeliveryState {
+  NOT_SENT
+  QUEUED
+  SENT
+  FAILED
+}
+
+enum PyeCashPaymentState {
+  UNCONFIRMED
+  PAID
+  EXPIRED
+  UNKNOWN
+}
+
+/// A Pye-Cash payment request. Creation, Telegram delivery, and payment are independent.
+/// This row is not a deposit and must not change leaderboard or balance totals.
+model PyeCashInvoice {
+  id                       String                @id @default(uuid()) @db.Uuid
+  workspaceId              String                @map("workspace_id") @db.Uuid
+  telegramChatDbId         String                @map("telegram_chat_db_id") @db.Uuid
+  requestedByUserId        String                @map("requested_by_user_id") @db.Uuid
+  merchant                 String                @db.VarChar(32)
+  amountCents              Int                   @map("amount_cents")
+  idempotencyKey           String                @map("idempotency_key") @db.VarChar(80)
+  providerInvoiceId        String?               @unique @map("provider_invoice_id") @db.VarChar(128)
+  lightningInvoiceEncrypted Json?                @map("lightning_invoice_encrypted")
+  creationState            PyeCashCreationState  @default(CREATING) @map("creation_state")
+  deliveryState            PyeCashDeliveryState  @default(NOT_SENT) @map("delivery_state")
+  paymentState             PyeCashPaymentState   @default(UNCONFIRMED) @map("payment_state")
+  telegramMessageId        String?               @map("telegram_message_id") @db.VarChar(80)
+  mediaStorageKey          String?               @map("media_storage_key") @db.VarChar(512)
+  expiresAt                DateTime?             @map("expires_at")
+  errorCategory            String?               @map("error_category") @db.VarChar(80)
+  statusVerifiedAt         DateTime?             @map("status_verified_at")
+  createdAt                DateTime              @default(now()) @map("created_at")
+  updatedAt                DateTime              @updatedAt @map("updated_at")
+  workspace                Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  telegramChat             TelegramChat          @relation(fields: [telegramChatDbId], references: [id], onDelete: Restrict)
+  requestedBy              User                  @relation("PyeCashInvoiceRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, telegramChatDbId, createdAt], map: "pye_cash_invoices_chat_created_idx")
+  @@map("pye_cash_invoices")
 }

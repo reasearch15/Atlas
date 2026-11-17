@@ -15,6 +15,7 @@ import {
   contentTypeToMediaType,
   formatTelegramMediaPreview,
   isRemoteTelegramMessageId,
+  planPyeCashDelivery,
   isUsableHumanDisplayTitle,
   resolveMarkReadMaxTelegramMessageId,
   shouldIgnoreTelegramDialog,
@@ -492,6 +493,21 @@ export class TelegramService {
     });
     if (!command) {
       throw telegramNotFound("Outbound command for this failed message was not found.");
+    }
+    const commandPayload = (command.payloadJson ?? {}) as { pyeCashInvoiceId?: string };
+    if (commandPayload.pyeCashInvoiceId) {
+      const invoice = await this.app.prisma.pyeCashInvoice.findFirst({
+        where: { id: commandPayload.pyeCashInvoiceId, workspaceId: user.workspaceId },
+        select: { errorCategory: true }
+      });
+      const unexplainedPermanent = command.status === "FAILED_PERMANENT" && invoice?.errorCategory !== "TELEGRAM_FAILED";
+      if (invoice?.errorCategory === "TELEGRAM_AMBIGUOUS" || unexplainedPermanent) {
+        throw new AppError(
+          409,
+          "PYE_CASH_DELIVERY_AMBIGUOUS",
+          "Telegram may already have this QR. It will not be sent again."
+        );
+      }
     }
 
     // Idempotency: if another retry already re-queued this command, return current message state.
@@ -1077,6 +1093,185 @@ export class TelegramService {
     }
 
     return { statusCode: 202, message: messageDto };
+  }
+
+  /**
+   * Queues a PNG that the server already stored. Used by Pye-Cash so the browser never uploads the QR.
+   * The BullMQ job id is the command id, so a second enqueue does not create a second Telegram send.
+   */
+  public async enqueueStoredPhoto(
+    user: RequestUser,
+    chatId: string,
+    input: {
+      readonly idempotencyKey: string;
+      readonly storageKey: string;
+      readonly caption: string;
+      readonly fileSizeBytes: number;
+      readonly pyeCashInvoiceId: string;
+      readonly resend: boolean;
+    }
+  ): Promise<{
+    readonly outcome: "queued" | "already_queued" | "already_sent" | "reconciled_failed";
+    readonly telegramMessageId: string | null;
+  }> {
+    this.assertWorkspaceMember(user);
+    const chat = await this.repository.getChatForUser(user, chatId);
+    const account = await this.repository.getAccountForUser(user, chat.telegramAccountId);
+    if (account.status === "DELETING") throw telegramAccountDeleted();
+    if (account.status === "DISCONNECTED") throw telegramAccountDisconnected();
+    if (account.authorizationState !== "AUTHORIZED") throw telegramAccountNotAuthorized();
+    this.app.storage.assertWorkspaceKey(account.workspaceId, input.storageKey);
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const invoice = await this.app.prisma.pyeCashInvoice.findFirst({
+        where: { id: input.pyeCashInvoiceId, workspaceId: account.workspaceId },
+        select: { id: true, deliveryState: true, errorCategory: true }
+      });
+      if (!invoice) throw telegramNotFound("Invoice was not found for this chat.");
+      const existingCommand = await this.app.prisma.telegramOutboundCommand.findUnique({
+        where: { idempotencyKey: input.idempotencyKey }
+      });
+      const commandPayload = (existingCommand?.payloadJson ?? {}) as { pyeCashInvoiceId?: string };
+      const ambiguous =
+        invoice.errorCategory === "TELEGRAM_AMBIGUOUS" ||
+        (existingCommand?.status === "FAILED_PERMANENT" && commandPayload.pyeCashInvoiceId === input.pyeCashInvoiceId && invoice.errorCategory !== "TELEGRAM_FAILED");
+      const plan = planPyeCashDelivery({
+        deliveryState: invoice.deliveryState,
+        errorCategory: invoice.errorCategory,
+        command: {
+          status: existingCommand?.status ?? "MISSING",
+          ambiguous
+        },
+        explicitResend: input.resend
+      });
+      if (plan.action === "block_ambiguous") {
+        await this.app.prisma.pyeCashInvoice.updateMany({
+          where: { id: invoice.id, deliveryState: { not: "SENT" }, NOT: { errorCategory: "TELEGRAM_AMBIGUOUS" } },
+          data: { deliveryState: "FAILED", errorCategory: "TELEGRAM_AMBIGUOUS" }
+        });
+        throw new AppError(409, "PYE_CASH_DELIVERY_AMBIGUOUS", "Telegram may already have this QR. It will not be sent again.");
+      }
+      if (plan.action === "reconcile_sent") {
+        await this.app.prisma.pyeCashInvoice.updateMany({
+          where: { id: invoice.id, deliveryState: { in: ["NOT_SENT", "QUEUED", "FAILED"] }, NOT: { errorCategory: "TELEGRAM_AMBIGUOUS" } },
+          data: { deliveryState: "SENT", errorCategory: null, telegramMessageId: existingCommand?.telegramMessageId ?? null }
+        });
+        return { outcome: "already_sent", telegramMessageId: existingCommand?.telegramMessageId ?? null };
+      }
+      if (plan.action === "reconcile_failed") {
+        await this.app.prisma.pyeCashInvoice.updateMany({
+          where: { id: invoice.id, deliveryState: { in: ["NOT_SENT", "QUEUED"] } },
+          data: { deliveryState: "FAILED", errorCategory: "TELEGRAM_FAILED" }
+        });
+        return { outcome: "reconciled_failed", telegramMessageId: null };
+      }
+      if (plan.action === "retry_same_command") {
+        await this.retryFailedOutboundMessage(user, existingCommand?.telegramMessageId ?? "");
+        await this.app.prisma.pyeCashInvoice.updateMany({
+          where: { id: invoice.id, errorCategory: "TELEGRAM_FAILED" },
+          data: { deliveryState: "QUEUED", errorCategory: null }
+        });
+        return { outcome: "queued", telegramMessageId: null };
+      }
+      if (plan.action === "ensure_job") {
+        if (existingCommand?.status === "QUEUED") await this.ensureOutboundJob(existingCommand.id);
+        await this.app.prisma.pyeCashInvoice.updateMany({
+          where: { id: invoice.id, deliveryState: { in: ["NOT_SENT", "QUEUED", "FAILED"] }, NOT: { errorCategory: "TELEGRAM_AMBIGUOUS" } },
+          data: { deliveryState: "QUEUED", errorCategory: null }
+        });
+        return { outcome: "already_queued", telegramMessageId: null };
+      }
+      try {
+        const commandId = await this.app.prisma.$transaction(async (tx) => {
+          const marked = await tx.pyeCashInvoice.updateMany({
+            where: {
+              id: invoice.id,
+              deliveryState: { in: ["NOT_SENT", "FAILED", "QUEUED"] },
+              NOT: { errorCategory: "TELEGRAM_AMBIGUOUS" }
+            },
+            data: { deliveryState: "QUEUED", errorCategory: null }
+          });
+          if (marked.count !== 1) throw new DeliveryCommitConflict();
+          const pendingTelegramMessageId = `pending:${input.idempotencyKey}`.slice(0, 80);
+          const pendingMessage = await tx.telegramMessage.upsert({
+            where: {
+              telegramAccountId_telegramChatId_telegramMessageId: {
+                telegramAccountId: account.id,
+                telegramChatId: chat.telegramChatId,
+                telegramMessageId: pendingTelegramMessageId
+              }
+            },
+            update: {},
+            create: {
+              workspaceId: account.workspaceId,
+              telegramAccountId: account.id,
+              telegramChatDbId: chat.id,
+              telegramChatId: chat.telegramChatId,
+              telegramMessageId: pendingTelegramMessageId,
+              senderTelegramUserId: account.telegramUserId,
+              direction: "OUTBOUND",
+              contentType: "PHOTO",
+              textContent: formatTelegramMediaPreview("PHOTO", { caption: input.caption, text: input.caption }),
+              caption: input.caption,
+              mimeType: "image/png",
+              fileName: "pye-cash-qr.png",
+              fileSizeBytes: input.fileSizeBytes || null,
+              mediaStorageKey: input.storageKey,
+              mediaDownloadState: "STORED",
+              mediaUploadState: "STORED",
+              telegramCreatedAt: new Date(),
+              internalSenderUserId: user.id,
+              internalSenderSessionId: user.sessionId,
+              internalSenderRole: user.role === "PLATFORM_ADMIN" ? "COADMIN" : user.role,
+              internalSenderName: user.name,
+              sendStatus: "QUEUED"
+            }
+          });
+          const command = await tx.telegramOutboundCommand.create({
+            data: {
+              workspaceId: account.workspaceId,
+              telegramAccountId: account.id,
+              telegramChatDbId: chat.id,
+              telegramChatId: chat.telegramChatId,
+              telegramMessageId: pendingMessage.id,
+              requestedByUserId: user.id,
+              requestedBySessionId: user.sessionId,
+              operation: "SEND_MEDIA_MESSAGE",
+              payloadJson: {
+                contentType: "PHOTO",
+                caption: input.caption,
+                idempotencyKey: input.idempotencyKey,
+                storageKey: input.storageKey,
+                mimeType: "image/png",
+                fileName: "pye-cash-qr.png",
+                fileSizeBytes: input.fileSizeBytes,
+                pendingMessageId: pendingMessage.id,
+                pyeCashInvoiceId: input.pyeCashInvoiceId
+              },
+              idempotencyKey: input.idempotencyKey
+            }
+          });
+          return command.id;
+        });
+        await this.ensureOutboundJob(commandId);
+        return { outcome: "queued", telegramMessageId: null };
+      } catch (error) {
+        const duplicate = error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+        if ((duplicate || error instanceof DeliveryCommitConflict) && attempt === 0) continue;
+        throw error;
+      }
+    }
+    throw new AppError(409, "PYE_CASH_DELIVERY_CONFLICT", "QR delivery is already being queued.");
+  }
+
+  private async ensureOutboundJob(commandId: string): Promise<void> {
+    try {
+      await this.app.queues.telegramOutbound.add("telegram-outbound", { commandId }, { jobId: commandId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.toLowerCase().includes("job") && message.toLowerCase().includes("exist")) return;
+      throw telegramWorkerUnavailable();
+    }
   }
 
   /**
@@ -1832,3 +2027,5 @@ function resolveSenderDisplayName(
   }
   return null;
 }
+
+class DeliveryCommitConflict extends Error {}

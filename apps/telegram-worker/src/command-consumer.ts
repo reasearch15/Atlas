@@ -2,7 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { Queue, Worker } from "bullmq";
 import Redis from "ioredis";
-import { classifyTelegramFailure, formatTelegramUserFallbackTitle, isRemoteTelegramMessageId, resolveSyncedUnreadCount, sanitizeTelegramError, shouldIgnoreTelegramDialog, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
+import { classifyTelegramFailure, formatTelegramUserFallbackTitle, isRemoteTelegramMessageId, pyeCashDeliveryUpdate, resolveSyncedUnreadCount, sanitizeTelegramError, shouldIgnoreTelegramDialog, type TelegramFailureClassification, type TelegramMessageDto } from "@atlas/shared";
 import { decryptSecret, type EncryptedSecret } from "@atlas/shared/session-encryption";
 import type { WorkerEnv } from "./env";
 import { TelegramClientAdapter, type NormalizedTextMessage, type TelegramApiCredentials, isUsableDisplayTitle, TelegramAuthNetworkTimeoutError, SafeTelegramDeleteError } from "./telegram-client";
@@ -981,8 +981,11 @@ async function processSendMediaJob(
     contactPhone?: string;
     contactFirstName?: string;
     contactLastName?: string;
+    pyeCashInvoiceId?: string;
   };
   const pendingMessageId = payload.pendingMessageId ?? command.telegramMessageId ?? null;
+  let telegramAccepted = false;
+  let acceptedMessageId: string | null = null;
 
   try {
     if (!command.telegramChatDbId || !command.telegramChatId) {
@@ -1086,6 +1089,8 @@ async function processSendMediaJob(
           ...(payload.replyToTelegramMessageId ? { replyToTelegramMessageId: payload.replyToTelegramMessageId } : {})
         });
       }
+      telegramAccepted = true;
+      acceptedMessageId = sent.telegramMessageId;
     } catch (error) {
       throwAsSafePeerError(error);
     }
@@ -1134,6 +1139,12 @@ async function processSendMediaJob(
       }
     });
     await clearAccountOperationalErrors(prisma, command.telegramAccountId);
+    try {
+      await syncPyeCashDelivery(prisma, payload.pyeCashInvoiceId, "sent", refreshed.telegramMessageId);
+    } catch {
+      // The Telegram message and command are already SENT. Leave the invoice QUEUED rather than
+      // marking the command failed, which would invite a second photo.
+    }
     return { ok: true, accountId: command.telegramAccountId, occurredAt: new Date().toISOString(), authorizationState: "CONNECTED" };
   } catch (error) {
     const failure =
@@ -1172,16 +1183,47 @@ async function processSendMediaJob(
       where: { id: command.id },
       data: {
         // Peer repair errors stay FAILED_RETRYABLE even after attempt budget — needs explicit Retry after repair.
-        status:
-          isPeerRepairRetryableError(failure.safeErrorCode) || (failure.retryable && command.attempts < 4)
+        status: telegramAccepted
+          ? "FAILED_PERMANENT"
+          : isPeerRepairRetryableError(failure.safeErrorCode) || (failure.retryable && command.attempts < 4)
             ? "FAILED_RETRYABLE"
             : "FAILED_PERMANENT",
         lastError: formatSafeCommandError(failure.safeErrorCode, failure.safeUserMessage),
         processedAt: new Date()
       }
     });
+    try {
+      await syncPyeCashDelivery(
+        prisma,
+        payload.pyeCashInvoiceId,
+        telegramAccepted ? "ambiguous" : "failed",
+        telegramAccepted ? acceptedMessageId : null
+      );
+    } catch {
+      // Keep the command failure. A missed invoice update must not hide the Telegram error.
+    }
     throw new SafeTelegramWorkerError(failure.safeErrorCode, failure.safeUserMessage);
   }
+}
+
+async function syncPyeCashDelivery(
+  prisma: PrismaClient,
+  invoiceId: string | undefined,
+  outcome: "sent" | "failed" | "ambiguous",
+  telegramMessageId: string | null
+): Promise<void> {
+  if (!invoiceId) return;
+  const invoice = await prisma.pyeCashInvoice.findUnique({
+    where: { id: invoiceId },
+    select: { deliveryState: true }
+  });
+  if (!invoice) return;
+  const patch = pyeCashDeliveryUpdate(invoice.deliveryState, outcome, telegramMessageId);
+  if (!patch) return;
+  await prisma.pyeCashInvoice.updateMany({
+    where: { id: invoiceId, deliveryState: invoice.deliveryState },
+    data: { ...patch, updatedAt: new Date() }
+  });
 }
 
 async function processMediaBackfillJob(

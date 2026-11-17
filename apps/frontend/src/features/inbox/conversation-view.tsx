@@ -524,7 +524,7 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
       </div>
 
       {isDesktop && panelOpen ? (
-        <CrmPanel state={crm} identity={identity} avatarColor={color} onClose={() => setPanelOpen(false)} />
+        <CrmPanel state={crm} identity={identity} avatarColor={color} chatId={chat.id} onClose={() => setPanelOpen(false)} />
       ) : null}
 
       {!isDesktop ? (
@@ -548,7 +548,7 @@ export function ConversationView({ conversation, onBack }: ConversationViewProps
               onRemoveTag={(tagId) => void crm.removeTag(tagId)}
             />
           </div>
-          <CrmPanel state={crm} identity={identity} avatarColor={color} onClose={() => setPanelOpen(false)} embedded />
+          <CrmPanel state={crm} identity={identity} avatarColor={color} chatId={chat.id} onClose={() => setPanelOpen(false)} embedded />
         </BottomSheet>
       ) : null}
 

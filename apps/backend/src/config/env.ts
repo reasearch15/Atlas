@@ -5,6 +5,13 @@ import { z } from "zod";
 
 const optionalEmail = z.preprocess((value) => (value === "" ? undefined : value), z.string().email().optional());
 
+function splitIdList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -64,7 +71,32 @@ const envSchema = z
     LEADERBOARD_BOT_POLLING: z
       .enum(["true", "false"])
       .default("false")
-      .transform((value) => value === "true")
+      .transform((value) => value === "true"),
+    /** Off unless explicitly enabled. Missing values must not block Atlas startup. */
+    PYE_CASH_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    /** Restricted real invoices. Defaults on so enabling the feature does not open it to every chat. */
+    PYE_CASH_TEST_MODE: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((value) => value === "true"),
+    PYE_CASH_ALLOWED_USER_IDS: z
+      .string()
+      .default("")
+      .transform((value) => splitIdList(value))
+      .pipe(z.array(z.string().uuid())),
+    PYE_CASH_ALLOWED_CHAT_IDS: z
+      .string()
+      .default("")
+      .transform((value) => splitIdList(value))
+      .pipe(z.array(z.string().uuid())),
+    PYE_CASH_MERCHANT: z.string().trim().min(1).max(32).default("sg"),
+    PYE_CASH_BASE_URL: z.string().url().default("https://www.pye-cash.app"),
+    PYE_CASH_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(10_000),
+    /** Atlas-side ceiling. This is not a verified provider limit. */
+    PYE_CASH_MAX_AMOUNT_CENTS: z.coerce.number().int().positive().max(100_000_000).default(100_000)
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV !== "production") {

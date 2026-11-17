@@ -30,6 +30,7 @@ import { leaderboardTelegramPlugin } from "../modules/leaderboard/telegram/leade
 import { staffAuthRoutes } from "../modules/staff-auth/staff-auth.routes";
 import { staffManagementRoutes } from "../modules/staff/staff-management.routes";
 import { internalMessagesRoutes } from "../modules/internal-messages/internal-messages.routes";
+import { pyeCashRoutes } from "../modules/pye-cash/pye-cash.routes";
 import { telegramRoutes } from "../modules/telegram/telegram.routes";
 import { userRoutes } from "../modules/users/user.routes";
 import { websocketRoutes } from "../modules/websocket/websocket.routes";
@@ -103,6 +104,7 @@ export async function buildApp(env: Env) {
     await app.register(dashboardRoutes, { prefix: "/api/dashboard" });
     await app.register(developerAppRoutes, { prefix: "/api/developer-apps" });
     await app.register(telegramRoutes, { prefix: "/api/telegram" });
+    await app.register(pyeCashRoutes, { prefix: "/api/pye-cash" });
     await app.register(crmRoutes, { prefix: "/api/crm" });
     await app.register(freeplayRoutes, { prefix: "/api/freeplay" });
     await app.register(leaderboardRoutes, { prefix: "/api/leaderboard" });

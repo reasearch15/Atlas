@@ -19,3 +19,4 @@ export * from "./telegram-account-actions";
 export * from "./telegram-message-deletion";
 export * from "./telegram-mark-read";
 export * from "./notifications";
+export * from "./pye-cash-delivery";

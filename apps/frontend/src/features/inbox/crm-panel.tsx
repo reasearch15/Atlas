@@ -12,6 +12,7 @@ import { PanelRightClose } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { CrmGiveawaySection } from "@/features/leaderboard/crm-giveaway-section";
+import { CashAppQrSection } from "./cash-app-qr-section";
 import { api } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth-store";
 import type { ContactIdentity } from "./contact-identity";
@@ -127,16 +128,17 @@ interface CrmPanelProps {
   readonly identity: ContactIdentity;
   readonly avatarColor: string;
   readonly onClose: () => void;
+  readonly chatId: string;
   /** When true, render without the fixed desktop aside chrome (mobile sheet). */
   readonly embedded?: boolean;
 }
 
 /**
- * Collapsible right-hand CRM panel: leaderboard ops (top), contact, assignee,
+ * Collapsible right-hand CRM panel: Cash App QR, leaderboard ops, contact, assignee,
  * status, tags, internal notes, and activity history.
  * Payment / AppBeg / Vendor link status cards live inside the leaderboard section.
  */
-export function CrmPanel({ state, identity, avatarColor, onClose, embedded = false }: CrmPanelProps) {
+export function CrmPanel({ state, identity, avatarColor, onClose, chatId, embedded = false }: CrmPanelProps) {
   const { panel, loading, error, busy, createNote } = state;
   const [noteBody, setNoteBody] = useState("");
   const user = useAuthStore((auth) => auth.user);
@@ -192,6 +194,8 @@ export function CrmPanel({ state, identity, avatarColor, onClose, embedded = fal
 
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-3">
         {error ? <p className="mb-3 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">{error}</p> : null}
+
+        <CashAppQrSection chatId={chatId} embedded={embedded} />
 
         {loading && !panel ? (
           <p className="text-sm text-muted-foreground">Loading CRM data…</p>
