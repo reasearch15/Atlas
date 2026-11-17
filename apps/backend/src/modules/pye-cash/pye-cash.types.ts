@@ -179,6 +179,8 @@ export interface PyeCashLogEvent {
   readonly reason: string | null;
   readonly httpStatus: number | null;
   readonly contentType: string | null;
+  readonly expirationType: string | null;
+  readonly expirationFormat: string | null;
 }
 
 export function toPublicInvoice(record: StoredPyeCashInvoice): PublicPyeCashInvoice {

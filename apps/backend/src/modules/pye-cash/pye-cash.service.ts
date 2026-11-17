@@ -112,9 +112,9 @@ export class PyeCashService {
       return { statusCode: 202, invoice: this.publish(unknown) };
     }
 
-    const validated = validateProviderInvoice(attempt.body, input.amountCents);
+    const validated = validateProviderInvoice(attempt.body, input.amountCents, this.clock().getTime());
     if (!validated.ok) {
-      this.logProvider(reserved.record.id, validated.reason, attempt.httpStatus ?? null, attempt.contentType ?? null);
+      this.logProvider(reserved.record.id, validated.reason, attempt.httpStatus ?? null, attempt.contentType ?? null, validated.expiration);
       const unknown = await this.settle(reserved.record.id, {
         creationState: "UNKNOWN",
         errorCategory: validated.reason,
@@ -388,12 +388,20 @@ export class PyeCashService {
       creationState: record.creationState,
       reason: record.errorCategory,
       httpStatus: null,
-      contentType: null
+      contentType: null,
+      expirationType: null,
+      expirationFormat: null
     });
     return toPublicInvoice(record);
   }
 
-  private logProvider(correlationId: string, reason: string, httpStatus: number | null, contentType: string | null): void {
+  private logProvider(
+    correlationId: string,
+    reason: string,
+    httpStatus: number | null,
+    contentType: string | null,
+    expiration?: { readonly type: string; readonly format: string }
+  ): void {
     this.deps.log?.({
       event: "pye_cash.provider_response",
       correlationId,
@@ -401,7 +409,9 @@ export class PyeCashService {
       creationState: null,
       reason,
       httpStatus,
-      contentType
+      contentType,
+      expirationType: expiration?.type ?? null,
+      expirationFormat: expiration?.format ?? null
     });
   }
 

@@ -444,6 +444,51 @@ describe("Pye-Cash invoice service", () => {
     expect(JSON.stringify(unknown.logs)).not.toContain("text body");
   });
 
+  it("accepts a Unix-second expiration and keeps an out-of-range expiration unknown", async () => {
+    const expiresSeconds = Date.parse("2026-11-18T12:00:00.000Z") / 1000;
+    const provider = new FakeProvider(async () => ({
+      kind: "created" as const,
+      httpStatus: 201,
+      contentType: "application/json",
+      body: {
+        id: "provider01",
+        lightning_invoice: BOLT,
+        expires_at: expiresSeconds,
+        status: "pending",
+        amount: 5,
+        currency: "USD",
+        target_amount: null
+      }
+    }));
+    const created = await harness({ provider }).service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "unix-sec-5" });
+    expect(created.statusCode).toBe(201);
+    expect(created.invoice.creationState).toBe("READY");
+    expect(created.invoice.expiresAt).toBe("2026-11-18T12:00:00.000Z");
+    expect(created.invoice.deliveryState).toBe("NOT_SENT");
+    expect(provider.calls).toBe(1);
+
+    const stale = 1_000_000_000;
+    const staleProvider = new FakeProvider(async () => ({
+      kind: "created" as const,
+      httpStatus: 201,
+      contentType: "application/json",
+      body: { id: "provider01", lightning_invoice: BOLT, expires_at: stale, status: "pending", amount: 5, currency: "USD" }
+    }));
+    const rejected = harness({ provider: staleProvider });
+    const result = await rejected.service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "stale-expiry" });
+    expect(result.invoice.creationState).toBe("UNKNOWN");
+    expect(result.invoice.deliveryState).toBe("NOT_SENT");
+    expect(result.invoice.errorCategory).toBe("INVALID_EXPIRATION");
+    const diagnostic = JSON.stringify(rejected.logs);
+    expect(diagnostic).toContain("\"expirationType\":\"number\"");
+    expect(diagnostic).toContain("\"expirationFormat\":\"unix_seconds\"");
+    expect(diagnostic).not.toContain(String(stale));
+    expect(diagnostic).not.toContain(BOLT);
+    expect(diagnostic).not.toContain("provider01");
+    await rejected.service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "stale-expiry" });
+    expect(staleProvider.calls).toBe(1);
+  });
+
   it("marks a stale CREATING row UNKNOWN without a new provider POST", async () => {
     const { service, invoices, provider } = harness();
     const old = new Date("2026-11-17T11:00:00.000Z").toISOString();
