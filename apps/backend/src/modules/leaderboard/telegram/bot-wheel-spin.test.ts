@@ -517,7 +517,7 @@ describe("Telegram wheel spin — callback", () => {
     expect(dm).toContain("🎡 WHEEL RESULT");
     expect(dm).toContain("+25 POINTS!");
     expect(dm).toContain("#9 → #6");
-    expect(dm).toContain("Total points: 309");
+    expect(dm).not.toContain("Total points");
     expect(dm).not.toContain(contactA);
     expect(dm).not.toContain(ownerA);
     expect(outbox.enqueueRefresh).toHaveBeenCalledWith(workspaceId, ownerA, competitionA);

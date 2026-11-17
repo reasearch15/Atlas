@@ -581,8 +581,6 @@ function renderPodium(
       stroke: string;
       strokeWidth: number;
       nameSize: number;
-      ptsSize: number;
-      ptsFill: string;
       elevate: boolean;
       shadow: string;
     }
@@ -593,7 +591,6 @@ function renderPodium(
         <text x="${cx}" y="${opts.y + opts.height / 2 + 6}" text-anchor="middle" fill="#4b5563" font-family="${fontFamily}" font-size="22">—</text>`;
     }
     const name = escapeSvgText(truncateLeaderboardName(standing.displayName, PODIUM_NAME_MAX));
-    const pts = `${Math.trunc(Number.isFinite(standing.points) ? standing.points : 0)} PTS`;
     const move = formatRankMovementLabel(standing.movement);
     const moveCol = movementColor(standing.movement?.kind);
     const crown = opts.elevate
@@ -615,8 +612,7 @@ function renderPodium(
       ${quilt}
       <circle cx="${cx}" cy="${opts.y + 42}" r="18" fill="#0a0907" stroke="${opts.stroke}" stroke-width="1.8"/>
       <text x="${cx}" y="${opts.y + 48}" text-anchor="middle" fill="${opts.stroke}" font-family="${fontFamily}" font-size="16" font-weight="700">${opts.medal}</text>
-      <text x="${cx}" y="${opts.y + 98}" text-anchor="middle" fill="#ffffff" font-family="${fontFamily}" font-size="${opts.nameSize}" font-weight="700">${name}</text>
-      <text x="${cx}" y="${opts.y + 140}" text-anchor="middle" fill="${opts.ptsFill}" font-family="${fontFamily}" font-size="${opts.ptsSize}" font-weight="700">${escapeSvgText(pts)}</text>
+      <text x="${cx}" y="${opts.y + 118}" text-anchor="middle" fill="#ffffff" font-family="${fontFamily}" font-size="${opts.nameSize}" font-weight="700">${name}</text>
       ${
         move
           ? `<text x="${cx}" y="${opts.y + 172}" text-anchor="middle" fill="${moveCol}" font-family="${fontFamily}" font-size="18" font-weight="700">${escapeSvgText(move)}</text>`
@@ -641,8 +637,6 @@ function renderPodium(
       stroke: "url(#silverMetal)",
       strokeWidth: 2.2,
       nameSize: 28,
-      ptsSize: 26,
-      ptsFill: "url(#silverMetal)",
       elevate: false,
       shadow: "cardShadow"
     })}
@@ -656,8 +650,6 @@ function renderPodium(
       stroke: "url(#goldMetal)",
       strokeWidth: 3.2,
       nameSize: 36,
-      ptsSize: 32,
-      ptsFill: "url(#goldMetal)",
       elevate: true,
       shadow: "leaderShadow"
     })}
@@ -671,8 +663,6 @@ function renderPodium(
       stroke: "url(#bronzeMetal)",
       strokeWidth: 2.2,
       nameSize: 28,
-      ptsSize: 26,
-      ptsFill: "url(#bronzeMetal)",
       elevate: false,
       shadow: "cardShadow"
     })}
@@ -697,7 +687,6 @@ function renderRows(
       const name = escapeSvgText(truncateLeaderboardName(row.displayName, ROW_NAME_MAX));
       const move = formatRankMovementLabel(row.movement);
       const moveCol = movementColor(row.movement?.kind);
-      const pts = Math.trunc(Number.isFinite(row.points) ? row.points : 0);
       return `
       <g>
         <rect x="92" y="${y}" width="896" height="${rowH}" rx="12" fill="${fill}" stroke="#3a3018" stroke-opacity="0.55" stroke-width="1"/>
@@ -706,10 +695,9 @@ function renderRows(
         <text x="168" y="${y + rowH / 2 + 7}" fill="#f5f1e6" font-family="${fontFamily}" font-size="22" font-weight="700">${name}</text>
         ${
           move
-            ? `<text x="700" y="${y + rowH / 2 + 7}" text-anchor="middle" fill="${moveCol}" font-family="${fontFamily}" font-size="17" font-weight="700">${escapeSvgText(move)}</text>`
+            ? `<text x="948" y="${y + rowH / 2 + 7}" text-anchor="end" fill="${moveCol}" font-family="${fontFamily}" font-size="17" font-weight="700">${escapeSvgText(move)}</text>`
             : ""
         }
-        <text x="948" y="${y + rowH / 2 + 7}" text-anchor="end" fill="url(#goldMetal)" font-family="${fontFamily}" font-size="20" font-weight="700">${pts} PTS</text>
       </g>`;
     })
     .join("\n");

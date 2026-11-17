@@ -16,9 +16,9 @@ describe("buildGiveInfoMessage", () => {
       isFirst: true
     });
 
-    expect(text).toContain("You're #1");
-    expect(text).toContain("leading by 40");
-    expect(text).toContain("over #2");
+    expect(text).toContain("You're #1.");
+    expect(text).not.toContain("500");
+    expect(text).not.toContain("leading by");
     expect(text).toContain("Current prize pool: $123.45.");
     expect(text).toContain("Competition ends Monday, Aug 17 at 9:00 PM CDT.");
     expect(text).toMatch(/subscribed to the official leaderboard channel/i);
@@ -40,9 +40,8 @@ describe("buildGiveInfoMessage", () => {
       isFirst: false
     });
 
-    expect(text).toContain("You're #5");
-    expect(text).toContain("15 points behind #4");
-    expect(text).toContain("60 points away from Top 3");
+    expect(text).toContain("You're #5.");
+    expect(text).not.toContain("points");
     expect(text).toContain("Current prize pool: $50.00.");
     expect(text).toContain("Competition ends Monday, Aug 17 at 9:00 PM CDT.");
     expect(text).toMatch(/subscribed to the official leaderboard channel/i);
@@ -60,8 +59,8 @@ describe("buildGiveInfoMessage", () => {
       isFirst: false
     });
 
-    expect(text).toContain("You're #23");
-    expect(text).toContain("you need 35 more points to reach Top 10");
+    expect(text).toContain("You're #23.");
+    expect(text).not.toContain("points");
     expect(text).toContain("Current prize pool: $9.99.");
     expect(text).toMatch(/subscribed to the official leaderboard channel/i);
     expect(text).not.toMatch(/\d+%/);

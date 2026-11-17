@@ -303,9 +303,18 @@ export function createMemoryPrisma() {
     },
     auditLog: {
       create: async ({ data }: any) => {
-        audits.push(data);
-        return data;
-      }
+        const row = { id: `audit-${audits.length + 1}`, ...data };
+        audits.push(row);
+        return row;
+      },
+      findFirst: async ({ where }: any) =>
+        audits.find((row) => {
+          if (where?.action && row.action !== where.action) return false;
+          if (where?.workspaceId && row.workspaceId !== where.workspaceId) return false;
+          const competitionId = where?.metadata?.equals;
+          if (competitionId && row.metadata?.competitionId !== competitionId) return false;
+          return true;
+        }) ?? null
     },
     _state: {
       integrations,

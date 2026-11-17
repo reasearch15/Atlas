@@ -39,34 +39,7 @@ export function buildGiveInfoMessage(input: GiveInfoMessageInput): string {
 }
 
 function buildStatusLine(input: GiveInfoMessageInput): string {
-  const pointsLabel = `${input.totalPoints} point${input.totalPoints === 1 ? "" : "s"}`;
-
-  if (input.isFirst || input.rank === 1) {
-    const lead =
-      input.pointsAbove != null && input.pointsAbove > 0
-        ? ` — leading by ${input.pointsAbove} point${input.pointsAbove === 1 ? "" : "s"} over #2`
-        : "";
-    return `You're #1 with ${pointsLabel}${lead}.`;
-  }
-
-  if (input.rank > 10) {
-    const need =
-      input.pointsToTop10 != null && input.pointsToTop10 > 0
-        ? `you need ${input.pointsToTop10} more point${input.pointsToTop10 === 1 ? "" : "s"} to reach Top 10`
-        : "keep earning points to reach Top 10";
-    return `You're #${input.rank} with ${pointsLabel} — ${need}.`;
-  }
-
-  const behindRank = input.rank - 1;
-  const behind =
-    input.pointsAbove != null && input.pointsAbove > 0
-      ? `${input.pointsAbove} point${input.pointsAbove === 1 ? "" : "s"} behind #${behindRank}`
-      : `just behind #${behindRank}`;
-  const top3 =
-    input.rank <= 3
-      ? "you're already in Top 3"
-      : input.pointsToTop3 != null && input.pointsToTop3 > 0
-        ? `${input.pointsToTop3} point${input.pointsToTop3 === 1 ? "" : "s"} away from Top 3`
-        : "close to Top 3";
-  return `You're #${input.rank} with ${pointsLabel} — ${behind}, and ${top3}.`;
+  if (input.isFirst || input.rank === 1) return "You're #1.";
+  if (input.rank <= 3) return `You're #${input.rank} and you're already in Top 3.`;
+  return `You're #${input.rank}.`;
 }

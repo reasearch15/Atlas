@@ -21,8 +21,9 @@ describe("formatPersonalRankMessage", () => {
       isFirst: false
     });
     expect(text).toContain("Rank: #7");
-    expect(text).toContain("18 points behind #6");
-    expect(text).toContain("61 points away from Top 3");
+    expect(text).not.toContain("284");
+    expect(text).not.toContain("points behind");
+    expect(text).not.toContain("points away");
     expect(text).toContain("$620.00");
     expect(text).toContain("⏰ Ends Monday, Aug 17 at 9:00 PM CDT");
     expect(text).not.toMatch(/2%|rateBps|poolRate/i);
@@ -113,8 +114,8 @@ describe("formatWheelSpinResultMessage", () => {
     expect(text).toContain("🎡 WHEEL RESULT");
     expect(text).toContain("+25 POINTS!");
     expect(text).toContain("#9 → #6");
-    expect(text).toContain("You're now 12 points behind #5.");
-    expect(text).toContain("Total points: 309");
+    expect(text).not.toContain("points behind");
+    expect(text).not.toContain("Total points");
   });
 
   it("formats a zero-point success without looking like an error", () => {
@@ -143,7 +144,7 @@ describe("formatWheelSpinResultMessage", () => {
     expect(text).toContain("+35 POINTS!");
     expect(text).toContain("#5 → #3");
     expect(text).toContain("🏆 You're now in the prize zone!");
-    expect(text).toContain("Total points: 344");
+    expect(text).not.toContain("Total points");
   });
 
   it("formats a forced 40-point result", () => {
@@ -181,7 +182,8 @@ describe("formatPersonalFinalResultMessage", () => {
       ineligibilityReason: "NOT_SUBSCRIBED",
       prizePoolCents: 100_000
     });
-    expect(text).toContain("You finished #1 with 900 points");
+    expect(text).toContain("You finished #1.");
+    expect(text).not.toContain("900");
     expect(text).toContain("not subscribed");
     expect(text).toContain("#1 leaderboard finish remains recorded");
     expect(text).not.toContain("finished #2");
@@ -227,7 +229,7 @@ describe("formatPersonalAnnouncementDm", () => {
       totalPoints: 110
     });
     expect(text).toContain("You're now #10");
-    expect(text).toContain("Points: 110");
+    expect(text).not.toContain("Points:");
     expect(text).toContain("Open /rank");
     expect(text).not.toContain("Moved from");
   });

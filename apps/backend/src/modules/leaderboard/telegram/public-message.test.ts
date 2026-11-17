@@ -30,11 +30,11 @@ describe("formatPublicLeaderboardMessage", () => {
     expect(text).toContain("🏆 BIWEEKLY LEADERBOARD");
     expect(text.indexOf("💰 PRIZE POOL")).toBeLessThan(text.indexOf("🥇 1."));
     expect(text.indexOf("💵 $620.00")).toBeLessThan(text.indexOf("🥇 1."));
-    expect(text).toContain("🥇 1. John Smith — 720 pts");
-    expect(text).toContain("🥈 2. Sarah Connor — 681 pts");
-    expect(text).toContain("🥉 3. Mike Jones — 640 pts");
-    expect(text).toContain("4. Alex Reed — 610 pts");
-    expect(text).toContain("10. David Lee — 390 pts");
+    expect(text).toContain("🥇 1. John Smith");
+    expect(text).toContain("🥈 2. Sarah Connor");
+    expect(text).toContain("🥉 3. Mike Jones");
+    expect(text).toContain("4. Alex Reed");
+    expect(text).toContain("10. David Lee");
     expect(text).toContain(PUBLIC_LEADERBOARD_SUBSCRIPTION_REMINDER);
     expect(text).toContain("🔥 Keep climbing.");
     expect(text).toContain("⏰ Ends Monday, Aug 17 at 9:00 PM CDT");
@@ -91,7 +91,7 @@ describe("formatPublicLeaderboardMessage", () => {
       endsAt,
       timezone: "America/Chicago"
     });
-    expect(text).toContain("1. Player — 50 pts");
+    expect(text).toContain("1. Player");
     expect(text).not.toContain("@secretuser");
   });
 
@@ -106,8 +106,8 @@ describe("formatPublicLeaderboardMessage", () => {
       endsAt,
       timezone: "America/Chicago"
     });
-    expect(text).toContain("🥇 1. L. J. — 0 pts");
-    expect(text).toContain("🥈 2. S F — 0 pts");
+    expect(text).toContain("🥇 1. L. J.");
+    expect(text).toContain("🥈 2. S F");
   });
 
   it("preserves CRM display names that contain digits", () => {
@@ -118,7 +118,7 @@ describe("formatPublicLeaderboardMessage", () => {
       endsAt,
       timezone: "America/Chicago"
     });
-    expect(text).toContain("🥇 1. Kapnocap85 — 50 pts");
+    expect(text).toContain("🥇 1. Kapnocap85");
   });
 
   it("publishes the production alphanumeric nickname at rank 9 with 45 points", () => {
@@ -129,7 +129,7 @@ describe("formatPublicLeaderboardMessage", () => {
       endsAt,
       timezone: "America/Chicago"
     });
-    expect(text).toContain("9. 580.1a — 45 pts");
+    expect(text).toContain("9. 580.1a");
     expect(text).not.toContain("Player");
     expect(text).not.toContain("@Zombie24");
     expect(text).not.toContain("Zombie24");
@@ -151,7 +151,7 @@ describe("formatPublicLeaderboardMessage", () => {
         endsAt,
         timezone: "America/Chicago"
       });
-      expect(text).toContain("🥇 1. Player — 1 pts");
+      expect(text).toContain("🥇 1. Player");
       expect(text).not.toContain(displayName);
     }
   });
@@ -171,10 +171,10 @@ describe("formatPublicLeaderboardMessage", () => {
     });
 
     expect(text).toContain("💵 $0.00");
-    expect(text.indexOf("💰 PRIZE POOL")).toBeLessThan(text.indexOf("🥇 1. Homer — 0 pts"));
-    expect(text).toContain("🥇 1. Homer — 0 pts");
-    expect(text).toContain("🥈 2. Player — 0 pts");
-    expect(text).toContain("🥉 3. TanDra — 0 pts");
+    expect(text.indexOf("💰 PRIZE POOL")).toBeLessThan(text.indexOf("🥇 1. Homer"));
+    expect(text).toContain("🥇 1. Homer");
+    expect(text).toContain("🥈 2. Player");
+    expect(text).toContain("🥉 3. TanDra");
     expect(text).toContain("🔥 The competition has started — every point matters.");
     expect(text).not.toContain("Keep climbing.");
   });
@@ -212,7 +212,7 @@ describe("formatRankAnnouncement", () => {
         kind: "REACHED_NUMBER_1",
         totalPoints: 742
       })
-    ).toBe("👑 NEW #1\nSarah Connor just took the top spot with 742 points.");
+    ).toBe("👑 NEW #1\nSarah Connor just took the top spot.");
   });
 
   it("formats climb announcements with optional gap copy", () => {
@@ -226,7 +226,7 @@ describe("formatRankAnnouncement", () => {
         pointsGained: 35,
         pointsBehindNext: 18
       })
-    ).toBe("🔥 Homer moved #6 → #3!\n+35 points\nNow only 18 points behind #2.");
+    ).toBe("🔥 Homer moved #6 → #3!\nAfter entering Top 3.");
   });
 });
 
@@ -239,7 +239,7 @@ describe("formatCurrentStateRankAnnouncement", () => {
         totalPoints: 110,
         pointsBehindNext: 15
       })
-    ).toBe("🔥 John Mccloud is now #10!\n15 points behind #9.");
+    ).toBe("🔥 John Mccloud is now #10!");
   });
 
   it("includes proven movement only when fromRank is worse than current rank", () => {
@@ -251,7 +251,7 @@ describe("formatCurrentStateRankAnnouncement", () => {
         pointsBehindNext: 12,
         fromRank: 10
       })
-    ).toBe("🔥 John Mccloud moved #10 → #8!\n12 points behind #7.");
+    ).toBe("🔥 John Mccloud moved #10 → #8!");
   });
 
   it("does not treat a stale equal/worse fromRank as movement", () => {
@@ -263,7 +263,7 @@ describe("formatCurrentStateRankAnnouncement", () => {
         pointsBehindNext: 20,
         fromRank: 7
       })
-    ).toBe("🔥 John Mccloud is now #7!\n20 points behind #6.");
+    ).toBe("🔥 John Mccloud is now #7!");
   });
 
   it("formats current #1 without a points-behind line", () => {
@@ -275,7 +275,7 @@ describe("formatCurrentStateRankAnnouncement", () => {
         pointsBehindNext: 10,
         fromRank: 5
       })
-    ).toBe("🔥 John Mccloud is now #1!\nLeading the leaderboard with 300 PTS.");
+    ).toBe("🔥 John Mccloud is now #1!");
   });
 });
 

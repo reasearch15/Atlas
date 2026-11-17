@@ -16,7 +16,7 @@ import { createMemoryPrisma } from "./leaderboard-telegram.test-harness";
  * finalization on its own (via domain.attemptAutoFinalize), instead of waiting
  * for the next periodic FROZEN re-scan. Also covers requirement 6: a technical
  * Telegram failure must never auto-disqualify a candidate — it stays
- * PENDING_REVIEW and finalization must not proceed while it's in the Top 3.
+ * PENDING_REVIEW and finalization must not proceed while that player can still take a prize.
  */
 
 const workspaceA = "11111111-1111-4111-8111-111111111111";
@@ -157,11 +157,11 @@ describe("VERIFY_MEMBERSHIP resumes automatic finalization", () => {
     expect(attemptAutoFinalize).toHaveBeenCalledWith(workspaceA, ownerA, competitionA, expect.any(Date));
   });
 
-  it("CRITICAL RULE: still calls attemptAutoFinalize (bounded pass ends the wait) even when a Top-3 candidate stays unresolved", async () => {
+  it("does not finalize while a prize-slot candidate stays unresolved", async () => {
     const prisma = createMemoryPrisma();
     seedIntegrationAndCompetition(prisma);
-    // Only rank 1 seeded, and it stays PENDING_REVIEW (GROUP contact, no numeric id) —
-    // this must never keep the competition FROZEN waiting.
+    // Only rank 1 seeded, and it stays PENDING_REVIEW (GROUP contact, no numeric id).
+    // That must keep the competition FROZEN instead of publishing an empty result.
     prisma._state.contacts.push({ id: contact1, workspaceId: workspaceA, kind: "GROUP", telegramPeerId: "g1" });
     prisma._state.candidates.push({
       id: crypto.randomUUID(),
@@ -198,16 +198,14 @@ describe("VERIFY_MEMBERSHIP resumes automatic finalization", () => {
     await processor.processJob(verifyId);
 
     const candidate = prisma._state.candidates.find((c: any) => c.crmContactId === contact1);
-    // Never silently marked ELIGIBLE — attemptAutoFinalize (force mode) is what
-    // decides to skip them for the prize; setMembershipEligibility never touches them.
     expect(candidate.membershipStatus).toBe("PENDING_REVIEW");
-    expect(attemptAutoFinalize).toHaveBeenCalledTimes(1);
-    expect(attemptAutoFinalize).toHaveBeenCalledWith(workspaceA, ownerA, competitionA, expect.any(Date));
+    expect(attemptAutoFinalize).not.toHaveBeenCalled();
+    expect(prisma._state.outbox.find((row) => row.id === verifyId)?.status).toBe("RETRY_SCHEDULED");
   });
 });
 
 describe("Technical Telegram failures never auto-disqualify", () => {
-  it("a getChatMember API error keeps the candidate PENDING_REVIEW (never NOT_ELIGIBLE) but still ends the bounded wait", async () => {
+  it("a getChatMember API error keeps the candidate PENDING_REVIEW and does not finalize", async () => {
     const prisma = createMemoryPrisma();
     seedIntegrationAndCompetition(prisma);
     prisma._state.contacts.push({ id: contact1, workspaceId: workspaceA, kind: "PRIVATE", telegramPeerId: "1001" });
@@ -272,9 +270,8 @@ describe("Technical Telegram failures never auto-disqualify", () => {
     const candidate = prisma._state.candidates.find((c: any) => c.crmContactId === contact1);
     expect(candidate.membershipStatus).toBe("PENDING_REVIEW");
     expect(candidate.membershipStatus).not.toBe("NOT_ELIGIBLE");
-    // The bounded verification pass ended (one API attempt, still ambiguous) — the
-    // competition must still move toward completion, not stay FROZEN waiting.
-    expect(attemptAutoFinalize).toHaveBeenCalledTimes(1);
+    expect(attemptAutoFinalize).not.toHaveBeenCalled();
+    expect(prisma._state.outbox.find((row) => row.id === verifyId)?.status).toBe("RETRY_SCHEDULED");
   });
 });
 
@@ -316,5 +313,48 @@ describe("Telegram plugin onFrozen wiring (mirrors leaderboard-telegram.plugin.t
     );
     expect(refreshRow).toBeTruthy();
     expect(verifyRow).toBeTruthy();
+  });
+
+  it("records one exhaustion audit and lets the same outbox row be retried", async () => {
+    const prisma = createMemoryPrisma();
+    seedIntegrationAndCompetition(prisma);
+    prisma._state.contacts.push({ id: contact1, workspaceId: workspaceA, kind: "GROUP", telegramPeerId: "g1" });
+    prisma._state.candidates.push({
+      id: crypto.randomUUID(),
+      workspaceId: workspaceA,
+      ownerCoadminUserId: ownerA,
+      competitionId: competitionA,
+      crmContactId: contact1,
+      leaderboardRank: 1,
+      totalPoints: 300,
+      membershipStatus: "PENDING_REVIEW",
+      ineligibilityReason: null,
+      verificationSource: null
+    });
+    const outbox = new LeaderboardTelegramOutboxService(prisma, async () => undefined);
+    const processor = new LeaderboardTelegramProcessor({
+      prisma,
+      encryptionKey,
+      outbox,
+      client: createFakeLeaderboardTelegramClient({ bots: new Map(), chats: new Map(), failures: new Map() }),
+      domain: { setMembershipEligibility: attachRealisticSetMembershipEligibility(prisma), attemptAutoFinalize: vi.fn() } as never
+    });
+    const verifyId = await outbox.enqueueVerifyMembership(workspaceA, ownerA, competitionA);
+    const queued = prisma._state.outbox.find((row) => row.id === verifyId)!;
+    queued.attemptCount = 11;
+    await processor.processJob(verifyId);
+    await processor.processJob(verifyId);
+    expect(prisma._state.outbox.filter((row) => row.jobType === "VERIFY_MEMBERSHIP")).toHaveLength(1);
+    expect(queued.status).toBe("FAILED");
+    expect(queued.attemptCount).toBe(12);
+    const exhaustion = prisma._state.audits.filter((row) => row.action === "leaderboard.verification_exhausted");
+    expect(exhaustion).toHaveLength(1);
+    expect(exhaustion[0]?.metadata.competitionId).toBe(competitionA);
+
+    const retried = await outbox.enqueueVerifyMembership(workspaceA, ownerA, competitionA);
+    expect(retried).toBe(verifyId);
+    expect(prisma._state.outbox.filter((row) => row.jobType === "VERIFY_MEMBERSHIP")).toHaveLength(1);
+    expect(queued.status).toBe("QUEUED");
+    expect(queued.attemptCount).toBe(0);
   });
 });

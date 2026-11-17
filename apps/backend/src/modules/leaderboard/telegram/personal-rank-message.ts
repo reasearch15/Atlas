@@ -128,7 +128,6 @@ export function formatPersonalRankMessage(input: PersonalRankMessageInput): stri
     "🏆 YOUR LEADERBOARD",
     "",
     `Rank: #${input.rank}`,
-    `Points: ${Math.trunc(input.totalPoints)}`,
     "",
     ...gapLines,
     ...(wheelLines.length > 0 ? ["", ...wheelLines] : []),
@@ -146,7 +145,6 @@ export function formatPersonalRankMessage(input: PersonalRankMessageInput): stri
  * Never tells an ineligible #1 that they "finished #2".
  */
 export function formatPersonalFinalResultMessage(input: PersonalFinalResultMessageInput): string {
-  const points = Math.trunc(input.totalPoints);
   const notSubscribed =
     input.membershipStatus === "NOT_ELIGIBLE" &&
     (input.ineligibilityReason === "NOT_SUBSCRIBED" ||
@@ -156,7 +154,7 @@ export function formatPersonalFinalResultMessage(input: PersonalFinalResultMessa
     const lines = [
       "🏆 YOU WON!",
       "",
-      `You finished #${input.leaderboardRank} on the leaderboard with ${points} points.`,
+      `You finished #${input.leaderboardRank} on the leaderboard.`,
       ""
     ];
     if (input.prizeRank !== input.leaderboardRank) {
@@ -176,7 +174,7 @@ export function formatPersonalFinalResultMessage(input: PersonalFinalResultMessa
     return [
       "🏁 FINAL RESULT",
       "",
-      `You finished #${input.leaderboardRank} with ${points} points.`,
+      `You finished #${input.leaderboardRank}.`,
       "",
       "However, you were not subscribed to the required leaderboard channel at the eligibility deadline, so you were not eligible for the prize.",
       "",
@@ -188,7 +186,7 @@ export function formatPersonalFinalResultMessage(input: PersonalFinalResultMessa
     return [
       "🏁 FINAL RESULT",
       "",
-      `You finished #${input.leaderboardRank} with ${points} points.`,
+      `You finished #${input.leaderboardRank}.`,
       "",
       input.ineligibilityReason?.trim() ||
         "You were not eligible for a prize at the eligibility deadline.",
@@ -200,7 +198,7 @@ export function formatPersonalFinalResultMessage(input: PersonalFinalResultMessa
   return [
     "🏁 FINAL RESULT",
     "",
-    `You finished #${input.leaderboardRank} with ${points} points.`,
+    `You finished #${input.leaderboardRank}.`,
     "",
     "You did not receive a prize this round.",
     "",
@@ -214,8 +212,7 @@ export function formatPersonalAnnouncementDm(input: {
   readonly toRank: number;
   readonly totalPoints?: number;
 }): string {
-  const points =
-    input.totalPoints != null ? `\nPoints: ${Math.trunc(input.totalPoints)}` : "";
+  const points = "";
   const provenMove =
     input.fromRank != null && input.toRank > 0 && input.fromRank > input.toRank;
   const nowRank = input.toRank > 0 ? `#${input.toRank}` : null;
@@ -274,7 +271,6 @@ export function formatPersonalAnnouncementDm(input: {
  */
 export function formatWheelSpinResultMessage(input: WheelSpinResultMessageInput): string {
   const points = Math.trunc(input.pointsAwarded);
-  const total = Math.trunc(input.totalPoints);
   const prev = input.previousRank;
   const next = input.resultingRank;
   const enteredPrizeZone =
@@ -295,36 +291,27 @@ export function formatWheelSpinResultMessage(input: WheelSpinResultMessageInput)
     ].join("\n");
   }
 
-  const lines = [
-    "🎡 WHEEL RESULT",
-    "",
-    `+${points} POINTS!`,
-    ""
-  ];
+    const lines = [
+      "🎡 WHEEL RESULT",
+      "",
+      `+${points} POINTS!`,
+      ""
+    ];
 
-  if (prev != null && next != null) {
-    lines.push(`#${prev} → #${next}`);
-    lines.push("");
-  } else if (next != null) {
-    lines.push(`You're now #${next}.`);
-    lines.push("");
-  }
+    if (prev != null && next != null) {
+      lines.push(`#${prev} → #${next}`);
+      lines.push("");
+    } else if (next != null) {
+      lines.push(`You're now #${next}.`);
+      lines.push("");
+    }
 
-  if (enteredPrizeZone) {
-    lines.push("🏆 You're now in the prize zone!");
-    lines.push("");
-  } else if (
-    next != null &&
-    next > 1 &&
-    input.pointsAbove != null &&
-    input.pointsAbove > 0
-  ) {
-    lines.push(`You're now ${input.pointsAbove} points behind #${next - 1}.`);
-    lines.push("");
-  }
+    if (enteredPrizeZone) {
+      lines.push("🏆 You're now in the prize zone!");
+      lines.push("");
+    }
 
-  lines.push(`Total points: ${total}`);
-  return lines.join("\n");
+    return lines.filter((line, index, all) => line !== "" || all[index - 1] !== "").join("\n").trim();
 }
 
 function buildWheelStatusLines(
@@ -364,23 +351,9 @@ function formatNextSpinAvailableLine(nextSpinAt: string | null | undefined, time
 }
 
 function buildGapLines(input: PersonalRankMessageInput): string[] {
-  if (input.isFirst || input.rank === 1) {
-    if (input.pointsAbove != null && input.pointsAbove > 0) {
-      return [`🥇 Leading by ${input.pointsAbove} points over #2`];
-    }
-    return ["🥇 You're #1"];
-  }
-
-  const lines: string[] = [];
-  if (input.pointsAbove != null && input.pointsAbove > 0) {
-    lines.push(`⬆️ ${input.pointsAbove} points behind #${input.rank - 1}`);
-  }
-  if (input.rank <= 3) {
-    lines.push("🏅 You're in Top 3");
-  } else if (input.pointsToTop3 != null && input.pointsToTop3 > 0) {
-    lines.push(`🏅 ${input.pointsToTop3} points away from Top 3`);
-  }
-  return lines.length > 0 ? lines : [`Rank: #${input.rank}`];
+  if (input.isFirst || input.rank === 1) return ["🥇 You're #1"];
+  if (input.rank <= 3) return ["🏅 You're in Top 3"];
+  return [`Rank: #${input.rank}`];
 }
 
 function formatEndsLine(endsAt: Date, timezone: string): string {

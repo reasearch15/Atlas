@@ -149,17 +149,8 @@ export function LeaderboardBoardView() {
                 <tr className="border-b text-[11px] uppercase tracking-wide text-muted-foreground">
                   <th className="px-2 py-2 font-semibold">Rank</th>
                   <th className="px-2 py-2 font-semibold">Player</th>
-                  <th className="px-2 py-2 font-semibold">Total</th>
-                  <th className="px-2 py-2 font-semibold">Deposit</th>
-                  <th className="px-2 py-2 font-semibold">Referral</th>
-                  <th className="px-2 py-2 font-semibold">Promotion</th>
-                  <th className="px-2 py-2 font-semibold">Wheel</th>
-                  <th className="px-2 py-2 font-semibold">Qualifying deposits</th>
-                  <th className="px-2 py-2 font-semibold">Successful referrals</th>
                   <th className="px-2 py-2 font-semibold">Last change</th>
                   <th className="px-2 py-2 font-semibold">Reason</th>
-                  <th className="px-2 py-2 font-semibold">Gap to next</th>
-                  <th className="px-2 py-2 font-semibold">Gap to Top 3</th>
                 </tr>
               </thead>
               <tbody>
@@ -172,26 +163,11 @@ export function LeaderboardBoardView() {
                         <div className="text-xs text-muted-foreground">@{row.telegramUsername}</div>
                       ) : null}
                     </td>
-                    <td className="px-2 py-2 tabular-nums">{row.totalPoints}</td>
-                    <td className="px-2 py-2 tabular-nums">{row.depositPoints}</td>
-                    <td className="px-2 py-2 tabular-nums">{row.referralPoints}</td>
-                    <td className="px-2 py-2 tabular-nums">{row.promotionPoints}</td>
-                    <td className="px-2 py-2 tabular-nums">{row.wheelPoints}</td>
-                    <td className="px-2 py-2 tabular-nums">
-                      {formatMoneyFromCents(row.qualifyingDepositCents)}
-                    </td>
-                    <td className="px-2 py-2 tabular-nums">{row.successfulReferralCount}</td>
                     <td className="px-2 py-2 text-xs text-muted-foreground">
                       {row.lastEventAt ? formatDateTime(row.lastEventAt) : "—"}
                     </td>
                     <td className="max-w-[10rem] truncate px-2 py-2 text-xs text-muted-foreground">
                       {row.lastEventReason ?? "—"}
-                    </td>
-                    <td className="px-2 py-2 tabular-nums">
-                      {row.gapToNextRankPoints != null ? row.gapToNextRankPoints : "—"}
-                    </td>
-                    <td className="px-2 py-2 tabular-nums">
-                      {row.gapToTop3Points != null ? row.gapToTop3Points : "—"}
                     </td>
                   </tr>
                 ))}

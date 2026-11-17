@@ -135,25 +135,15 @@ export interface CurrentStateRankAnnouncementInput {
 export function formatCurrentStateRankAnnouncement(input: CurrentStateRankAnnouncementInput): string {
   const name = toPublicLeaderboardDisplayName(input.displayName);
   const rank = input.rank;
-  const points = Number.isFinite(input.totalPoints) ? Math.trunc(input.totalPoints) : 0;
 
   if (rank === 1) {
-    return `🔥 ${name} is now #1!\nLeading the leaderboard with ${points} PTS.`;
+    return `🔥 ${name} is now #1!`;
   }
 
   const provenMove = input.fromRank != null && input.fromRank > rank;
   const headline = provenMove
     ? `🔥 ${name} moved #${input.fromRank} → #${rank}!`
     : `🔥 ${name} is now #${rank}!`;
-  const behind =
-    input.pointsBehindNext != null &&
-    Number.isFinite(input.pointsBehindNext) &&
-    input.pointsBehindNext >= 0
-      ? Math.trunc(input.pointsBehindNext)
-      : null;
-  if (behind != null) {
-    return `${headline}\n${behind} points behind #${rank - 1}.`;
-  }
   return headline;
 }
 
@@ -163,45 +153,22 @@ export function formatCurrentStateRankAnnouncement(input: CurrentStateRankAnnoun
 export function formatRankAnnouncement(input: RankAnnouncementInput): string {
   const name = toPublicLeaderboardDisplayName(input.displayName);
   const kind = input.kind;
-  const total =
-    input.totalPoints != null && Number.isFinite(input.totalPoints)
-      ? Math.trunc(input.totalPoints)
-      : null;
-  const gained =
-    input.pointsGained != null && Number.isFinite(input.pointsGained) && input.pointsGained > 0
-      ? Math.trunc(input.pointsGained)
-      : null;
-  const behind =
-    input.pointsBehindNext != null &&
-    Number.isFinite(input.pointsBehindNext) &&
-    input.pointsBehindNext >= 0
-      ? Math.trunc(input.pointsBehindNext)
-      : null;
 
   if (kind === "REACHED_NUMBER_1" || input.toRank === 1) {
-    const pts = total != null ? ` with ${total} points` : "";
-    return `👑 NEW #1\n${name} just took the top spot${pts}.`;
+    return `👑 NEW #1\n${name} just took the top spot.`;
   }
 
   const from = input.fromRank == null ? "unranked" : `#${input.fromRank}`;
   const lines = [`🔥 ${name} moved ${from} → #${input.toRank}!`];
-  if (gained != null) {
-    lines.push(`+${gained} points`);
-  }
-  if (behind != null && input.toRank > 1) {
-    lines.push(`Now only ${behind} points behind #${input.toRank - 1}.`);
-  } else if (!gained) {
-    const reason = input.reason.trim() || "a ranking update";
-    lines.push(`After ${reason}.`);
-  }
+  const reason = input.reason.trim();
+  if (reason) lines.push(`After ${reason}.`);
   return lines.join("\n");
 }
 
 function formatStandingLine(row: PublicLeaderboardRow): string {
   const name = toPublicLeaderboardDisplayName(row.displayName);
   const medal = medalForRank(row.rank);
-  const points = Number.isFinite(row.points) ? Math.trunc(row.points) : 0;
-  return `${medal}${row.rank}. ${name} — ${points} pts`;
+  return `${medal}${row.rank}. ${name}`;
 }
 
 function medalForRank(rank: number): string {

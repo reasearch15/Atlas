@@ -136,7 +136,7 @@ describe("current-state rank announcements", () => {
     const id = await enqueueAnnouncement(outbox, { fromRank: null, toRank: 10 });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)).toEqual(["🔥 John Mccloud is now #6!\n50 points behind #5."]);
+    expect(sentTexts(tgState)).toEqual(["🔥 John Mccloud is now #6!"]);
     expect(sentTexts(tgState)[0]).not.toContain("#10");
   });
 
@@ -152,7 +152,7 @@ describe("current-state rank announcements", () => {
     });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!\n7 points behind #1.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!");
     expect(sentTexts(tgState)[0]).not.toContain("999");
     expect(sentTexts(tgState)[0]).not.toContain("behind #9");
   });
@@ -173,7 +173,7 @@ describe("current-state rank announcements", () => {
 
     await processor.processJob(first);
     expect(sentTexts(tgState)).toHaveLength(1);
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #6!\n50 points behind #5.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #6!");
   });
 
   it("preserves earliest ranked context across coalesced #7-to-#5-to-#3 alerts", async () => {
@@ -187,7 +187,7 @@ describe("current-state rank announcements", () => {
 
     expect(prisma._state.outbox[0].payloadJson.fromRank).toBe(7);
     await processor.processJob(first);
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud moved #7 → #3!\n20 points behind #2.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud moved #7 → #3!");
   });
 
   it("skips cleanly when the player falls outside Top 10 before send", async () => {
@@ -216,7 +216,7 @@ describe("current-state rank announcements", () => {
     await processor.processJob(id);
 
     expect(sentTexts(tgState)[0]).toBe(
-      "🔥 John Mccloud is now #1!\nLeading the leaderboard with 300 PTS."
+      "🔥 John Mccloud is now #1!"
     );
     expect(sentTexts(tgState)[0]).not.toContain("behind");
   });
@@ -249,7 +249,7 @@ describe("current-state rank announcements", () => {
     tgState.failures.clear();
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud moved #7 → #2!\n10 points behind #1.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud moved #7 → #2!");
   });
 
   it("processes old persisted payloads by correcting frozen rank fields", async () => {
@@ -265,7 +265,7 @@ describe("current-state rank announcements", () => {
     await processor.processJob(id);
 
     expect(sentTexts(tgState)[0]).toContain("is now #2");
-    expect(sentTexts(tgState)[0]).toContain("50 points behind #1");
+    expect(sentTexts(tgState)[0]).not.toContain("points behind");
     expect(sentTexts(tgState)[0]).not.toContain("900");
   });
 
@@ -286,7 +286,7 @@ describe("current-state rank announcements", () => {
     });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!\n15 points behind #1.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!");
   });
 
   it("skips when the only matching standing belongs to another coadmin", async () => {
@@ -348,7 +348,7 @@ describe("current-state rank announcements", () => {
     const id = await enqueueAnnouncement(outbox, { fromRank: null, toRank: 10 });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!\n10 points behind #1.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #2!");
   });
 
   it("refreshes a stale 4-point gap after #9 gains points", async () => {
@@ -365,8 +365,8 @@ describe("current-state rank announcements", () => {
     prisma._state.standings.find((s: any) => s.crmContactId === "above").totalPoints = 125;
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #10!\n15 points behind #9.");
-    expect(sentTexts(tgState)[0]).not.toContain("4 points behind");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #10!");
+    expect(sentTexts(tgState)[0]).not.toMatch(/\d+ points behind/);
   });
 
   it("uses current #8 when the player climbs before send", async () => {
@@ -384,9 +384,9 @@ describe("current-state rank announcements", () => {
     prisma._state.standings.find((s: any) => s.crmContactId === player).totalPoints = 138;
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #8!\n2 points behind #7.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #8!");
     expect(sentTexts(tgState)[0]).not.toContain("#10");
-    expect(sentTexts(tgState)[0]).not.toContain("15 points behind");
+    expect(sentTexts(tgState)[0]).not.toMatch(/\d+ points behind/);
   });
 
   it("sends current-state copy when the original climb snapshot is no longer valid", async () => {
@@ -398,10 +398,10 @@ describe("current-state rank announcements", () => {
     await processor.processJob(id);
 
     expect(sentTexts(tgState)).toHaveLength(1);
-    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #7!\n25 points behind #6.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 John Mccloud is now #7!");
     expect(sentTexts(tgState)[0]).not.toContain("moved");
     expect(sentTexts(tgState)[0]).not.toContain("#3");
-    expect(sentTexts(tgState)[0]).not.toContain("8 points behind");
+    expect(sentTexts(tgState)[0]).not.toMatch(/\d+ points behind/);
   });
 
   it("skips frozen competitions", async () => {
@@ -444,9 +444,9 @@ describe("current-state rank announcements", () => {
     await processor.processJob(id);
 
     const text = sentTexts(tgState)[0] ?? "";
-    expect(text).toBe("🔥 John Mccloud is now #10!\n7 points behind #9.");
+    expect(text).toBe("🔥 John Mccloud is now #10!");
     expect(text).not.toContain("moved unranked");
-    expect(text).not.toContain("4 points behind");
+    expect(text).not.toMatch(/\d+ points behind/);
   });
 
   it("revalidates rank-sensitive personal DMs from current standings", async () => {
@@ -475,7 +475,7 @@ describe("current-state rank announcements", () => {
 
     const dm = tgState.chats.get(555)?.messages.at(-1)?.text ?? "";
     expect(dm).toContain("You're now #2");
-    expect(dm).toContain("Points: 110");
+    expect(dm).not.toContain("Points:");
     expect(dm).not.toContain("Moved from unranked → #10");
     expect(dm).not.toContain("Points: 10");
   });
@@ -505,7 +505,7 @@ describe("current-state rank announcements", () => {
     });
     await processor.processJob(id);
 
-    expect(sentTexts(tgState)[0]).toBe("🔥 Elijah Kitai moved #6 → #4!\n89 points behind #3.");
+    expect(sentTexts(tgState)[0]).toBe("🔥 Elijah Kitai moved #6 → #4!");
   });
 
   it("skips a stale climb if the player has left Top 10 before send", async () => {

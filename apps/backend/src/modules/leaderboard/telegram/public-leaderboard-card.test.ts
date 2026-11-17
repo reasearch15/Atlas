@@ -254,7 +254,7 @@ describe("renderPublicLeaderboardCard", () => {
       now: NOW
     });
     expect(svg).toContain("580.1a");
-    expect(svg).toContain("45 PTS");
+    expect(svg).not.toContain("45 PTS");
     expect(svg).not.toMatch(/>Player</);
     expect(svg).not.toContain("@Zombie24");
   });

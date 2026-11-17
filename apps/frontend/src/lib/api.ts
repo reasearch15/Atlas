@@ -27,6 +27,7 @@ import type {
   FreeplayStaffClaimDto,
   FreeplayStaffStatusDto,
   LeaderboardAdminCompetitionDto,
+  LeaderboardPendingFinalizationDto,
   LeaderboardCompetitionReviewDto,
   LeaderboardCompetitionSummaryDto,
   LeaderboardCurrentBoardDto,
@@ -681,6 +682,9 @@ export const api = {
 
   leaderboardAdminCompetition: () =>
     apiRequest<LeaderboardAdminCompetitionDto | null>("/api/leaderboard/admin/competition"),
+
+  leaderboardPendingFinalizations: () =>
+    apiRequest<readonly LeaderboardPendingFinalizationDto[]>("/api/leaderboard/admin/pending-finalizations"),
 
   leaderboardEvents: (params: {
     readonly page: number;

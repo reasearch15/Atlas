@@ -254,6 +254,12 @@ enum LeaderboardCompetitionStatus {
   CANCELLED
 }
 
+/// Freeplay draw for ranks 4–10. Existing competitions stay COMPLETE so history is not redrawn.
+enum LeaderboardBonusDrawStatus {
+  PENDING
+  COMPLETE
+}
+
 enum LeaderboardEventType {
   DEPOSIT
   DEPOSIT_REVERSAL
@@ -1246,6 +1252,8 @@ model LeaderboardCompetition {
   finalizedAt                DateTime?                    @map("finalized_at")
   finalizedByUserId          String?                      @map("finalized_by_user_id") @db.Uuid
   finalizationIdempotencyKey String?                      @unique @map("finalization_idempotency_key") @db.VarChar(160)
+  /// PENDING only for competitions frozen after this column existed. Historical rows default COMPLETE.
+  bonusDrawStatus            LeaderboardBonusDrawStatus   @default(COMPLETE) @map("bonus_draw_status")
   createdAt                  DateTime                     @default(now()) @map("created_at")
   updatedAt                  DateTime                     @updatedAt @map("updated_at")
   workspace                  Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)

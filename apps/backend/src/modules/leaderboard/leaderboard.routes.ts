@@ -273,6 +273,10 @@ export async function leaderboardRoutes(app: FastifyInstance): Promise<void> {
     handle(() => service.getAdminCompetition(request.user!))
   );
 
+  app.get("/admin/pending-finalizations", { preHandler: [leaderboardAdminReadGuard(app)] }, async (request) =>
+    handle(() => service.listPendingFinalizations(request.user!))
+  );
+
   app.get("/events", { preHandler: [leaderboardAdminReadGuard(app)] }, async (request) =>
     handle(async () => {
       const query = leaderboardEventsQuerySchema.parse(request.query);

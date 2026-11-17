@@ -85,24 +85,19 @@ describe("Prisma leaderboard finalization eligibility (strict — manual finaliz
   });
 });
 
-describe("Prisma leaderboard finalization eligibility (force — bounded automatic finalize)", () => {
-  it("never blocks: skips unresolved PENDING_REVIEW for the prize and continues down the ranking", async () => {
-    const { winnersPayload, skippedPendingReviewCrmContactIds } = await buildPersistedWinners(
-      [
-        candidate(1, "ELIGIBLE"),
-        candidate(2, "PENDING_REVIEW"), // Telegram/API could not resolve in time
-        candidate(3, "ELIGIBLE"),
-        candidate(4, "ELIGIBLE")
-      ],
-      { force: true }
-    );
-
-    expect(winnersPayload).toEqual([
-      expect.objectContaining({ prizeRank: 1, leaderboardRank: 1 }),
-      expect.objectContaining({ prizeRank: 2, leaderboardRank: 3 }),
-      expect.objectContaining({ prizeRank: 3, leaderboardRank: 4 })
-    ]);
-    expect(skippedPendingReviewCrmContactIds).toEqual([candidate(2, "PENDING_REVIEW").crmContactId]);
+describe("Prisma leaderboard finalization eligibility (automatic finalize is strict)", () => {
+  it("blocks when a higher-ranked player is still PENDING_REVIEW, even if force is requested", async () => {
+    await expect(
+      buildPersistedWinners(
+        [
+          candidate(1, "ELIGIBLE"),
+          candidate(2, "PENDING_REVIEW"),
+          candidate(3, "ELIGIBLE"),
+          candidate(4, "ELIGIBLE")
+        ],
+        { force: true }
+      )
+    ).rejects.toMatchObject({ code: "PENDING_REVIEW_BLOCKS_FINALIZE" });
   });
 
   it("a confirmed NOT_ELIGIBLE #1 is skipped and #4 replaces them, unaffected by force mode", async () => {
@@ -118,35 +113,32 @@ describe("Prisma leaderboard finalization eligibility (force — bounded automat
     expect(winnersPayload.map((w: any) => w.leaderboardRank)).toEqual([2, 3, 4]);
   });
 
-  it("supports fewer than 3 winners when every remaining candidate is unresolved or ineligible", async () => {
-    const { winnersPayload, skippedPendingReviewCrmContactIds } = await buildPersistedWinners(
-      [
-        candidate(1, "ELIGIBLE"),
-        candidate(2, "NOT_ELIGIBLE"),
-        candidate(3, "PENDING_REVIEW")
-      ],
-      { force: true }
-    );
-    expect(winnersPayload).toHaveLength(1);
-    expect(winnersPayload[0]).toEqual(expect.objectContaining({ prizeRank: 1, leaderboardRank: 1 }));
-    expect(skippedPendingReviewCrmContactIds).toEqual([candidate(3, "PENDING_REVIEW").crmContactId]);
+  it("does not finalize a short winner list while a later candidate is unresolved", async () => {
+    await expect(
+      buildPersistedWinners(
+        [
+          candidate(1, "ELIGIBLE"),
+          candidate(2, "NOT_ELIGIBLE"),
+          candidate(3, "PENDING_REVIEW")
+        ],
+        { force: true }
+      )
+    ).rejects.toMatchObject({ code: "PENDING_REVIEW_BLOCKS_FINALIZE" });
   });
 
-  it("multiple unresolved/non-eligible players in a row are all skipped without blocking", async () => {
-    const { winnersPayload, skippedPendingReviewCrmContactIds } = await buildPersistedWinners(
-      [
-        candidate(1, "PENDING_REVIEW"),
-        candidate(2, "NOT_ELIGIBLE"),
-        candidate(3, "PENDING_REVIEW"),
-        candidate(4, "ELIGIBLE"),
-        candidate(5, "ELIGIBLE")
-      ],
-      { force: true }
-    );
-    expect(winnersPayload.map((w: any) => w.leaderboardRank)).toEqual([4, 5]);
-    expect(skippedPendingReviewCrmContactIds.sort()).toEqual(
-      [candidate(1, "PENDING_REVIEW").crmContactId, candidate(3, "PENDING_REVIEW").crmContactId].sort()
-    );
+  it("does not let lower eligible players displace unresolved players above them", async () => {
+    await expect(
+      buildPersistedWinners(
+        [
+          candidate(1, "PENDING_REVIEW"),
+          candidate(2, "NOT_ELIGIBLE"),
+          candidate(3, "PENDING_REVIEW"),
+          candidate(4, "ELIGIBLE"),
+          candidate(5, "ELIGIBLE")
+        ],
+        { force: true }
+      )
+    ).rejects.toMatchObject({ code: "PENDING_REVIEW_BLOCKS_FINALIZE" });
   });
 });
 

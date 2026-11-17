@@ -177,6 +177,23 @@ export interface LeaderboardPoolRateHistoryDto {
   readonly reason: string | null;
 }
 
+export interface LeaderboardPendingFinalizationDto {
+  readonly competitionId: string;
+  readonly sequence: number;
+  readonly status: "FROZEN" | "FINALIZED";
+  readonly endsAt: string;
+  readonly bonusDrawStatus: "PENDING" | "COMPLETE";
+  readonly unresolvedRanks: readonly {
+    readonly rank: number;
+    readonly errorCode: string | null;
+    readonly errorMessage: string | null;
+  }[];
+  readonly verificationStatus: string;
+  readonly attemptCount: number;
+  readonly retryStatus: string;
+  readonly lastVerificationError: string | null;
+}
+
 export interface LeaderboardAdminCompetitionDto {
   readonly competitionId: string;
   readonly sequence: number;

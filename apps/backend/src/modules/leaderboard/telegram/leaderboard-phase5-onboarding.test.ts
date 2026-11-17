@@ -591,8 +591,8 @@ describe("Phase 5 bot /start + /rank + isolation", () => {
     });
     const rankMsg = dmChat?.messages.find((m) => m.text.includes("YOUR LEADERBOARD"));
     expect(rankMsg?.text).toContain("Rank: #2");
-    expect(rankMsg?.text).toContain("Points: 284");
-    expect(rankMsg?.text).toContain("18 points behind #1");
+    expect(rankMsg?.text).not.toContain("Points:");
+    expect(rankMsg?.text).not.toContain("points behind");
     expect(rankMsg?.text).toContain("Prize Pool");
     expect(rankMsg?.text).not.toContain("4 points behind");
     expect(rankMsg?.text).not.toContain("moved unranked");
@@ -658,8 +658,9 @@ describe("Phase 5 personal messaging formats", () => {
       isFirst: false
     });
     expect(rank).toContain("Rank: #7");
-    expect(rank).toContain("18 points behind");
-    expect(rank).toContain("61 points away from Top 3");
+    expect(rank).not.toContain("Points:");
+    expect(rank).not.toContain("points behind");
+    expect(rank).not.toContain("points away");
     expect(rank).not.toMatch(/%/);
 
     const winner = formatPersonalFinalResultMessage({
@@ -685,7 +686,8 @@ describe("Phase 5 personal messaging formats", () => {
       ineligibilityReason: "NOT_SUBSCRIBED",
       prizePoolCents: 62000
     });
-    expect(ineligible).toContain("You finished #1 with 900 points");
+    expect(ineligible).toContain("You finished #1.");
+    expect(ineligible).not.toContain("900");
     expect(ineligible).toContain("not subscribed");
     expect(ineligible).toContain("#1 leaderboard finish remains recorded");
     expect(ineligible).not.toContain("YOU WON");

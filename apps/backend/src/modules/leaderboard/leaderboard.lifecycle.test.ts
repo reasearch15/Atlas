@@ -273,6 +273,14 @@ function createLifecyclePrisma() {
         }
       },
       giveawayPayout: {
+        findFirst: async ({
+          where
+        }: {
+          where: { competitionId: string; crmContactId: string };
+        }) =>
+          state.payouts.find(
+            (payout) => payout.competitionId === where.competitionId && payout.crmContactId === where.crmContactId
+          ) ?? null,
         upsert: async ({
           where,
           create
@@ -430,12 +438,8 @@ describe("Lifecycle: ACTIVE expiry freezes independently of finalization", () =>
     expect(candidates.map((c) => c.crmContactId).sort()).toEqual([...contactIds].sort());
   });
 
-  it("CRITICAL RULE: still finalizes when membership is never resolved — FROZEN is never permanent", async () => {
-    // No Telegram verification ever ran for this competition (no onFrozen hook wired).
-    // The bounded automatic finalize path must still complete it deterministically:
-    // every candidate is skipped for the prize (never silently marked ELIGIBLE), their
-    // PENDING_REVIEW status is left untouched on the record, and the result publishes
-    // with zero winners rather than the competition staying FROZEN forever.
+  it("does not finalize while every candidate is still PENDING_REVIEW", async () => {
+    // No Telegram verification ever ran. The round stays FROZEN and unpublished.
     const prisma = createLifecyclePrisma();
     seedEnabledSettings(prisma, ownerA);
     const { competitionId, contactIds } = seedExpiredActiveCompetition(prisma, ownerA, 3);
@@ -444,8 +448,8 @@ describe("Lifecycle: ACTIVE expiry freezes independently of finalization", () =>
     await service.ensureCurrentCompetition(workspaceId, ownerA, now);
     const outcome = await service.attemptAutoFinalize(workspaceId, ownerA, competitionId, now);
 
-    expect(outcome.finalized).toBe(true);
-    expect(outcome.competition.status).toBe("FINALIZED");
+    expect(outcome.finalized).toBe(false);
+    expect(outcome.competition.status).toBe("FROZEN");
     expect(prisma._state.payouts.filter((p) => p.competitionId === competitionId)).toHaveLength(0);
     const candidates = prisma._state.eligibility.filter((c) => c.competitionId === competitionId);
     expect(candidates.map((c) => c.crmContactId).sort()).toEqual([...contactIds].sort());
@@ -546,14 +550,14 @@ describe("Lifecycle: batch isolation across owners", () => {
     prisma._state.throwOnLockCompetitionId.add(blockedId);
 
     const service = new PrismaLeaderboardService(prisma, { audit: { record: async () => undefined } as never });
-    // A single tick: owner A's freeze is force-broken, owner B's freezes AND (since
-    // nothing verifies it) is force-finalized by the same call's FROZEN re-scan phase.
+    // A single tick: owner A's freeze is force-broken. Owner B freezes, but stays
+    // FROZEN because membership was never resolved.
     const actioned = await service.completeExpiredCompetitions(now, 50);
 
     const blocked = prisma._state.competitions.find((c) => c.id === blockedId)!;
     const healthy = prisma._state.competitions.find((c) => c.id === healthyId)!;
     expect(blocked.status).toBe("ACTIVE"); // rolled back, unchanged
-    expect(healthy.status).toBe("FINALIZED"); // owner B still fully processed this tick
+    expect(healthy.status).toBe("FROZEN");
     expect(actioned).toBeGreaterThanOrEqual(1);
   });
 
@@ -573,7 +577,7 @@ describe("Lifecycle: batch isolation across owners", () => {
     const blocked = prisma._state.competitions.find((c) => c.id === blockedId)!;
     const healthy = prisma._state.competitions.find((c) => c.id === healthyId)!;
     expect(blocked.status).toBe("ACTIVE");
-    expect(healthy.status).toBe("FINALIZED");
+    expect(healthy.status).toBe("FROZEN");
     expect(prisma._state.payouts.filter((p) => p.competitionId === healthyId)).toHaveLength(0);
   });
 });
@@ -673,8 +677,18 @@ describe("Lifecycle: next competition is never blocked by the previous one's fin
     expect(others).toHaveLength(1);
     expect(others[0]?.status).toBe("ACTIVE"); // next competition already running
 
-    // Finalizing the previous competition afterward must succeed normally and must
-    // not touch the next (already-ACTIVE) competition at all.
+    // Unresolved membership must not finalize the previous round, and must not
+    // touch the next (already-ACTIVE) competition.
+    const blocked = await service.attemptAutoFinalize(workspaceId, ownerA, previousId, now);
+    expect(blocked.finalized).toBe(false);
+    const stillActiveEarly = prisma._state.competitions.find((c) => c.id === others[0]?.id)!;
+    expect(stillActiveEarly.status).toBe("ACTIVE");
+
+    const contactIds = prisma._state.eligibility
+      .filter((row) => row.competitionId === previousId)
+      .sort((a, b) => a.leaderboardRank - b.leaderboardRank)
+      .map((row) => row.crmContactId);
+    await resolveTop3(service, previousId, ownerA, contactIds, ["ELIGIBLE", "ELIGIBLE", "ELIGIBLE"]);
     const outcome = await service.attemptAutoFinalize(workspaceId, ownerA, previousId, now);
     expect(outcome.finalized).toBe(true);
     const stillActive = prisma._state.competitions.find((c) => c.id === others[0]?.id)!;
@@ -694,16 +708,113 @@ describe("Lifecycle: restart/recovery", () => {
     await service.ensureCurrentCompetition(workspaceId, ownerA, now); // "before restart": freezes only
     expect(prisma._state.competitions.find((c) => c.id === competitionId)!.status).toBe("FROZEN");
 
-    // "After restart": a fresh service instance, simulating a new process, running
-    // the ordinary periodic sweep — this must still finalize the orphaned FROZEN
-    // competition via the backstop re-scan.
+    // "After restart": a fresh service instance must not publish an unresolved round.
     const restarted = new PrismaLeaderboardService(prisma, { audit: { record: async () => undefined } as never });
     await restarted.completeExpiredCompetitions(now, 50);
-    await restarted.completeExpiredCompetitions(now, 50); // a second tick must be a no-op, not a duplicate
+    await restarted.completeExpiredCompetitions(now, 50);
 
     const finalCompetition = prisma._state.competitions.find((c) => c.id === competitionId)!;
-    expect(finalCompetition.status).toBe("FINALIZED");
+    expect(finalCompetition.status).toBe("FROZEN");
     const payouts = prisma._state.payouts.filter((p) => p.competitionId === competitionId);
-    expect(payouts).toHaveLength(0); // nothing was ever verified — nobody auto-disqualified or auto-approved
+    expect(payouts).toHaveLength(0);
+  });
+});
+
+describe("Lifecycle: freeplay draw is independent of prize finalization", () => {
+  it("finalizes three winners while ranks 4-10 stay pending, then draws once", async () => {
+    const prisma = createLifecyclePrisma();
+    seedEnabledSettings(prisma, ownerA);
+    const { competitionId, contactIds } = seedExpiredActiveCompetition(prisma, ownerA, 6);
+    const published: string[] = [];
+    const service = new PrismaLeaderboardService(prisma, {
+      audit: { record: async () => undefined } as never,
+      projectionHooks: {
+        onCompleted: async (info) => {
+          published.push(info.competitionId);
+        }
+      }
+    });
+    await service.ensureCurrentCompetition(workspaceId, ownerA, now);
+    await Promise.all(
+      contactIds.slice(0, 3).map((crmContactId) =>
+        service.setMembershipEligibility({
+          workspaceId,
+          ownerCoadminUserId: ownerA,
+          competitionId,
+          crmContactId,
+          membershipStatus: "ELIGIBLE",
+          actorUserId: staffActor,
+          idempotencyKey: `prize:${crmContactId}`,
+          verificationSource: "TELEGRAM_BOT_API",
+          now
+        })
+      )
+    );
+
+    const outcome = await service.attemptAutoFinalize(workspaceId, ownerA, competitionId, now);
+    expect(outcome.finalized).toBe(true);
+    expect(prisma._state.payouts.filter((row) => row.competitionId === competitionId)).toHaveLength(3);
+    expect(prisma._state.bonusAwards).toHaveLength(0);
+    expect(prisma._state.competitions.find((row) => row.id === competitionId)?.bonusDrawStatus).toBe("PENDING");
+    expect(published).toEqual([competitionId]);
+
+    const blocked = await service.attemptCompleteFreeplayDraw(workspaceId, ownerA, competitionId, now);
+    expect(blocked.pending).toBe(true);
+    expect(prisma._state.bonusAwards).toHaveLength(0);
+    expect(published).toEqual([competitionId]);
+
+    await service.setMembershipEligibility({
+      workspaceId,
+      ownerCoadminUserId: ownerA,
+      competitionId,
+      crmContactId: contactIds[3]!,
+      membershipStatus: "NOT_ELIGIBLE",
+      actorUserId: staffActor,
+      idempotencyKey: `freeplay:${contactIds[3]}`,
+      verificationSource: "TELEGRAM_BOT_API",
+      now
+    });
+    await service.setMembershipEligibility({
+      workspaceId,
+      ownerCoadminUserId: ownerA,
+      competitionId,
+      crmContactId: contactIds[4]!,
+      membershipStatus: "ELIGIBLE",
+      actorUserId: staffActor,
+      idempotencyKey: `freeplay:${contactIds[4]}`,
+      verificationSource: "TELEGRAM_BOT_API",
+      now
+    });
+    await service.setMembershipEligibility({
+      workspaceId,
+      ownerCoadminUserId: ownerA,
+      competitionId,
+      crmContactId: contactIds[5]!,
+      membershipStatus: "ELIGIBLE",
+      actorUserId: staffActor,
+      idempotencyKey: `freeplay:${contactIds[5]}`,
+      verificationSource: "TELEGRAM_BOT_API",
+      now
+    });
+
+    const restarted = new PrismaLeaderboardService(prisma, {
+      audit: { record: async () => undefined } as never,
+      projectionHooks: {
+        onCompleted: async (info) => {
+          published.push(info.competitionId);
+        }
+      }
+    });
+    const drawn = await restarted.attemptCompleteFreeplayDraw(workspaceId, ownerA, competitionId, now);
+    const repeated = await restarted.attemptCompleteFreeplayDraw(workspaceId, ownerA, competitionId, now);
+    await restarted.completePendingFreeplayDraws(now, 50);
+    expect(drawn.completed).toBe(true);
+    expect(repeated.completed).toBe(false);
+    expect(prisma._state.bonusAwards).toHaveLength(1);
+    expect(prisma._state.freeplayClaims).toHaveLength(1);
+    expect(prisma._state.bonusAwards[0]?.rewardAmountCents).toBe(1500);
+    expect(prisma._state.payouts.filter((row) => row.competitionId === competitionId)).toHaveLength(3);
+    expect(published).toEqual([competitionId]);
+    expect(prisma._state.competitions.find((row) => row.id === competitionId)?.status).toBe("FINALIZED");
   });
 });

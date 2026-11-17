@@ -1684,11 +1684,86 @@ export class LeaderboardApiService {
     if (!competition) {
       throw new AppError(404, "COMPETITION_NOT_FOUND", "Competition was not found.");
     }
-    if (competition.status !== "FROZEN") {
-      throw new AppError(409, "COMPETITION_NOT_FROZEN", "Only FROZEN competitions can verify membership.");
+    if (competition.status === "FROZEN") {
+      // Prize verification.
+    } else if (competition.status === "FINALIZED" && competition.bonusDrawStatus === "PENDING") {
+      // Freeplay verification can continue after the prize result is published.
+    } else {
+      throw new AppError(
+        409,
+        "COMPETITION_NOT_AWAITING_VERIFICATION",
+        "Membership verification can be retried for a FROZEN competition or a FINALIZED competition whose freeplay draw is still pending."
+      );
     }
     const jobId = await this.requireOutbox().enqueueVerifyMembership(workspaceId, user.id, competitionId);
     return { queued: true, jobId, competitionId };
+  }
+
+  public async listPendingFinalizations(user: RequestUser) {
+    this.assertCoadmin(user);
+    const workspaceId = this.requireWorkspaceId(user);
+    const competitions = await this.app.prisma.leaderboardCompetition.findMany({
+      where: {
+        workspaceId,
+        ownerCoadminUserId: user.id,
+        OR: [{ status: "FROZEN" }, { status: "FINALIZED", bonusDrawStatus: "PENDING" }]
+      },
+      orderBy: { endsAt: "asc" },
+      select: {
+        id: true,
+        sequence: true,
+        status: true,
+        endsAt: true,
+        bonusDrawStatus: true
+      }
+    });
+    const rows = [];
+    for (const competition of competitions) {
+      const [pending, verifyJob] = await Promise.all([
+        this.app.prisma.giveawayEligibilityCandidate.findMany({
+          where: {
+            competitionId: competition.id,
+            workspaceId,
+            ownerCoadminUserId: user.id,
+            membershipStatus: "PENDING_REVIEW"
+          },
+          orderBy: { leaderboardRank: "asc" },
+          select: {
+            leaderboardRank: true,
+            verificationErrorCode: true,
+            verificationErrorMessage: true
+          }
+        }),
+        this.app.prisma.leaderboardTelegramOutbox.findFirst({
+          where: {
+            workspaceId,
+            ownerCoadminUserId: user.id,
+            competitionId: competition.id,
+            jobType: "VERIFY_MEMBERSHIP"
+          },
+          orderBy: { updatedAt: "desc" },
+          select: { status: true, attemptCount: true, lastErrorCode: true, lastErrorMessage: true }
+        })
+      ]);
+      const lastCandidateError = pending.find((candidate) => candidate.verificationErrorMessage)?.verificationErrorMessage ?? null;
+      rows.push({
+        competitionId: competition.id,
+        sequence: competition.sequence,
+        status: competition.status,
+        endsAt: competition.endsAt.toISOString(),
+        bonusDrawStatus: competition.bonusDrawStatus,
+        unresolvedRanks: pending.map((candidate) => ({
+          rank: candidate.leaderboardRank,
+          errorCode: candidate.verificationErrorCode,
+          errorMessage: candidate.verificationErrorMessage
+        })),
+        verificationStatus: verifyJob?.status ?? "NOT_QUEUED",
+        attemptCount: verifyJob?.attemptCount ?? 0,
+        retryStatus: verifyJob?.status ?? "NOT_QUEUED",
+        lastVerificationError: verifyJob?.lastErrorMessage ?? lastCandidateError
+      });
+    }
+    return rows;
   }
 
   private requireTelegramIntegration(): LeaderboardTelegramIntegrationService {

@@ -259,7 +259,12 @@ export class LeaderboardTelegramProcessor {
 
       await this.completeOrRequeue(row.id, row.jobType, requeueDepth);
     } catch (error) {
-      await this.handleFailure(row.id, integration.id, attempt, error);
+      await this.handleFailure(row.id, integration.id, attempt, error, {
+        jobType: row.jobType,
+        workspaceId: row.workspaceId,
+        ownerCoadminUserId: row.ownerCoadminUserId,
+        competitionId: row.competitionId
+      });
     }
   }
 
@@ -474,25 +479,25 @@ export class LeaderboardTelegramProcessor {
     if (!competition) {
       throw permanentError("COMPETITION_NOT_FROZEN", "Competition is not frozen for membership verify");
     }
-    if (competition.status === "FINALIZED") {
+    if (competition.status === "FINALIZED" && competition.bonusDrawStatus !== "PENDING") {
       return;
     }
 
-    // This loop IS the bounded verification phase: it makes one pass, resolving as
-    // many candidates as possible (bounded by MAX_VERIFY_CANDIDATES), and stops as
-    // soon as nothing more is needed for the prize Top 3. It deliberately does NOT
-    // keep retrying indefinitely — a competition must never stay FROZEN waiting on
-    // Telegram/API verification.
+    // One check per candidate per job. Unresolved players are retried by the
+    // outbox backoff, not by an immediate tight loop against Telegram.
+    const checkedThisJob = new Set<string>();
     let verified = 0;
+    let latestPlan = planMembershipVerification([]);
     while (verified < MAX_VERIFY_CANDIDATES) {
       const candidates = await this.prisma.giveawayEligibilityCandidate.findMany({
         where: { competitionId: competition.id, ownerCoadminUserId: row.ownerCoadminUserId },
         orderBy: { leaderboardRank: "asc" }
       });
-      const plan = planMembershipVerification(candidates);
-      if (plan.resolved || plan.toVerify.length === 0) break;
+      latestPlan = planMembershipVerification(candidates);
+      const pending = latestPlan.toVerify.filter((candidate) => !checkedThisJob.has(candidate.crmContactId));
+      if (latestPlan.resolved || pending.length === 0) break;
 
-      const batch = plan.toVerify.slice(0, Math.min(VERIFY_CONCURRENCY, MAX_VERIFY_CANDIDATES - verified));
+      const batch = pending.slice(0, Math.min(VERIFY_CONCURRENCY, MAX_VERIFY_CANDIDATES - verified));
       await Promise.all(
         batch.map((candidate) =>
           this.verifyOneCandidate({
@@ -506,30 +511,68 @@ export class LeaderboardTelegramProcessor {
           })
         )
       );
+      for (const candidate of batch) checkedThisJob.add(candidate.crmContactId);
       verified += batch.length;
       if (batch.length === 0) break;
     }
 
+    const candidates = await this.prisma.giveawayEligibilityCandidate.findMany({
+      where: { competitionId: competition.id, ownerCoadminUserId: row.ownerCoadminUserId },
+      orderBy: { leaderboardRank: "asc" }
+    });
+    latestPlan = planMembershipVerification(candidates);
+
     await this.prisma.leaderboardBotIntegration.update({
       where: { id: integration.id },
-      data: { lastMembershipCheckAt: new Date(), lastError: null }
+      data: { lastMembershipCheckAt: new Date() }
     });
 
-    // The bounded verification pass is over — finalize now, unconditionally.
-    // attemptAutoFinalize never blocks on PENDING_REVIEW: anyone still unresolved
-    // (Telegram/API technical failure or simply never reached) is skipped for the
-    // prize/bonus, never silently marked ELIGIBLE, and their PENDING_REVIEW status
-    // is left on the record. This is what guarantees FROZEN can never become a
-    // permanent state merely because membership verification could not resolve
-    // someone in time. The periodic FROZEN re-scan in completeExpiredCompetitions
-    // is a pure backstop for cases where this call never runs at all (crash, no
-    // Telegram integration configured, etc.) — not a dependency of this path.
-    try {
-      await this.domain.attemptAutoFinalize(row.workspaceId, row.ownerCoadminUserId, competition.id, new Date());
-    } catch (error) {
-      this.logger?.error(
-        { err: error, workspaceId: row.workspaceId, ownerCoadminUserId: row.ownerCoadminUserId, competitionId: competition.id },
-        "leaderboard.verify_membership.auto_finalize_failed"
+    const stillOpen = competition.status === "FROZEN" || competition.bonusDrawStatus === "PENDING";
+    if (competition.status === "FROZEN" && latestPlan.prizeResolved) {
+      try {
+        await this.domain.attemptAutoFinalize(row.workspaceId, row.ownerCoadminUserId, competition.id, new Date());
+      } catch (error) {
+        this.logger?.error(
+          { err: error, workspaceId: row.workspaceId, ownerCoadminUserId: row.ownerCoadminUserId, competitionId: competition.id },
+          "leaderboard.verify_membership.auto_finalize_failed"
+        );
+        throw error;
+      }
+    }
+
+    if (
+      stillOpen &&
+      latestPlan.prizeResolved &&
+      latestPlan.freeplayResolved &&
+      typeof this.domain.attemptCompleteFreeplayDraw === "function"
+    ) {
+      await this.domain.attemptCompleteFreeplayDraw(row.workspaceId, row.ownerCoadminUserId, competition.id, new Date());
+    }
+
+    if (!latestPlan.prizeResolved || (stillOpen && !latestPlan.freeplayResolved)) {
+      const unresolved = latestPlan.toVerify.map((candidate) => {
+        const rowMatch = candidates.find((item) => item.crmContactId === candidate.crmContactId);
+        return {
+          crmContactId: candidate.crmContactId,
+          leaderboardRank: candidate.leaderboardRank,
+          verificationErrorCode: rowMatch?.verificationErrorCode ?? null,
+          verificationErrorMessage: rowMatch?.verificationErrorMessage ?? null
+        };
+      });
+      this.logger?.warn(
+        {
+          workspaceId: row.workspaceId,
+          ownerCoadminUserId: row.ownerCoadminUserId,
+          competitionId: competition.id,
+          prizeResolved: latestPlan.prizeResolved,
+          freeplayResolved: latestPlan.freeplayResolved,
+          unresolved
+        },
+        "leaderboard.verify_membership.unresolved"
+      );
+      throw retryableJobError(
+        latestPlan.prizeResolved ? "FREEPLAY_UNRESOLVED" : "MEMBERSHIP_UNRESOLVED",
+        `Membership is still unresolved for competition ${competition.id}`
       );
     }
   }
@@ -615,7 +658,17 @@ export class LeaderboardTelegramProcessor {
         allowTelegramOverwrite: true
       });
 
-      if (error instanceof LeaderboardTelegramApiError && error.permanent) {
+      // Per-user ambiguity (including HTTP 400 "member not found") stays
+      // PENDING_REVIEW. Auth failures and rate limits fail the job so the
+      // outbox backoff can retry without treating the player as ineligible.
+      if (
+        error instanceof LeaderboardTelegramApiError &&
+        (error.httpStatus === 401 ||
+          error.httpStatus === 403 ||
+          error.telegramErrorCode === 401 ||
+          error.telegramErrorCode === 403 ||
+          error.retryAfterSeconds != null)
+      ) {
         throw error;
       }
     }
@@ -1328,7 +1381,13 @@ export class LeaderboardTelegramProcessor {
     outboxId: string,
     integrationId: string,
     attempt: number,
-    error: unknown
+    error: unknown,
+    context?: {
+      readonly jobType: string;
+      readonly workspaceId: string;
+      readonly ownerCoadminUserId: string;
+      readonly competitionId: string | null;
+    }
   ): Promise<void> {
     const apiError = error instanceof LeaderboardTelegramApiError ? error : null;
     const permanent =
@@ -1344,7 +1403,16 @@ export class LeaderboardTelegramProcessor {
         : "Telegram job failed";
 
     if (permanent || attempt >= MAX_ATTEMPTS) {
-      await this.failPermanent(outboxId, integrationId, truncate(code, 120), truncate(message, 500));
+      const verifyExhausted = context?.jobType === "VERIFY_MEMBERSHIP" && !permanent && attempt >= MAX_ATTEMPTS;
+      await this.failPermanent(
+        outboxId,
+        verifyExhausted ? null : integrationId,
+        truncate(code, 120),
+        truncate(message, 500)
+      );
+      if (verifyExhausted && context?.competitionId) {
+        await this.recordVerificationExhausted(context.workspaceId, context.ownerCoadminUserId, context.competitionId, message);
+      }
       return;
     }
 
@@ -1403,6 +1471,45 @@ export class LeaderboardTelegramProcessor {
       "Leaderboard Telegram job failed permanently"
     );
   }
+
+  /** One audit row per competition when membership retries are exhausted. Scheduler ticks do not write it again. */
+  private async recordVerificationExhausted(
+    workspaceId: string,
+    ownerCoadminUserId: string,
+    competitionId: string,
+    message: string
+  ): Promise<void> {
+    const existing = await this.prisma.auditLog.findFirst({
+      where: {
+        workspaceId,
+        action: "leaderboard.verification_exhausted",
+        metadata: { path: ["competitionId"], equals: competitionId }
+      },
+      select: { id: true }
+    });
+    if (existing) return;
+    const pending = await this.prisma.giveawayEligibilityCandidate.findMany({
+      where: { competitionId, ownerCoadminUserId, membershipStatus: "PENDING_REVIEW" },
+      orderBy: { leaderboardRank: "asc" },
+      select: {
+        crmContactId: true,
+        leaderboardRank: true,
+        verificationErrorCode: true,
+        verificationErrorMessage: true
+      }
+    });
+    await this.audit.record({
+      workspaceId,
+      actorId: null,
+      action: "leaderboard.verification_exhausted",
+      metadata: {
+        competitionId,
+        ownerCoadminUserId,
+        message,
+        pending
+      }
+    });
+  }
 }
 
 function isMessageEditRecoverable(error: unknown): boolean {
@@ -1419,6 +1526,13 @@ function isMessageEditRecoverable(error: unknown): boolean {
 function permanentError(code: string, message: string): Error & { permanent: boolean; code: string } {
   const err = new Error(message) as Error & { permanent: boolean; code: string };
   err.permanent = true;
+  err.code = code;
+  return err;
+}
+
+function retryableJobError(code: string, message: string): Error & { permanent: boolean; code: string } {
+  const err = new Error(message) as Error & { permanent: boolean; code: string };
+  err.permanent = false;
   err.code = code;
   return err;
 }

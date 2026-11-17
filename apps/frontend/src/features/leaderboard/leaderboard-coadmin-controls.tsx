@@ -2,6 +2,7 @@
 
 import type {
   LeaderboardAdminCompetitionDto,
+  LeaderboardPendingFinalizationDto,
   LeaderboardCompetitionReviewDto,
   LeaderboardEventRowDto,
   LeaderboardPayoutDto,
@@ -49,6 +50,7 @@ export function LeaderboardCoadminControls() {
   const [settings, setSettings] = useState<LeaderboardSettingsDto | null>(null);
   const [history, setHistory] = useState<readonly LeaderboardPoolRateHistoryDto[]>([]);
   const [competition, setCompetition] = useState<LeaderboardAdminCompetitionDto | null>(null);
+  const [pendingFinalizations, setPendingFinalizations] = useState<readonly LeaderboardPendingFinalizationDto[]>([]);
   const [events, setEvents] = useState<readonly LeaderboardEventRowDto[]>([]);
   const [eventsPage, setEventsPage] = useState(1);
   const [eventsTotal, setEventsTotal] = useState(0);
@@ -82,11 +84,12 @@ export function LeaderboardCoadminControls() {
   const refreshCore = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
-      const [nextSettings, nextHistory, nextCompetition, nextEvents, nextReferrals, nextTelegram] =
+      const [nextSettings, nextHistory, nextCompetition, nextPending, nextEvents, nextReferrals, nextTelegram] =
         await Promise.all([
           api.leaderboardSettings(),
           api.leaderboardPoolRateHistory(),
           api.leaderboardAdminCompetition(),
+          api.leaderboardPendingFinalizations(),
           api.leaderboardEvents({ page: eventsPage, pageSize: EVENTS_PAGE_SIZE }),
           api.leaderboardReferrals(),
           api.leaderboardTelegramIntegration().catch(() => null)
@@ -94,6 +97,7 @@ export function LeaderboardCoadminControls() {
       setSettings(nextSettings);
       setHistory(nextHistory);
       setCompetition(nextCompetition);
+      setPendingFinalizations(nextPending);
       setEvents(nextEvents.rows);
       setEventsTotal(nextEvents.total);
       setReferrals(nextReferrals);
@@ -1153,6 +1157,61 @@ export function LeaderboardCoadminControls() {
             )}
           </section>
 
+          {pendingFinalizations.length > 0 ? (
+            <section className="space-y-4 rounded-lg border border-amber-200 bg-white p-5">
+              <div className="space-y-1">
+                <h3 className="text-sm font-semibold text-foreground">Pending leaderboard finalizations</h3>
+                <p className="text-xs text-amber-900">
+                  These rounds still need membership verification. The current competition above stays active.
+                </p>
+              </div>
+              <ul className="space-y-3">
+                {pendingFinalizations.map((item) => (
+                  <li key={item.competitionId} className="space-y-2 rounded-md border bg-amber-50/40 px-3 py-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="space-y-1 text-xs">
+                        <p className="font-medium text-foreground">
+                          Sequence {item.sequence} · {item.status}
+                          {item.status === "FINALIZED" ? " · freeplay draw still pending" : ""}
+                        </p>
+                        <p className="text-muted-foreground">Ends {formatDateTime(item.endsAt)}</p>
+                        <p className="break-all text-muted-foreground">Competition {item.competitionId}</p>
+                        <p>
+                          Verification {item.verificationStatus} · attempt {item.attemptCount}
+                          {item.attemptCount >= 12 ? " · retries exhausted" : ""}
+                        </p>
+                        <p>
+                          Unresolved ranks:{" "}
+                          {item.unresolvedRanks.length > 0
+                            ? item.unresolvedRanks.map((rank) => `#${rank.rank}`).join(", ")
+                            : "none"}
+                        </p>
+                        {item.lastVerificationError ? (
+                          <p className="text-amber-950">Last verification error: {item.lastVerificationError}</p>
+                        ) : null}
+                      </div>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="h-8 px-3 text-xs"
+                        disabled={pending}
+                        onClick={() =>
+                          void runAction(async () => {
+                            await api.leaderboardVerifyMembership(item.competitionId);
+                            toast.success("Membership verification queued.");
+                            await refreshCore();
+                          })
+                        }
+                      >
+                        Retry membership verification
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
           {/* E. Frozen review / finalize / payouts */}
           {competition && (competition.status === "FROZEN" || competition.status === "FINALIZED") ? (
             <section className="space-y-4 rounded-lg border bg-white p-5">
@@ -1255,7 +1314,7 @@ export function LeaderboardCoadminControls() {
                         {review.prizeWinnersPreview.map((winner) => (
                           <li key={winner.crmContactId} className="rounded-md border px-2 py-1.5">
                             Prize #{winner.prizeRank} · {winner.displayName} · LB #
-                            {winner.leaderboardRank} · {winner.totalPoints} pts
+                            {winner.leaderboardRank}
                           </li>
                         ))}
                       </ul>
@@ -1424,7 +1483,7 @@ function StandingSummary({
         {rows.map((row) => (
           <li key={`${title}-${row.crmContactId}`} className="rounded-md border bg-muted/20 px-2 py-1">
             #{row.rank} {row.displayName}
-            {row.telegramUsername ? ` (@${row.telegramUsername})` : ""} · {row.totalPoints} pts
+            {row.telegramUsername ? ` (@${row.telegramUsername})` : ""}
           </li>
         ))}
       </ul>
