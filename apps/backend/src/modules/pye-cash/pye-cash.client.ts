@@ -33,17 +33,18 @@ export class HttpPyeCashClient implements PyeCashProvider {
         }),
         signal: AbortSignal.timeout(this.options.timeoutMs)
       });
+      const meta = { httpStatus: response.status, contentType: safeContentType(response.headers.get("content-type")) };
       const raw = await response.text();
       let body: unknown;
       try {
         body = JSON.parse(raw) as unknown;
       } catch {
         return response.ok
-          ? { kind: "uncertain", category: "MALFORMED_RESPONSE" }
-          : this.classifyStatus(response.status);
+          ? { kind: "uncertain", category: "INVALID_JSON", ...meta }
+          : { ...this.classifyStatus(response.status), ...meta };
       }
-      if (response.ok) return { kind: "created", body };
-      return this.classifyStatus(response.status);
+      if (response.ok) return { kind: "created", body, ...meta };
+      return { ...this.classifyStatus(response.status), ...meta };
     } catch (error) {
       const name = error instanceof Error ? error.name : "";
       if (name === "TimeoutError" || name === "AbortError") {
@@ -53,7 +54,7 @@ export class HttpPyeCashClient implements PyeCashProvider {
     }
   }
 
-  private classifyStatus(status: number): ProviderAttempt {
+  private classifyStatus(status: number): { kind: "rejected" | "uncertain"; category: string } {
     if (status === 408 || status === 429 || status >= 500) {
       return { kind: "uncertain", category: `HTTP_${status}` };
     }
@@ -62,6 +63,12 @@ export class HttpPyeCashClient implements PyeCashProvider {
     }
     return { kind: "uncertain", category: `HTTP_${status}` };
   }
+}
+
+function safeContentType(value: string | null): string | null {
+  if (!value) return null;
+  const mime = value.split(";")[0]?.trim().toLowerCase() ?? "";
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mime) ? mime : null;
 }
 
 /** Used while the feature flag is off so a route bug cannot reach the network. */

@@ -42,22 +42,23 @@ describe("Pye-Cash HTTP client", () => {
     });
 
     const rejected = vi.fn(async () => new Response("no", { status: 400 }));
-    await expect(client(rejected as unknown as typeof fetch).createInvoice({ amountCents: 500, merchant: "sg" })).resolves.toEqual({
+    await expect(client(rejected as unknown as typeof fetch).createInvoice({ amountCents: 500, merchant: "sg" })).resolves.toMatchObject({
       kind: "rejected",
-      category: "HTTP_400"
+      category: "HTTP_400",
+      httpStatus: 400
     });
 
     const failed = vi.fn(async () => new Response("down", { status: 503 }));
-    await expect(client(failed as unknown as typeof fetch).createInvoice({ amountCents: 500, merchant: "sg" })).resolves.toEqual({
+    await expect(client(failed as unknown as typeof fetch).createInvoice({ amountCents: 500, merchant: "sg" })).resolves.toMatchObject({
       kind: "uncertain",
-      category: "HTTP_503"
+      category: "HTTP_503",
+      httpStatus: 503
     });
 
     const malformed = vi.fn(async () => new Response("not-json", { status: 200 }));
-    await expect(client(malformed as unknown as typeof fetch).createInvoice({ amountCents: 500, merchant: "sg" })).resolves.toEqual({
-      kind: "uncertain",
-      category: "MALFORMED_RESPONSE"
-    });
+    const invalidJson = await client(malformed as unknown as typeof fetch).createInvoice({ amountCents: 500, merchant: "sg" });
+    expect(invalidJson).toMatchObject({ kind: "uncertain", category: "INVALID_JSON", httpStatus: 200 });
+    expect(JSON.stringify(invalidJson)).not.toContain("not-json");
 
     const timedOut = vi.fn(async () => {
       const error = new Error("timed out");

@@ -104,6 +104,7 @@ export class PyeCashService {
     }
 
     if (attempt.kind === "uncertain") {
+      this.logProvider(reserved.record.id, attempt.category, attempt.httpStatus ?? null, attempt.contentType ?? null);
       const unknown = await this.settle(reserved.record.id, {
         creationState: "UNKNOWN",
         errorCategory: attempt.category
@@ -113,9 +114,10 @@ export class PyeCashService {
 
     const validated = validateProviderInvoice(attempt.body, input.amountCents);
     if (!validated.ok) {
+      this.logProvider(reserved.record.id, validated.reason, attempt.httpStatus ?? null, attempt.contentType ?? null);
       const unknown = await this.settle(reserved.record.id, {
         creationState: "UNKNOWN",
-        errorCategory: "MALFORMED_RESPONSE",
+        errorCategory: validated.reason,
         ...(validated.providerInvoiceId ? { providerInvoiceId: validated.providerInvoiceId } : {})
       });
       return { statusCode: 202, invoice: this.publish(unknown) };
@@ -381,12 +383,26 @@ export class PyeCashService {
   private publish(record: StoredPyeCashInvoice): PublicPyeCashInvoice {
     this.deps.log?.({
       event: "pye_cash.invoice",
+      correlationId: record.id,
       invoiceId: record.id,
       creationState: record.creationState,
-      errorCategory: record.errorCategory,
-      providerInvoiceId: record.providerInvoiceId
+      reason: record.errorCategory,
+      httpStatus: null,
+      contentType: null
     });
     return toPublicInvoice(record);
+  }
+
+  private logProvider(correlationId: string, reason: string, httpStatus: number | null, contentType: string | null): void {
+    this.deps.log?.({
+      event: "pye_cash.provider_response",
+      correlationId,
+      invoiceId: correlationId,
+      creationState: null,
+      reason,
+      httpStatus,
+      contentType
+    });
   }
 
   private clock(): Date {

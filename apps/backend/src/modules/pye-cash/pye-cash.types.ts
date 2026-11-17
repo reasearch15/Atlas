@@ -73,10 +73,15 @@ export interface PublicPyeCashInvoice {
   readonly updatedAt: string;
 }
 
+export interface ProviderResponseMeta {
+  readonly httpStatus?: number | null;
+  readonly contentType?: string | null;
+}
+
 export type ProviderAttempt =
-  | { readonly kind: "created"; readonly body: unknown }
-  | { readonly kind: "rejected"; readonly category: string }
-  | { readonly kind: "uncertain"; readonly category: string };
+  | ({ readonly kind: "created"; readonly body: unknown } & ProviderResponseMeta)
+  | ({ readonly kind: "rejected"; readonly category: string } & ProviderResponseMeta)
+  | ({ readonly kind: "uncertain"; readonly category: string } & ProviderResponseMeta);
 
 export interface PyeCashProvider {
   createInvoice(input: { readonly amountCents: number; readonly merchant: string }): Promise<ProviderAttempt>;
@@ -167,11 +172,13 @@ export interface PyeCashQrDelivery {
 }
 
 export interface PyeCashLogEvent {
-  readonly event: "pye_cash.invoice";
+  readonly event: "pye_cash.invoice" | "pye_cash.provider_response";
+  readonly correlationId: string;
   readonly invoiceId: string;
-  readonly creationState: PyeCashCreationState;
-  readonly errorCategory: string | null;
-  readonly providerInvoiceId: string | null;
+  readonly creationState: PyeCashCreationState | null;
+  readonly reason: string | null;
+  readonly httpStatus: number | null;
+  readonly contentType: string | null;
 }
 
 export function toPublicInvoice(record: StoredPyeCashInvoice): PublicPyeCashInvoice {

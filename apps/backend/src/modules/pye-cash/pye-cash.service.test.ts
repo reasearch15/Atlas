@@ -396,9 +396,52 @@ describe("Pye-Cash invoice service", () => {
     const broken = harness({ provider: malformed });
     const result = await broken.service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "bad-body" });
     expect(result.invoice.creationState).toBe("UNKNOWN");
-    expect(result.invoice.errorCategory).toBe("MALFORMED_RESPONSE");
+    expect(result.invoice.errorCategory).toBe("INVALID_BOLT11");
+    expect(result.invoice.deliveryState).toBe("NOT_SENT");
     expect(result.invoice.providerInvoiceId).toBe("partial01");
     expect(result.statusCode).not.toBe(201);
+    const diagnostic = JSON.stringify(broken.logs);
+    expect(diagnostic).toContain("INVALID_BOLT11");
+    expect(diagnostic).not.toContain("partial01");
+    expect(diagnostic).not.toContain("lnbc");
+    await broken.service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "bad-body" });
+    expect(malformed.calls).toBe(1);
+  });
+
+  it("stores a valid $1 provider response once and does not send it when creation is unknown", async () => {
+    const bolt = "lnbc100n1qqqqqqqqqqqqqqqqqqqqqq";
+    const provider = new FakeProvider(async () => ({
+      kind: "created" as const,
+      httpStatus: 201,
+      contentType: "application/json",
+      body: {
+        id: "provider01",
+        lightning_invoice: bolt,
+        expires_at: "2026-11-18T12:00:00.000Z",
+        status: "pending",
+        amount: 1,
+        currency: " USD ",
+        target_amount: null
+      }
+    }));
+    const { service, logs } = harness({ provider });
+    const created = await service.create(staff, CHAT, { amountCents: 100, idempotencyKey: "dollar-1" });
+    expect(created.statusCode).toBe(201);
+    expect(created.invoice.amountCents).toBe(100);
+    expect(created.invoice.creationState).toBe("READY");
+    expect(created.invoice.expiresAt).toBe("2026-11-18T12:00:00.000Z");
+    expect(created.invoice.deliveryState).toBe("NOT_SENT");
+    expect(JSON.stringify(logs)).not.toContain(bolt);
+    expect(JSON.stringify(logs)).not.toContain("provider01");
+    const unknownProvider = new FakeProvider(async () => ({ kind: "uncertain" as const, category: "INVALID_JSON", httpStatus: 201, contentType: "text/plain" }));
+    const unknown = harness({ provider: unknownProvider });
+    const failed = await unknown.service.create(staff, CHAT, { amountCents: 100, idempotencyKey: "dollar-unknown" });
+    expect(failed.invoice.creationState).toBe("UNKNOWN");
+    expect(failed.invoice.deliveryState).toBe("NOT_SENT");
+    await unknown.service.create(staff, CHAT, { amountCents: 100, idempotencyKey: "dollar-unknown" });
+    expect(unknownProvider.calls).toBe(1);
+    expect(JSON.stringify(unknown.logs)).toContain("\"httpStatus\":201");
+    expect(JSON.stringify(unknown.logs)).not.toContain("text body");
   });
 
   it("marks a stale CREATING row UNKNOWN without a new provider POST", async () => {
@@ -462,8 +505,10 @@ describe("Pye-Cash invoice service", () => {
     const result = await service.create(staff, CHAT, { amountCents: 500, idempotencyKey: "log-check" });
     const listed = await service.list(staff, CHAT, 20);
     const rendered = JSON.stringify({ logs, result, listed });
+    const logged = JSON.stringify(logs);
     expect(rendered).not.toContain(BOLT);
     expect(rendered).not.toContain("lnbc");
+    expect(logged).not.toContain("provider01");
     expect(listed[0]?.creationState).toBe("READY");
   });
 
