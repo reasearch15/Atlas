@@ -7,6 +7,8 @@ import {
   createSendLock,
   cashAppAccessNotice,
   DEFAULT_CASH_APP_AMOUNT,
+  cashAppAttemptFeedback,
+  CASH_APP_RESULT_VISIBLE_MS,
   formatCashAppHistory,
   parseCashAppAmount,
   sendCashAppQr,
@@ -240,5 +242,39 @@ describe("Cash App QR CRM controls", () => {
     expect(logic).not.toContain("recordDeposit");
     expect(section).toContain("Cash App QR");
     expect(section).toContain("Send QR");
+    expect(section).toContain("Payment history");
+    expect(section).toContain("clearTimeout");
+    expect(section).toContain("CASH_APP_RESULT_VISIBLE_MS");
+    expect(section).not.toContain("deleteInvoice");
+  });
+
+  it("shows a payment result for five seconds and does not describe a sent invoice as not queued", () => {
+    expect(CASH_APP_RESULT_VISIBLE_MS).toBe(5000);
+    expect(cashAppAttemptFeedback({ status: "queued", invoice: invoice({ deliveryState: "SENT" }) })).toMatchObject({
+      message: "QR sent.",
+      temporary: true,
+      invoice: { deliveryState: "SENT" }
+    });
+    expect(cashAppAttemptFeedback({ status: "queued", invoice: invoice({ deliveryState: "QUEUED" }) })?.message).toBe("QR queued for Telegram.");
+    expect(cashAppAttemptFeedback({ status: "unknown", invoice: invoice({ creationState: "UNKNOWN", deliveryState: "NOT_SENT" }) })).toMatchObject({
+      temporary: true,
+      message: "Invoice outcome is unknown. It was not retried."
+    });
+    expect(cashAppAttemptFeedback({
+      status: "failed",
+      invoiceId: "invoice-1",
+      message: "queue down",
+      invoice: invoice({ creationState: "FAILED", deliveryState: "FAILED", errorCategory: "DELIVERY_FAILED" })
+    })).toMatchObject({
+      temporary: true,
+      message: "QR was not queued. Send again to reuse this invoice."
+    });
+    expect(cashAppAttemptFeedback({
+      status: "failed",
+      invoiceId: "invoice-1",
+      message: "already delivered",
+      invoice: invoice({ deliveryState: "SENT" })
+    })?.message).toBe("QR sent.");
+    expect(cashAppAttemptFeedback({ status: "invalid", message: "Enter an amount." })?.temporary).toBe(false);
   });
 });

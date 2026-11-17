@@ -9,7 +9,9 @@ import {
   amountAfterBlur,
   canShowCashAppQr,
   cashAppAccessNotice,
+  cashAppAttemptFeedback,
   cashAppQrLayout,
+  CASH_APP_RESULT_VISIBLE_MS,
   createSendLock,
   DEFAULT_CASH_APP_AMOUNT,
   formatCashAppHistory,
@@ -30,7 +32,9 @@ export function CashAppQrSection({ chatId, embedded = false }: { readonly chatId
   const [amount, setAmount] = useState(DEFAULT_CASH_APP_AMOUNT);
   const [canSend, setCanSend] = useState(false);
   const [maxAmountCents, setMaxAmountCents] = useState(500);
-  const [history, setHistory] = useState<readonly CashAppInvoiceView[]>([]);
+  const [attempt, setAttempt] = useState<CashAppInvoiceView | null>(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archive, setArchive] = useState<readonly CashAppInvoiceView[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [tone, setTone] = useState<"neutral" | "ok" | "bad">("neutral");
@@ -38,7 +42,31 @@ export function CashAppQrSection({ chatId, embedded = false }: { readonly chatId
   const [unknownHold, setUnknownHold] = useState(false);
   const lock = useRef(createSendLock());
   const chatRef = useRef(chatId);
+  const hideTimer = useRef<number | null>(null);
+  const hideToken = useRef(0);
   chatRef.current = chatId;
+
+  function clearResultTimer(): void {
+    if (hideTimer.current !== null) {
+      window.clearTimeout(hideTimer.current);
+      hideTimer.current = null;
+    }
+  }
+
+  function showTemporaryResult(invoice: CashAppInvoiceView | null, message: string, nextTone: "neutral" | "ok" | "bad"): void {
+    clearResultTimer();
+    const token = hideToken.current + 1;
+    hideToken.current = token;
+    setAttempt(invoice);
+    setNotice(message);
+    setTone(nextTone);
+    hideTimer.current = window.setTimeout(() => {
+      if (hideToken.current !== token) return;
+      setAttempt(null);
+      setNotice((current) => (current === message ? null : current));
+      hideTimer.current = null;
+    }, CASH_APP_RESULT_VISIBLE_MS);
+  }
 
   useEffect(() => {
     setAmount(DEFAULT_CASH_APP_AMOUNT);
@@ -46,7 +74,11 @@ export function CashAppQrSection({ chatId, embedded = false }: { readonly chatId
     setUnknownHold(false);
     setNotice(null);
     setTone("neutral");
-    setHistory([]);
+    setAttempt(null);
+    setArchiveOpen(false);
+    setArchive([]);
+    clearResultTimer();
+    hideToken.current += 1;
     let active = true;
     void api.pyeCashCapability(chatId).then(
       (capability) => {
@@ -65,20 +97,30 @@ export function CashAppQrSection({ chatId, embedded = false }: { readonly chatId
         setNotice("Live payments are not enabled.");
       }
     );
-    void api.pyeCashInvoices(chatId).then(
-      (page) => {
-        if (active) setHistory(page.invoices);
-      },
-      () => {
-        if (active) setHistory([]);
-      }
-    );
     return () => {
       active = false;
+      clearResultTimer();
+      hideToken.current += 1;
     };
   }, [chatId]);
 
   if (!visible) return null;
+
+  async function toggleArchive(): Promise<void> {
+    if (archiveOpen) {
+      setArchiveOpen(false);
+      return;
+    }
+    const requestChatId = chatRef.current;
+    setArchiveOpen(true);
+    try {
+      const page = await api.pyeCashInvoices(requestChatId);
+      if (chatRef.current !== requestChatId) return;
+      setArchive(page.invoices);
+    } catch {
+      if (chatRef.current === requestChatId) setArchive([]);
+    }
+  }
 
   const parsed = parseCashAppAmount(amount, maxAmountCents);
   const amountInvalid = "error" in parsed;
@@ -88,6 +130,9 @@ export function CashAppQrSection({ chatId, embedded = false }: { readonly chatId
     const idempotencyKey = recoverInvoiceId ? `recover:${recoverInvoiceId}` : crypto.randomUUID();
     const requestChatId = chatRef.current;
     setBusy(true);
+    clearResultTimer();
+    hideToken.current += 1;
+    setAttempt(null);
     setTone("neutral");
     setNotice("Sending QR…");
     const result = await sendCashAppQr({
@@ -108,27 +153,20 @@ export function CashAppQrSection({ chatId, embedded = false }: { readonly chatId
       setBusy(false);
       return;
     }
-    if (result.status === "queued") {
+    const feedback = cashAppAttemptFeedback(result);
+    if (result.status === "queued" || (result.status === "failed" && result.invoice?.deliveryState === "SENT")) {
       setRecoverInvoiceId(null);
-      setNotice(result.invoice.deliveryState === "SENT" ? "QR sent." : "QR queued for Telegram.");
-      setTone("ok");
-      setHistory((current) => [result.invoice, ...current.filter((item) => item.id !== result.invoice.id)].slice(0, 8));
     } else if (result.status === "unknown") {
       setRecoverInvoiceId(null);
       setUnknownHold(true);
-      setNotice("Invoice outcome is unknown. It was not retried.");
-      setTone("bad");
-      setHistory((current) => [result.invoice, ...current.filter((item) => item.id !== result.invoice.id)].slice(0, 8));
     } else if (result.status === "failed") {
       setRecoverInvoiceId(result.invoiceId);
-      setNotice(result.invoiceId ? "QR was not queued. Send again to reuse this invoice." : result.message);
-      setTone("bad");
-    } else if (result.status === "invalid") {
-      setNotice(result.message);
-      setTone("bad");
-    } else if (result.status === "disabled") {
-      setNotice("Live payments are not enabled.");
-      setTone("neutral");
+    }
+    if (feedback?.temporary) {
+      showTemporaryResult(feedback.invoice, feedback.message, feedback.tone);
+    } else if (feedback) {
+      setNotice(feedback.message);
+      setTone(feedback.tone);
     }
     lock.current.end();
     setBusy(false);
@@ -160,22 +198,32 @@ export function CashAppQrSection({ chatId, embedded = false }: { readonly chatId
           {notice}
         </p>
       ) : null}
-      {history.length > 0 ? (
-        <ul className="mt-2 space-y-1">
-          {history.slice(0, 5).map((invoice) => {
-            const line = formatCashAppHistory(invoice);
-            return (
-              <li key={invoice.id} className="rounded-md border px-2 py-1 text-[11px] leading-4">
-                <span className="font-medium">{line.amount}</span>
-                <span className="text-muted-foreground"> · {line.creationState} · {line.deliveryState}</span>
-                <span className="block text-muted-foreground">{line.expiration}</span>
-                {line.error ? <span className="block text-red-700">{line.error}</span> : null}
-                {line.paid ? <span className="block text-emerald-700">Paid</span> : null}
-              </li>
-            );
-          })}
+      {attempt ? <ul className="mt-2 space-y-1">{renderInvoice(attempt)}</ul> : null}
+      <button
+        type="button"
+        className="mt-2 text-[11px] text-muted-foreground underline"
+        onClick={() => void toggleArchive()}
+      >
+        Payment history
+      </button>
+      {archiveOpen ? (
+        <ul className="mt-1 space-y-1">
+          {archive.length > 0 ? archive.map((invoice) => renderInvoice(invoice)) : <li className="text-[11px] text-muted-foreground">No invoices stored for this chat.</li>}
         </ul>
       ) : null}
     </section>
+  );
+}
+
+function renderInvoice(invoice: CashAppInvoiceView) {
+  const line = formatCashAppHistory(invoice);
+  return (
+    <li key={invoice.id} className="rounded-md border px-2 py-1 text-[11px] leading-4">
+      <span className="font-medium">{line.amount}</span>
+      <span className="text-muted-foreground"> · {line.creationState} · {line.deliveryState}</span>
+      <span className="block text-muted-foreground">{line.expiration}</span>
+      {line.error ? <span className="block text-red-700">{line.error}</span> : null}
+      {line.paid ? <span className="block text-emerald-700">Paid</span> : null}
+    </li>
   );
 }

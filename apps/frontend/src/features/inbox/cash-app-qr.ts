@@ -1,5 +1,6 @@
 export const DEFAULT_CASH_APP_AMOUNT = "5.00";
 export const DEFAULT_CASH_APP_CENTS = 500;
+export const CASH_APP_RESULT_VISIBLE_MS = 5000;
 
 export interface CashAppInvoiceView {
   readonly id: string;
@@ -101,7 +102,54 @@ export type CashAppSendResult =
   | { readonly status: "stale" }
   | { readonly status: "unknown"; readonly invoice: CashAppInvoiceView }
   | { readonly status: "queued"; readonly invoice: CashAppInvoiceView }
-  | { readonly status: "failed"; readonly invoiceId: string | null; readonly message: string };
+  | {
+      readonly status: "failed";
+      readonly invoiceId: string | null;
+      readonly message: string;
+      readonly invoice?: CashAppInvoiceView;
+    };
+
+export interface CashAppAttemptFeedback {
+  readonly tone: "neutral" | "ok" | "bad";
+  readonly message: string;
+  readonly invoice: CashAppInvoiceView | null;
+  readonly temporary: boolean;
+}
+
+/** Maps one send result to the temporary CRM message. It does not create or resend an invoice. */
+export function cashAppAttemptFeedback(result: CashAppSendResult): CashAppAttemptFeedback | null {
+  if (result.status === "queued") {
+    const sent = result.invoice.deliveryState === "SENT";
+    return {
+      tone: "ok",
+      message: sent ? "QR sent." : "QR queued for Telegram.",
+      invoice: result.invoice,
+      temporary: true
+    };
+  }
+  if (result.status === "unknown") {
+    return {
+      tone: "bad",
+      message: "Invoice outcome is unknown. It was not retried.",
+      invoice: result.invoice,
+      temporary: true
+    };
+  }
+  if (result.status === "failed") {
+    if (result.invoice?.deliveryState === "SENT") {
+      return { tone: "ok", message: "QR sent.", invoice: result.invoice, temporary: true };
+    }
+    return {
+      tone: "bad",
+      message: result.invoiceId ? "QR was not queued. Send again to reuse this invoice." : result.message,
+      invoice: result.invoice ?? null,
+      temporary: true
+    };
+  }
+  if (result.status === "invalid") return { tone: "bad", message: result.message, invoice: null, temporary: false };
+  if (result.status === "disabled") return { tone: "neutral", message: "Live payments are not enabled.", invoice: null, temporary: false };
+  return null;
+}
 
 export function createSendLock(): { tryBegin(): boolean; end(): void } {
   let busy = false;
@@ -147,7 +195,7 @@ export async function sendCashAppQr(input: {
         return { status: "unknown", invoice: created.invoice };
       }
       if (created.invoice.creationState !== "READY") {
-        return { status: "failed", invoiceId, message: "The invoice was not confirmed." };
+        return { status: "failed", invoiceId, message: "The invoice was not confirmed.", invoice: created.invoice };
       }
     }
     const queued = await input.gateway.queueQr(input.chatId, invoiceId);
