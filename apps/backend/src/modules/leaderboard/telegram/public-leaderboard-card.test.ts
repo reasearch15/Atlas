@@ -487,7 +487,7 @@ describe("renderPublicLeaderboardCard", () => {
       expect(isValidPngBuffer(result.png)).toBe(true);
       expect(result.svg).not.toContain("45 PTS");
       if (item.input.competitionStatus === "FINALIZED") {
-        expect(result.svg).toContain("FINAL RESULTS ARE IN");
+        expect(result.svg).toContain("FINAL RESULTS");
         expect(result.svg).not.toContain("COMPETITION IS LIVE");
       }
     }

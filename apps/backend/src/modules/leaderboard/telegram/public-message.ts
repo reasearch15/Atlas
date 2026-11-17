@@ -144,7 +144,7 @@ export function formatCurrentStateRankAnnouncement(input: CurrentStateRankAnnoun
   const headline = provenMove
     ? `🔥 ${name} moved #${input.fromRank} → #${rank}!`
     : `🔥 ${name} is now #${rank}!`;
-  return headline;
+  return `${headline}\n🏆 Keep climbing the leaderboard!`;
 }
 
 /**

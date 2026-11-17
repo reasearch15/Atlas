@@ -239,7 +239,7 @@ describe("formatCurrentStateRankAnnouncement", () => {
         totalPoints: 110,
         pointsBehindNext: 15
       })
-    ).toBe("🔥 John Mccloud is now #10!");
+    ).toBe("🔥 John Mccloud is now #10!\n🏆 Keep climbing the leaderboard!");
   });
 
   it("includes proven movement only when fromRank is worse than current rank", () => {
@@ -251,7 +251,7 @@ describe("formatCurrentStateRankAnnouncement", () => {
         pointsBehindNext: 12,
         fromRank: 10
       })
-    ).toBe("🔥 John Mccloud moved #10 → #8!");
+    ).toBe("🔥 John Mccloud moved #10 → #8!\n🏆 Keep climbing the leaderboard!");
   });
 
   it("does not treat a stale equal/worse fromRank as movement", () => {
@@ -263,7 +263,7 @@ describe("formatCurrentStateRankAnnouncement", () => {
         pointsBehindNext: 20,
         fromRank: 7
       })
-    ).toBe("🔥 John Mccloud is now #7!");
+    ).toBe("🔥 John Mccloud is now #7!\n🏆 Keep climbing the leaderboard!");
   });
 
   it("formats current #1 without a points-behind line", () => {
